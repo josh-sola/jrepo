@@ -148,6 +148,8 @@ enum EnvCommand {
     Refresh { selector: String },
 }
 
+const PROVISION_WAIT_SECS: u64 = 600;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = store::root_dir();
@@ -191,7 +193,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(&path, claude, &args)
+            open_if_requested(root, &path, claude, &args)
         }
         Command::Adopt {
             repo,
@@ -210,7 +212,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(&path, claude, &args)
+            open_if_requested(root, &path, claude, &args)
         }
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
@@ -234,14 +236,29 @@ fn run(root: &Path, command: Command) -> Result<()> {
     }
 }
 
-/// Provisioning is still running in the background at this point; the
-/// session starts anyway so code can be read immediately, and `wt wait`
-/// inside it blocks when a build actually has to succeed.
-fn open_if_requested(tree_path: &Path, claude: bool, args: &[String]) -> Result<()> {
+/// Blocks until provisioning finishes before handing the tree over: a
+/// session that opens mid-install hits a half-built tree, and nobody
+/// remembers to wait by hand. A failed install refuses to open at all.
+fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String]) -> Result<()> {
     if !claude {
         return Ok(());
     }
-    eprintln!("opening a claude session in {}", tree_path.display());
+    let id = store::load(root)?
+        .trees
+        .iter()
+        .find(|t| t.path == tree_path)
+        .map(|t| t.id)
+        .with_context(|| format!("{} is not a registered tree", tree_path.display()))?;
+
+    eprintln!("waiting for provisioning before opening a session...");
+    wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
+        format!(
+            "not opening a session; the tree is still at {} — inspect it with `wt status`, then              `wt claude` into it once you know why",
+            tree_path.display()
+        )
+    })?;
+
+    eprintln!("provisioning finished; opening a claude session");
     claude::exec_at(tree_path, args)
 }
 
@@ -502,6 +519,14 @@ fn cmd_wait(root: &Path, selector: Option<String>, timeout_secs: u64) -> Result<
         }
     };
 
+    let path = wait_for_ready(root, id, timeout_secs)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// Progress goes to stderr so a caller reading stdout for the tree path is
+/// unaffected. Returns the tree's path once it is ready.
+fn wait_for_ready(root: &Path, id: Uuid, timeout_secs: u64) -> Result<PathBuf> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut last_step: Option<String> = None;
     loop {
@@ -513,10 +538,7 @@ fn cmd_wait(root: &Path, selector: Option<String>, timeout_secs: u64) -> Result<
             .with_context(|| format!("tree {id} is no longer registered"))?;
 
         match tree.state {
-            store::TreeState::Ready => {
-                println!("{}", tree.path.display());
-                return Ok(());
-            }
+            store::TreeState::Ready => return Ok(tree.path.clone()),
             store::TreeState::Failed => {
                 let log = tree
                     .log_path
