@@ -43,16 +43,26 @@ rest still works — check `install.sh`'s output against your own
 ## Install
 
 ```sh
+git clone git@github.com:Sola-Solutions/claude-planter.git
+cd claude-planter
 ./install.sh
 planter                      # start the overlay
 ./login-item.sh install      # and/or start it at every login
 ```
 
+Keep the clone: `install.sh` builds from it, and it is where you upgrade from.
+
 `install.sh` builds `~/.local/bin/planter`, installs a hook at
 `~/.claude/hooks/planter-state`, and wires twelve hooks into
-`~/.claude/settings.json`, printing exactly which,, backing it up first. It needs `swiftc` (the Xcode
-command line tools) and `jq`. Re-running replaces its own hook entries rather
-than stacking them.
+`~/.claude/settings.json` — printing exactly which, and backing the file up
+first. It needs `swiftc` (the Xcode command line tools) and `jq`. Re-running
+replaces its own hook entries rather than stacking them.
+
+To upgrade:
+
+```sh
+git pull && ./install.sh && ./login-item.sh install
+```
 
 Claude Code re-reads its settings, so sessions that are already open get a plant
 on their next turn. Restart any session whose plant never shows up.
