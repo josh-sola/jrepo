@@ -42,7 +42,7 @@ planter                      # start the overlay
 ```
 
 `install.sh` builds `~/.local/bin/planter`, installs a hook at
-`~/.claude/hooks/planter-state`, and wires ten hooks into
+`~/.claude/hooks/planter-state`, and wires eleven hooks into
 `~/.claude/settings.json`, printing exactly which,, backing it up first. It needs `swiftc` (the Xcode
 command line tools) and `jq`. Re-running replaces its own hook entries rather
 than stacking them.
@@ -59,7 +59,9 @@ rm -rf ~/.claude/planter     # state too, if you want it gone
 
 ## Using it
 
-- **Drag** a plant to move the row. The position is remembered.
+- **Drag** a plant to move the row. The position is remembered, pinned by the
+  row's **right edge**, so a new session widens it leftwards and an overlay parked
+  at the right-hand end of a screen stays where you put it.
 - **⌘-drag** a plant to reorder it. Plants swap as the cursor crosses each
   neighbour, and the order is remembered per session.
 - **Right-click** for labels, **Reset order**, and **Quit**. The label choice is
@@ -120,6 +122,7 @@ overlay watches that directory.
 | Hook | Effect on the plant |
 | --- | --- |
 | `SessionStart` | appears, wilted |
+| `CwdChanged` | takes the new directory's name |
 | `UserPromptSubmit` | blooms |
 | `PostToolUse` / `PostToolUseFailure` | keeps blooming — this is what clears a `!` after you answer |
 | `PermissionRequest` | shows `!` — a dialog is on screen |
@@ -139,10 +142,12 @@ flowering until the last one finishes.
 process. The overlay drops any plant whose process is gone, so a session killed
 without a `SessionEnd` never leaves one behind.
 
-**The label is fixed when the plant is created.** A session's reported working
-directory follows its *shell*, which wanders into subdirectories and temporary
-agent worktrees as work goes on, so a label that tracked it would rename itself
-mid-session.
+**Labels come from `CwdChanged`, not from every event.** The `cwd` on an ordinary
+hook payload follows the session's *shell*, which wanders into subdirectories and
+temporary agent worktrees as work goes on, so a label reading it would rename
+itself constantly. `CwdChanged` fires only on a real directory change, and a
+subagent's own changes carry the subagent's session id, so they cannot rename the
+session you are watching.
 
 **Wilting advances on its own.** The overlay works the stage out from a timestamp
 each time it re-reads the directory, so a plant keeps wilting without any hook

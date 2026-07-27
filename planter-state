@@ -10,6 +10,7 @@
 #                                 the failure variant matters because a denied or
 #                                 failing call fires only that one)
 #   stop         Stop             Claude's turn ended
+#   cwd          CwdChanged       the session changed directory: relabel
 #   permission   PermissionRequest a permission dialog is on screen
 #   notify       Notification     a permission prompt, or an idle nudge
 #   agent-start  SubagentStart    a subagent began
@@ -78,20 +79,24 @@ else
     # unknown session means the session predates these hooks; leave it alone
     # rather than invent a plant for it.
     case "$event" in
-        tool | agent-start | agent-stop) exit 0 ;;
+        tool | cwd | agent-start | agent-stop) exit 0 ;;
     esac
 fi
 
 # Nothing to record: the plant already looks the way this event would leave it.
 [[ "$event" == "tool" && "$state" == "working" ]] && exit 0
 
-# The label is worked out once, when the plant is created, and never changed after.
-# The payload's cwd follows the session's *shell*, which wanders into agent
-# worktrees and subdirectories as work goes on, so a label that tracked it would
-# rename itself mid-session. CLAUDE_PROJECT_DIR, where Claude Code provides it,
-# is the session's root and does not wander.
-if [[ -z "${label:-}" ]]; then
-    session_dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+# The label is worked out when the plant is created, and again whenever the session
+# actually changes directory. CwdChanged is the signal for that: reading cwd off
+# every event instead would rename the plant constantly, because that field follows
+# the shell rather than the session. A subagent's directory changes carry the
+# subagent's own session id, so they cannot rename the session you are watching.
+if [[ -z "${label:-}" || "$event" == "cwd" ]]; then
+    if [[ "$event" == "cwd" ]]; then
+        session_dir="${cwd:-$PWD}"
+    else
+        session_dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+    fi
     session_dir="${session_dir%/}"
     label=""
 
@@ -140,6 +145,9 @@ case "$event" in
     # The dialog is on screen right now. This is the reliable signal: Claude Code
     # holds notifications back for a few seconds, so a prompt you answer quickly
     # never produces one, which left the "!" never appearing in practice.
+    # A directory change says nothing about whether Claude is busy, so it updates
+    # the label above and leaves the state alone.
+    cwd) ;;
     permission)
         start_waiting
         state="attention"

@@ -82,6 +82,7 @@ jq --arg hook "$hook" --arg own "$own_hooks" '
 
   .hooks //= {}
   | wire("SessionStart";    "start")
+  | wire("CwdChanged";      "cwd")
   | wire("UserPromptSubmit";"prompt")
   | wire("PostToolUse";     "tool")
   | wire("PostToolUseFailure";"tool")

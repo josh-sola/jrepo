@@ -310,24 +310,28 @@ final class OverlayController: NSObject, NSWindowDelegate {
             return
         }
         let size = view.contentSize
-        let origin = clamp(Store.loadPosition() ?? defaultOrigin(for: size), size: size)
+        let anchor = Store.loadAnchor(width: size.width) ?? defaultAnchor()
+        // The row hangs from its right edge, so a new session widens it leftwards
+        // and an overlay parked at the right-hand end of a screen stays put.
+        let origin = clamp(
+            NSPoint(x: anchor.right - size.width, y: anchor.bottom), size: size
+        )
         // Resizing moves the window, which would otherwise be saved as if you had
         // dragged it there — and a row clamped to the screen edge as plants arrive
-        // would then creep leftwards for good.
+        // would then creep for good.
         appliedOrigin = origin
         window.setFrame(NSRect(origin: origin, size: size), display: true)
         if !window.isVisible { window.orderFrontRegardless() }
     }
 
-    /// The bottom-right corner of the primary display, so the row grows leftwards
-    /// as plants arrive. Deliberately not NSScreen.main: that follows the keyboard
-    /// focus, so the row would land on a different display depending on where you
-    /// happened to be looking when it started. Drag it anywhere; that is
-    /// remembered and takes precedence over this.
-    private func defaultOrigin(for size: NSSize) -> NSPoint {
+    /// The bottom-right corner of the primary display. Deliberately not
+    /// NSScreen.main: that follows the keyboard focus, so the row would land on a
+    /// different display depending on where you happened to be looking when it
+    /// started. Drag it anywhere; that is remembered and takes precedence.
+    private func defaultAnchor() -> Store.Anchor {
         if homeScreen == nil { homeScreen = NSScreen.screens.first ?? NSScreen.main }
-        guard let area = homeScreen?.visibleFrame else { return .zero }
-        return NSPoint(x: area.maxX - size.width - 20, y: area.minY + 20)
+        guard let area = homeScreen?.visibleFrame else { return .init(right: 0, bottom: 0) }
+        return Store.Anchor(right: area.maxX - 20, bottom: area.minY + 20)
     }
 
     /// Keeps the row on screen after a resolution or display change.
@@ -342,7 +346,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         guard window.isVisible, window.frame.origin != appliedOrigin else { return }
-        Store.savePosition(window.frame.origin)
+        // Saved as a right edge, not a left one: the row must keep hanging from
+        // where you dropped its right-hand end even as it gains plants.
+        Store.saveAnchor(
+            Store.Anchor(right: window.frame.maxX, bottom: window.frame.minY)
+        )
     }
 }
 

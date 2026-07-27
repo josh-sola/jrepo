@@ -201,16 +201,38 @@ enum Store {
         return h
     }
 
-    static func loadPosition() -> NSPoint? {
-        guard let data = try? Data(contentsOf: positionFile),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let x = json["x"] as? Double, let y = json["y"] as? Double
-        else { return nil }
-        return NSPoint(x: x, y: y)
+    /// Where the row is pinned: its right edge and its bottom edge. Anchoring on
+    /// the right is what makes a new session push the row leftwards, which keeps
+    /// the overlay put when it lives at the right-hand end of a screen.
+    struct Anchor {
+        var right: CGFloat
+        var bottom: CGFloat
     }
 
-    static func savePosition(_ origin: NSPoint) {
-        let json: [String: Any] = ["x": origin.x, "y": origin.y]
+    /// - Parameter width: used only to convert a position saved by an older
+    ///   version, which recorded the left edge instead.
+    static func loadAnchor(width: CGFloat) -> Anchor? {
+        guard let data = try? Data(contentsOf: positionFile),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let y = json["y"] as? Double
+        else { return nil }
+
+        if let right = json["right"] as? Double {
+            return Anchor(right: right, bottom: y)
+        }
+        if let left = json["x"] as? Double {
+            // An older version saved the left edge. Convert once and write it back:
+            // re-deriving it from the current width on every load would pin the
+            // left edge for good, which is the behaviour this replaced.
+            let migrated = Anchor(right: left + width, bottom: y)
+            saveAnchor(migrated)
+            return migrated
+        }
+        return nil
+    }
+
+    static func saveAnchor(_ anchor: Anchor) {
+        let json: [String: Any] = ["right": anchor.right, "y": anchor.bottom]
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: positionFile)
