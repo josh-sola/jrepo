@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -8,7 +9,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::git;
-use crate::store::{self, Tree, TreeState};
+use crate::store::{self, Repo, Tree, TreeState};
 
 const FETCH_STALE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
 
@@ -88,6 +89,7 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
     let start_point = format!("origin/{}", repo.trunk);
     git::worktree_add(&repo.base, &tree_path, &branch, &start_point)?;
     let tree_path = fs::canonicalize(&tree_path)?;
+    let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
 
     // Registered while still `Provisioning` so a failure in wiring or a
     // step below lands as a `Failed` entry, not an orphan invisible to
@@ -102,6 +104,10 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
             path: tree_path.clone(),
             created: now,
             state: TreeState::Provisioning,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: Some(log_path.clone()),
         });
         Ok(())
     })?;
@@ -118,54 +124,43 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
         );
     }
 
-    let steps_to_run: Vec<_> = repo
-        .steps
-        .iter()
-        .filter(|s| match &opts.profiles {
-            None => true,
-            Some(profiles) => profiles.iter().any(|p| p == &s.profile),
-        })
-        .collect();
-
-    for step in &steps_to_run {
-        eprintln!("provisioning: {}", step.label);
-        let cwd = tree_path.join(&step.cwd);
-        let output = Command::new(&step.cmd[0])
-            .args(&step.cmd[1..])
-            .current_dir(&cwd)
-            .envs(&repo.env)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .with_context(|| format!("running step '{}'", step.label))?;
-
-        if !output.status.success() {
-            let mut log = format!(
-                "step: {}\ncmd: {:?}\n\n--- stdout ---\n",
-                step.label, step.cmd
-            );
-            log.push_str(&String::from_utf8_lossy(&output.stdout));
-            log.push_str("\n--- stderr ---\n");
-            log.push_str(&String::from_utf8_lossy(&output.stderr));
-            return mark_failed(
-                root,
-                id,
-                &tree_path,
-                &log,
-                &format!("step '{}' failed", step.label),
-            );
-        }
-    }
-
-    store::with_store_lock(root, |s| {
-        if let Some(t) = s.trees.iter_mut().find(|t| t.id == id) {
-            t.state = TreeState::Ready;
-        }
-        Ok(())
-    })?;
+    spawn_background_provisioning(root, id, &log_path, &opts.profiles)?;
 
     println!("{}", tree_path.display());
     Ok(tree_path)
+}
+
+/// Re-execs the binary as `wt __provision` instead of threading, so the
+/// parent can exit and the OS reparents the child rather than a live handle
+/// (and thread) pinning it to a process that is about to go away.
+/// `process_group(0)` detaches it from the parent's process group so a
+/// Ctrl-C at the terminal that spawned `wt new` doesn't also signal it.
+fn spawn_background_provisioning(
+    root: &Path,
+    id: Uuid,
+    log_path: &Path,
+    profiles: &Option<Vec<String>>,
+) -> Result<()> {
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let stdout_log =
+        fs::File::create(log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let stderr_log = stdout_log
+        .try_clone()
+        .with_context(|| format!("cloning handle for {}", log_path.display()))?;
+
+    let mut cmd = Command::new(exe);
+    cmd.arg("__provision").arg(id.to_string());
+    if let Some(profiles) = profiles {
+        cmd.arg("--profile").arg(profiles.join(","));
+    }
+    cmd.env("WT_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(stdout_log)
+        .stderr(stderr_log)
+        .process_group(0);
+
+    cmd.spawn().context("spawning background provisioning")?;
+    Ok(())
 }
 
 /// Leaves the tree on disk and registered as `Failed` rather than cleaning
@@ -178,7 +173,7 @@ fn mark_failed(
     log_contents: &str,
     message: &str,
 ) -> Result<PathBuf> {
-    let log_path = tree_path.join(".wt-provision.log");
+    let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
     fs::write(&log_path, log_contents)
         .with_context(|| format!("writing {}", log_path.display()))?;
     store::with_store_lock(root, |s| {
@@ -273,44 +268,61 @@ fn copy_globs(base: &Path, tree_path: &Path, patterns: &[String], shared: &[Stri
     Ok(())
 }
 
-pub fn rm_tree(root: &Path, selector: &str, force: bool) -> Result<()> {
+pub fn rm_tree(root: &Path, selector: &str, force: bool, delete_branch: bool) -> Result<()> {
     let store = store::load(root)?;
     let tree = store::resolve(&store.trees, selector)?;
     let id = tree.id;
+    let name = tree.name.clone();
+    let branch = tree.branch.clone();
     let tree_path = tree.path.clone();
     let repo = store
         .repos
         .get(&tree.repo)
-        .with_context(|| {
-            format!(
-                "tree '{}' references unknown repo '{}'",
-                tree.name, tree.repo
-            )
-        })?
+        .with_context(|| format!("tree '{name}' references unknown repo '{}'", tree.repo))?
         .clone();
 
-    if !force {
-        if git::is_dirty(&tree_path)? {
+    let unpushed = branch_has_unpushed_commits(&repo.base, &branch, &repo.trunk)?;
+
+    // A path that's already gone is drift, not a removal to perform: there
+    // is nothing left to protect by refusing, so it skips the dirty/unpushed
+    // guard entirely and goes straight to unregistering below.
+    if tree_path.exists() {
+        if !force {
+            if git::is_dirty(&tree_path)? {
+                bail!("tree '{name}' has uncommitted changes; use --force to remove anyway");
+            }
+            if unpushed {
+                bail!("tree '{name}' has commits not on the remote; use --force to remove anyway");
+            }
+        }
+
+        let remove_result = remove_worktree(&repo.base, &tree_path, force);
+        if tree_path.exists() {
+            let err = match remove_result {
+                Ok(()) => anyhow::anyhow!(
+                    "git reported success but {} is still on disk",
+                    tree_path.display()
+                ),
+                Err(e) => e,
+            };
             bail!(
-                "tree '{}' has uncommitted changes; use --force to remove anyway",
-                tree.name
+                "failed to remove worktree at {}: {err:#}. The registry entry is kept; remove it \
+                 by hand (git -C {} worktree remove --force \"{}\") or run `wt doctor --fix`.",
+                tree_path.display(),
+                repo.base.display(),
+                tree_path.display()
             );
         }
-        let unpushed = match git::upstream_ref(&tree_path) {
-            Some(upstream) => git::commits_ahead(&tree_path, &format!("{upstream}..HEAD"))?,
-            None => git::commits_ahead(&tree_path, &format!("origin/{}..HEAD", repo.trunk))?,
-        };
-        if unpushed {
-            bail!(
-                "tree '{}' has commits not on the remote; use --force to remove anyway",
-                tree.name
-            );
+        if let Err(e) = remove_result {
+            eprintln!("warning: {e:#} (the worktree directory is already gone; treating as drift)");
         }
+    } else {
+        eprintln!(
+            "{} no longer exists on disk; unregistering '{name}' as drift",
+            tree_path.display()
+        );
     }
 
-    if let Err(e) = git::worktree_remove(&repo.base, &tree_path, force) {
-        eprintln!("warning: {e}; removing registry entry anyway");
-    }
     if let Err(e) = git::worktree_prune(&repo.base) {
         eprintln!("warning: git worktree prune failed: {e}");
     }
@@ -320,6 +332,195 @@ pub fn rm_tree(root: &Path, selector: &str, force: bool) -> Result<()> {
         Ok(())
     })?;
 
+    if delete_branch {
+        if unpushed {
+            eprintln!("keeping branch '{branch}': it has commits not on the remote");
+        } else if let Err(e) = git::delete_branch(&repo.base, &branch) {
+            eprintln!("warning: could not delete branch '{branch}': {e}");
+        }
+    }
+
+    Ok(())
+}
+
+/// A submodule-containing tree makes `git worktree remove` refuse outright;
+/// deinit first and fall back to attempting removal anyway if that fails,
+/// so an unrelated submodule problem never blocks a removal that would
+/// otherwise succeed. Verified empirically: even after a clean deinit, git
+/// still refuses a former submodule path without `--force` on the remove
+/// itself, so a tree with submodules always gets `--force` regardless of
+/// the caller's own flag — our dirty/unpushed checks already ran earlier.
+fn remove_worktree(base: &Path, tree_path: &Path, force: bool) -> Result<()> {
+    let mut force = force;
+    if tree_path.join(".gitmodules").exists() {
+        if let Err(e) = git::submodule_deinit_all(tree_path) {
+            eprintln!("warning: submodule deinit failed ({e}); attempting removal anyway");
+        }
+        force = true;
+    }
+    git::worktree_remove(base, tree_path, force)
+}
+
+fn branch_has_unpushed_commits(base: &Path, branch: &str, trunk: &str) -> Result<bool> {
+    match git::branch_upstream(base, branch) {
+        Some(upstream) => git::commits_ahead(base, &format!("{upstream}..{branch}")),
+        None => git::commits_ahead(base, &format!("origin/{trunk}..{branch}")),
+    }
+}
+
+pub struct GcOptions {
+    pub repo: Option<String>,
+    pub dry_run: bool,
+}
+
+pub fn gc(root: &Path, opts: GcOptions) -> Result<()> {
+    let store = store::load(root)?;
+    let mut candidates = 0;
+
+    for t in &store.trees {
+        if let Some(ref r) = opts.repo
+            && &t.repo != r
+        {
+            continue;
+        }
+        let Some(repo) = store.repos.get(&t.repo) else {
+            eprintln!("skipping '{}': repo '{}' is not registered", t.name, t.repo);
+            continue;
+        };
+        match gc_skip_reason(repo, t) {
+            Ok(Some(reason)) => {
+                eprintln!("skipping '{}': {reason}", t.name);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("skipping '{}': {e:#}", t.name);
+                continue;
+            }
+            Ok(None) => {}
+        }
+
+        candidates += 1;
+        if opts.dry_run {
+            println!("would reap '{}' ({})", t.name, t.path.display());
+            continue;
+        }
+        println!("reaping '{}' ({})", t.name, t.path.display());
+        if let Err(e) = rm_tree(root, &t.id.to_string(), false, true) {
+            eprintln!("failed to reap '{}': {e:#}", t.name);
+        }
+    }
+
+    if candidates == 0 {
+        println!("nothing to reap");
+    }
+    Ok(())
+}
+
+/// The trunk-relative check, not the upstream-relative one `rm` uses: a
+/// branch pushed to its own remote counterpart has no *unpushed* commits
+/// but can still carry real work ahead of trunk, which gc must leave alone.
+fn gc_skip_reason(repo: &Repo, tree: &Tree) -> Result<Option<String>> {
+    if tree.state == TreeState::Provisioning {
+        return Ok(Some("still provisioning".to_string()));
+    }
+    // A failed tree is clean and sits at trunk, so every check below would
+    // wave it through and take its provisioning log with it.
+    if tree.state == TreeState::Failed {
+        return Ok(Some(
+            "provisioning failed; read its log, then remove it with `wt rm`".to_string(),
+        ));
+    }
+    if git::is_dirty(&tree.path)? {
+        return Ok(Some("uncommitted changes".to_string()));
+    }
+    if git::commits_ahead(
+        &repo.base,
+        &format!("origin/{}..{}", repo.trunk, tree.branch),
+    )? {
+        return Ok(Some(format!("commits ahead of origin/{}", repo.trunk)));
+    }
+    Ok(None)
+}
+
+pub struct DoctorOptions {
+    pub fix: bool,
+}
+
+pub fn doctor(root: &Path, opts: DoctorOptions) -> Result<()> {
+    let store = store::load(root)?;
+
+    for (repo_name, repo) in &store.repos {
+        println!("== {repo_name} ==");
+        let worktrees = git::worktree_list(&repo.base)?;
+        let registered: Vec<&Tree> = store
+            .trees
+            .iter()
+            .filter(|t| &t.repo == repo_name)
+            .collect();
+        let mut stale_ids = Vec::new();
+
+        for t in &registered {
+            if !t.path.exists() {
+                println!(
+                    "  stale registry entry: '{}' — {} no longer exists",
+                    t.name,
+                    t.path.display()
+                );
+                stale_ids.push(t.id);
+            }
+        }
+
+        for w in &worktrees {
+            if w.path == repo.base {
+                continue;
+            }
+            if !registered.iter().any(|t| t.path == w.path) {
+                let branch = w.branch.as_deref().unwrap_or("(detached)");
+                println!(
+                    "  unregistered worktree: {} (branch {branch}) — not tracked by wt; leave it \
+                     alone or register it by hand if you want wt to manage it",
+                    w.path.display()
+                );
+            }
+        }
+
+        for t in &registered {
+            if !t.path.exists() {
+                continue;
+            }
+            match worktrees.iter().find(|w| w.path == t.path) {
+                Some(w) if w.branch.as_deref() != Some(t.branch.as_str()) => {
+                    let actual = w.branch.as_deref().unwrap_or("(detached)");
+                    println!(
+                        "  branch mismatch: '{}' registered as '{}' but checked out as {actual}",
+                        t.name, t.branch
+                    );
+                }
+                Some(_) => {}
+                None => println!(
+                    "  drifted: '{}' exists on disk at {} but git no longer lists it as a worktree",
+                    t.name,
+                    t.path.display()
+                ),
+            }
+        }
+
+        if opts.fix {
+            if !stale_ids.is_empty() {
+                let n = stale_ids.len();
+                store::with_store_lock(root, |s| {
+                    s.trees.retain(|t| !stale_ids.contains(&t.id));
+                    Ok(())
+                })?;
+                println!(
+                    "  removed {n} stale registry entr{}",
+                    if n == 1 { "y" } else { "ies" }
+                );
+            }
+            git::worktree_prune(&repo.base)?;
+            println!("  pruned {repo_name}'s worktree list");
+        }
+    }
     Ok(())
 }
 
@@ -328,6 +529,39 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    fn gc_skips_a_failed_tree() {
+        let repo = Repo {
+            base: PathBuf::from("/nonexistent-base"),
+            trunk: "master".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: None,
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: Default::default(),
+            steps: Vec::new(),
+        };
+        let tree = Tree {
+            id: Uuid::now_v7(),
+            repo: "myrepo".into(),
+            name: "half provisioned".into(),
+            branch: "josh/half-provisioned".into(),
+            path: PathBuf::from("/nonexistent-tree"),
+            created: Utc::now(),
+            state: TreeState::Failed,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+        };
+
+        let reason = gc_skip_reason(&repo, &tree).unwrap().unwrap();
+        assert!(
+            reason.contains("provisioning failed"),
+            "unexpected reason: {reason}"
+        );
+    }
 
     #[test]
     fn slugify_lowercases_and_collapses_non_alnum() {

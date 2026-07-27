@@ -1,13 +1,17 @@
 mod git;
+mod provision;
 mod repo;
 mod store;
 mod tree;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Enriched worktree tooling")]
@@ -56,6 +60,39 @@ enum Command {
         selector: String,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        delete_branch: bool,
+    },
+    /// Show provisioning status; every non-ready tree if no selector.
+    Status {
+        selector: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Block until a tree is ready or failed.
+    Wait {
+        selector: Option<String>,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Reap clean trees with no commits beyond origin/<trunk>.
+    Gc {
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Reconcile the registry against git's worktree list.
+    Doctor {
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Runs a tree's provisioning steps; spawned detached by `wt new`.
+    #[command(name = "__provision", hide = true)]
+    Provision {
+        tree_id: Uuid,
+        #[arg(long, value_delimiter = ',')]
+        profile: Option<Vec<String>>,
     },
 }
 
@@ -103,7 +140,16 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
-        Command::Rm { selector, force } => tree::rm_tree(root, &selector, force),
+        Command::Rm {
+            selector,
+            force,
+            delete_branch,
+        } => tree::rm_tree(root, &selector, force, delete_branch),
+        Command::Status { selector, json } => cmd_status(root, selector, json),
+        Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
+        Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
+        Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
+        Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
     }
 }
 
@@ -175,21 +221,171 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
         "NAME", "REPO", "BRANCH", "STATE", "UUID"
     );
     for (t, dirty) in rows {
-        let state = match t.state {
-            store::TreeState::Provisioning => "provisioning",
-            store::TreeState::Ready => "ready",
-            store::TreeState::Failed => "failed",
-        };
         let short_id = &t.id.to_string()[..8];
         println!(
             "{:<24} {:<12} {:<28} {:<12} {:<8} {}",
             t.name,
             t.repo,
             t.branch,
-            state,
+            state_str(t.state),
             short_id,
             if dirty { "dirty" } else { "" }
         );
     }
     Ok(())
+}
+
+fn state_str(state: store::TreeState) -> &'static str {
+    match state {
+        store::TreeState::Provisioning => "provisioning",
+        store::TreeState::Ready => "ready",
+        store::TreeState::Failed => "failed",
+    }
+}
+
+fn format_duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+fn step_str(t: &store::Tree) -> String {
+    match (t.step_index, t.step_total, &t.step_label) {
+        (Some(i), Some(total), Some(label)) => format!("{i}/{total} {label}"),
+        _ => "-".to_string(),
+    }
+}
+
+fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
+    let store = store::load(root)?;
+    let trees: Vec<&store::Tree> = match &selector {
+        Some(sel) => vec![store::resolve(&store.trees, sel)?],
+        None => store
+            .trees
+            .iter()
+            .filter(|t| t.state != store::TreeState::Ready)
+            .collect(),
+    };
+
+    if json {
+        let entries: Vec<_> = trees
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "repo": t.repo,
+                    "name": t.name,
+                    "branch": t.branch,
+                    "path": t.path,
+                    "state": t.state,
+                    "stepLabel": t.step_label,
+                    "stepIndex": t.step_index,
+                    "stepTotal": t.step_total,
+                    "logPath": t.log_path,
+                    "elapsedSeconds": (Utc::now() - t.created).num_seconds().max(0),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if trees.is_empty() {
+        println!("all trees are ready");
+        return Ok(());
+    }
+
+    println!(
+        "{:<24} {:<12} {:<13} {:<32} {:<8} LOG",
+        "NAME", "REPO", "STATE", "STEP", "ELAPSED"
+    );
+    for t in trees {
+        let elapsed = format_duration((Utc::now() - t.created).num_seconds());
+        let log = t
+            .log_path
+            .as_ref()
+            .map_or("-".to_string(), |p| p.display().to_string());
+        println!(
+            "{:<24} {:<12} {:<13} {:<32} {:<8} {}",
+            t.name,
+            t.repo,
+            state_str(t.state),
+            step_str(t),
+            elapsed,
+            log
+        );
+    }
+    Ok(())
+}
+
+fn cmd_wait(root: &Path, selector: Option<String>, timeout_secs: u64) -> Result<()> {
+    let id = {
+        let store = store::load(root)?;
+        match &selector {
+            Some(sel) => store::resolve(&store.trees, sel)?.id,
+            None => {
+                let provisioning: Vec<_> = store
+                    .trees
+                    .iter()
+                    .filter(|t| t.state == store::TreeState::Provisioning)
+                    .collect();
+                match provisioning.len() {
+                    0 => bail!("no tree is provisioning"),
+                    1 => provisioning[0].id,
+                    _ => {
+                        let names = provisioning
+                            .iter()
+                            .map(|t| format!("{} ({})", t.name, t.id))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        bail!("multiple trees are provisioning, pass a selector: {names}");
+                    }
+                }
+            }
+        }
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last_step: Option<String> = None;
+    loop {
+        let store = store::load(root)?;
+        let tree = store
+            .trees
+            .iter()
+            .find(|t| t.id == id)
+            .with_context(|| format!("tree {id} is no longer registered"))?;
+
+        match tree.state {
+            store::TreeState::Ready => {
+                println!("{}", tree.path.display());
+                return Ok(());
+            }
+            store::TreeState::Failed => {
+                let log = tree
+                    .log_path
+                    .as_ref()
+                    .map_or("(no log)".to_string(), |p| p.display().to_string());
+                bail!("provisioning failed for '{}'; see {log}", tree.name);
+            }
+            store::TreeState::Provisioning => {
+                if tree.step_label != last_step {
+                    eprintln!("{}", step_str(tree));
+                    last_step = tree.step_label.clone();
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {timeout_secs}s waiting for '{}'",
+                tree.name
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }

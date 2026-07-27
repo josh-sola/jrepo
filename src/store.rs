@@ -64,6 +64,14 @@ pub struct Tree {
     pub path: PathBuf,
     pub created: DateTime<Utc>,
     pub state: TreeState,
+    #[serde(rename = "stepLabel", default, skip_serializing_if = "Option::is_none")]
+    pub step_label: Option<String>,
+    #[serde(rename = "stepIndex", default, skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<u32>,
+    #[serde(rename = "stepTotal", default, skip_serializing_if = "Option::is_none")]
+    pub step_total: Option<u32>,
+    #[serde(rename = "logPath", default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +212,10 @@ mod tests {
             path: PathBuf::from("/tmp/x"),
             created: Utc::now(),
             state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
         }
     }
 

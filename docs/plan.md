@@ -5,7 +5,7 @@ starting fresh work is never a reason to hesitate. One base clone per repo, kept
 `origin/master`; all work in disposable trees that arrive with dependencies installed,
 `.env` files in place, and plans already wired up.
 
-Last updated: 2026-07-27 (Phase 1 built and reviewed)
+Last updated: 2026-07-27 (Phase 1 and Phase 2 built, reviewed, and verified live)
 Base monorepo `master`: `f0b4214c56`; all timings measured at `1e7ef3083f`
 Measured against: pnpm 10.33.0, node 24.17.0, uv 0.11.30, rustc 1.96.0
 
@@ -24,14 +24,16 @@ Each decision names the fact that forces it.
 | 2 | **Existing worktrees stay where they are.** `wt` is for new work only. | Moving a tree breaks it: `node_modules/.bin/*` shims bake an absolute `NODE_PATH`, and every `.venv/bin/*` console script hardcodes its own absolute path. Both were verified. |
 | 3 | **`wt` supersedes Claude Code's worktree isolation.** | Isolation copies `.worktreeinclude` paths but does not install dependencies — verified: in one `agent-*` tree `node_modules` was born four days after the worktree. Agents currently get a tree that cannot build. |
 | 4 | **`plans/` is a plain directory, not a git repo.** | User decision. |
-| 5 | **Shared gitignored state is symlinked, not copied** — `plans/`, `local/`, `user-memories/`. | User decision. Symlinks give one truth and survive teardown, which is the point of moving plans out of trees. |
+| 5 | **Shared gitignored state is symlinked, not copied** — `plans/`, `local/`, `user-memories/`, in base as well as in every tree. | User decision. Symlinks give one truth and survive teardown, which is the point of moving plans out of trees; base needs the same symlink so a plan written from a base session is visible everywhere else. |
 | 6 | **Base stays fresh two ways:** a LaunchAgent every few minutes, plus a fetch on `wt new`. | User decision. The `wt new` fetch is cheap precisely because the timer keeps base nearly current. |
 | 7 | **Always fresh `pnpm install`; never clone `node_modules`.** | Measured: install is 23s, `cp -Rc` of `node_modules` is 42–69s and still needs a repair pass because the `.bin` shims carry absolute paths. Cloning is both slower and wrong. |
 | 8 | **Shared `CARGO_TARGET_DIR` per repo.** | Measured: cuts `dspy-worker`'s `uv sync` from ~19s to 8.4s, and saves ~400 MB of real disk per tree. Cargo output is the only artifact here that is neither hardlinked nor reflinked from a shared store. |
 | 9 | **Rust, single binary.** | The statusline re-renders every 10s and hooks fire on every session start. A Python CLI costs ~100–200ms per invocation; Rust costs ~2ms, so the statusline can call `wt` directly instead of parsing `data.json` with `jq`. |
 | 10 | **Base is protected by reversibility, not locks.** | Read-only permissions or `chflags uchg` would break the fetch-and-fast-forward that keeps base current. Only commits can be hard-blocked, via hooks. |
 | 11 | **Provisioning steps and the carry-over list are per-repo data in `data.json`,** seeded from `.worktreeinclude` when the repo has one. | helm and toy-apps have no `.worktreeinclude`, no pnpm lockfile, and no submodules, but do have their own provisioning needs (`helm dependency update`, per-app `uv sync`). Hardcoding monorepo steps would make them unsupportable. |
-| 12 | **Shared symlink names go into base's `.git/info/exclude`.** | `plans/`, `local/`, and `user-memories/` are gitignored in the monorepo but not in helm or toy-apps, where the symlinks would otherwise show as untracked. `info/exclude` lives in the common git dir, so it is shared by every worktree and never committed. |
+| 12 | **Shared symlink names go into base's `.git/info/exclude`, for every repo.** | A directory-only `.gitignore` pattern like `local/` does not match a symlink named `local` — git still reports `?? local`, even in the monorepo, which already ignores `local/` as a directory. `.worktreeinclude` parsing strips the trailing slash, so `info/exclude` gets `local`, which does match. `info/exclude` lives in the common git dir, so it is shared by every worktree and never committed. |
+| 13 | **Base's original directories move to `<repo>/backup/`, not somewhere inside base.** | A backup left inside base (e.g. `local.pre-wt`) would not match the `.gitignore` pattern that covers the real name and would sit as untracked noise forever. Outside base it is inert and left for manual deletion once the shared copy is confirmed good. |
+| 14 | **`wt rm`/`wt gc` deinit submodules, then remove with `--force`, whenever a tree has a `.gitmodules`.** | `git worktree remove` refuses outright — "working trees containing submodules cannot be moved or removed" — for any tree with a populated submodule, and this hits every provisioned monorepo tree (`helm`, `n8n`). Verified `git submodule deinit -f --all` alone is not enough: git still refuses the plain remove afterward: `--force` on the remove itself is also required, independent of whether the caller asked to force past a dirty/unpushed tree. |
 
 ### `wt init` always adopts; it never clones
 
@@ -69,12 +71,17 @@ later, but it is not part of migration.
 ~/repos/wt/
 ├─ data.json                        registry (single file, atomic writes)
 └─ <repo>/
-   ├─ base/                         canonical clone, tracks origin/master, read-only by convention
+   ├─ base/                         canonical clone, tracks origin/master; plans/, local/,
+   │                                 user-memories/ inside it are symlinks into shared/,
+   │                                 same as in a tree
    ├─ trees/<uuidv7>/               working copies
-   ├─ shared/                       durable state symlinked into every tree
+   ├─ shared/                       durable state symlinked into base and every tree
    │  ├─ plans/
    │  ├─ local/
    │  └─ user-memories/
+   ├─ backup/                       base's original plans/, local/, user-memories/,
+   │                                 moved here once when wt init first symlinks them —
+   │                                 deleted by hand, never automatically
    └─ cache/
       └─ cargo-target/              shared CARGO_TARGET_DIR
 ```
@@ -83,6 +90,13 @@ later, but it is not part of migration.
 durable gitignored state that every tree sees at the path the repo already expects.
 Keeping `plans/` top-level would only make it visually prominent, and prominence is not
 what makes an agent find it — the SessionStart hook injecting the path is.
+
+Base gets the same symlinks as a tree, so a plan written from a session in base is not
+stranded there. `wt init` moves base's real directories into `shared/` (copying content
+in first, if there is any) and replaces them with symlinks. The originals land in
+`backup/`, deliberately outside base: a backup left inside base would not match the
+`.gitignore` pattern that covers the real name and would sit as untracked noise forever.
+`wt init` prints the backup path; nothing deletes it automatically.
 
 `cache/` stays separate. It is not repo state and is not symlinked into trees; it is
 reached through `CARGO_TARGET_DIR`.
@@ -163,7 +177,10 @@ guess.
 
 ## Provisioning pipeline
 
-Measured cost per step, monorepo, warm caches:
+Measured cost per step, monorepo, warm caches (a second tree onward — the
+first tree against a repo pays a cold shared `CARGO_TARGET_DIR` and measured
+57s end to end, almost entirely in `dspy-worker`'s `uv sync` building
+`fast-vnc-core` from nothing instead of the ~8.4s warm figure below):
 
 | Step | Cost | Notes |
 |---|---|---|
@@ -178,8 +195,10 @@ Measured cost per step, monorepo, warm caches:
 | `uv sync` in datahub, data-processing-worker, scripts | 2.0s total | |
 | `uv sync` in dspy-worker | 8.4s | With shared `CARGO_TARGET_DIR`; ~19s without. It builds `fast-vnc`'s Rust extension, an editable path dependency. |
 
-**~44s total, ~2s to a usable path.** Steps after the path is printed run in a detached
-child so the parent can exit; progress lands in `data.json` and a per-tree log.
+**~44s total warm, ~57s cold on the first tree, ~2s to a usable path either way.**
+Steps after the path is printed run in a detached child so the parent can exit;
+progress (state, current step, index/total, log path) lands in `data.json` and a
+per-tree log.
 
 Profiles keep the long pole optional: `--profile node` skips Python entirely,
 `--profile node,python` is the default, and `dspy-worker` is the one project worth a
@@ -216,12 +235,15 @@ one. So the per-repo config holds the carry-over list, seeded *from* `.worktreei
 when the file exists so the monorepo keeps tracking the team's shared contract, and set
 explicitly otherwise. For helm and toy-apps the list starts empty.
 
-**3. Symlinking shared dirs into a repo that does not ignore them would create dirty-tree
-noise.** In helm or toy-apps, a `plans` symlink shows up as an untracked file and can get
-committed by accident. The fix needs no repo change: `wt init` appends the shared names to
-the base clone's `.git/info/exclude`. That file lives in the common git dir, so — verified
-— it is shared by every worktree of the clone automatically, and it is never committed or
-pushed.
+**3. `info/exclude` is required for every repo, not only ones without a matching
+`.gitignore` entry.** In helm or toy-apps a `plans` symlink shows up as untracked because
+nothing ignores it. But even in the monorepo, which already lists `plans/` and `local/`
+as directories, a symlink of the same name is not covered — a directory-only pattern does
+not match a symlink, so git still reports `?? local`. The fix needs no repo change either
+way: `wt init` appends the shared names (trailing slash stripped, which is what makes the
+match work) to the base clone's `.git/info/exclude`. That file lives in the common git
+dir, so — verified — it is shared by every worktree of the clone automatically, and it is
+never committed or pushed.
 
 With those three, helm and toy-apps are nearly instant to provision, since neither has a
 dependency tree worth installing. They are a good first test of the general path precisely
@@ -262,14 +284,21 @@ only if base is clean. Never `reset --hard`. Logs to a file under `~/repos/wt/`.
 
 ## Build order
 
-**Phase 1 — core. Built and reviewed.** `data.json` store with locking and atomic writes,
-`init --adopt`, `new` (synchronous provisioning), `ls`, `path`, `name`, `rm`. 1,512 lines
-of Rust, 17 tests, clean under `clippy -D warnings`. Not yet run against a real repo —
-adopting the monorepo is the next step and needs doing deliberately, since it appends to
-base's `info/exclude` and seeds `shared/` from base's `local/` and `user-memories/`.
+**Phase 1 — core. Built, reviewed, and adopted against the real monorepo.** `data.json`
+store with locking and atomic writes, `init --adopt`, `new`, `ls`, `path`, `name`, `rm`.
+A full provisioning run against the real monorepo base worked end to end: 12 gitignored
+env files copied, shared symlinks invisible to `git status` in base and every tree.
 
-**Phase 2 — speed and lifecycle.** Background provisioning with `status` and `wait`;
-`gc`; `doctor`.
+**Phase 2 — speed and lifecycle. Done.** `new` returns the tree path in ~2s and finishes
+steps in a detached, re-exec'd `wt __provision` child; `status` and `wait` read progress
+back from `data.json` (state, current step index/total, elapsed, log path), no IPC. `gc`
+reaps clean trees with no commits beyond `origin/<trunk>` and deletes their branch;
+`doctor` reconciles the registry against `git worktree list` and reports (never
+auto-adopts) worktrees `wt` didn't create — the monorepo's 24 pre-existing
+`.claude/worktrees/` entries show up this way, correctly, not as errors. Fixed along the
+way: `rm`/`gc` deinit submodules before removing (decision 14); a failed removal now
+always keeps the registry entry instead of orphaning the tree; `rm --delete-branch` and
+`gc` both refuse to delete a branch with commits not on the remote.
 
 **Phase 3 — integrations.** Statusline call, hooks, skill, `claude`, shell function,
 LaunchAgent, base commit hooks.
@@ -325,6 +354,18 @@ cd "$(wt path 'scratch test')"
 pnpm -F types-shared run typecheck           # passes
 wt ls                                        # shows the tree by name
 wt rm 'scratch test'                         # gone from disk and registry
+```
+
+Phase 2 is done — verified live against the real monorepo:
+
+```
+wt new monorepo --name "..."                 # returns the path in ~2s (plus a fetch if stale)
+wt status                                    # shows state, current step index/total, elapsed, log
+wt wait '...'                                # blocks, then exits 0 once ready
+wt gc --dry-run                              # lists what it would reap, touches nothing
+wt gc                                        # reaps it and deletes its branch
+wt doctor                                    # reports the 24 pre-existing .claude/worktrees/
+                                              # entries as unregistered, not broken; touches none
 ```
 
 Phase 3 is done when a fresh Claude session in a tree shows the tree's name in the

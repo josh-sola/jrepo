@@ -17,6 +17,10 @@ const PYTHON_PROJECTS: &[&str] = &[
 
 const EXCLUDE_MARKER: &str = "# wt-cli: shared symlinks (managed, do not edit by hand)";
 
+/// Per-tree provisioning log; also excluded in `exclude_shared_paths` so a
+/// fresh tree with no `.gitignore` coverage for it doesn't start dirty.
+pub(crate) const PROVISION_LOG_NAME: &str = ".wt-provision.log";
+
 pub struct InitOptions {
     pub name: String,
     pub adopt_path: PathBuf,
@@ -44,8 +48,11 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
 
     let (shared, copy) = parse_worktreeinclude(&base)?;
 
+    let shared_dir = repo_dir.join("shared");
+    let backup_dir = repo_dir.join("backup");
     for relpath in &shared {
-        seed_shared_dir(&base, &repo_dir.join("shared"), relpath)?;
+        seed_shared_dir(&base, &shared_dir, relpath)?;
+        link_base_shared_path(&base, &shared_dir, &backup_dir, relpath)?;
     }
     exclude_shared_paths(&base, &shared)?;
 
@@ -110,8 +117,9 @@ const GLOB_CHARS: &[char] = &['*', '?', '['];
 
 /// `.worktreeinclude` entries split by shape: a trailing `/` names a
 /// directory to symlink from `shared/`; a glob names files to copy fresh
-/// into every tree. Entries absent from base are dropped rather than
-/// registered — there is nothing to link or copy.
+/// into every tree. A directory absent from base is still registered, so a
+/// path the manifest reserves for durable state starts working before
+/// anything has been written to it.
 fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let path = base.join(".worktreeinclude");
     let contents = match fs::read_to_string(&path) {
@@ -131,9 +139,7 @@ fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
         }
         if entry.contains(GLOB_CHARS) {
             copy.push(entry.to_string());
-        } else if let Some(relpath) = entry.strip_suffix('/')
-            && base.join(relpath).exists()
-        {
+        } else if let Some(relpath) = entry.strip_suffix('/') {
             shared.push(relpath.to_string());
         }
     }
@@ -176,13 +182,70 @@ fn seed_shared_dir(base: &Path, shared_root: &Path, relpath: &str) -> Result<()>
     Ok(())
 }
 
-/// `info/exclude` lives in the common git dir, so it applies to every
-/// worktree of the clone without ever being tracked or committed — unlike
-/// `.gitignore`, nothing here risks landing in a commit.
-fn exclude_shared_paths(base: &Path, shared: &[String]) -> Result<()> {
-    if shared.is_empty() {
-        return Ok(());
+/// Base gets the same symlink a tree gets, so a plan written from a base
+/// session is visible everywhere else. The original directory is moved,
+/// not deleted, to `backup_root` — deliberately outside base, since a
+/// backup left inside base would not match the `.gitignore` pattern that
+/// covers the real name and would sit as permanent untracked noise.
+fn link_base_shared_path(
+    base: &Path,
+    shared_root: &Path,
+    backup_root: &Path,
+    relpath: &str,
+) -> Result<()> {
+    let base_path = base.join(relpath);
+    let shared_path = shared_root.join(relpath);
+
+    match fs::symlink_metadata(&base_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let existing = fs::read_link(&base_path)?;
+            if existing != shared_path {
+                bail!(
+                    "{} is a symlink to {}, not {} — refusing to replace it",
+                    base_path.display(),
+                    existing.display(),
+                    shared_path.display()
+                );
+            }
+            Ok(())
+        }
+        Ok(_) => {
+            let backup_path = backup_root.join(relpath);
+            if let Some(parent) = backup_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&base_path, &backup_path).with_context(|| {
+                format!(
+                    "moving {} to {}",
+                    base_path.display(),
+                    backup_path.display()
+                )
+            })?;
+            symlink(&shared_path, &base_path)
+                .with_context(|| format!("symlinking {}", base_path.display()))?;
+            println!(
+                "moved {} to {} — delete it by hand once shared/{relpath} looks right",
+                base_path.display(),
+                backup_path.display()
+            );
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => symlink(&shared_path, &base_path)
+            .with_context(|| format!("symlinking {}", base_path.display())),
+        Err(e) => Err(e).with_context(|| format!("checking {}", base_path.display())),
     }
+}
+
+/// `info/exclude` is required for every repo, not only ones whose
+/// `.gitignore` never listed these paths: a directory-only pattern like
+/// `local/` does not match a symlink named `local` — git still reports
+/// `?? local`. `.worktreeinclude` parsing strips the trailing slash, so
+/// the entry written here is `local`, which does match. The provisioning
+/// log gets the same treatment for the same reason: nothing in the
+/// adopted repo's own `.gitignore` promises to cover a file `wt` invents.
+/// It also lives in the common git dir, so it applies to every worktree
+/// without ever being tracked or committed.
+fn exclude_shared_paths(base: &Path, shared: &[String]) -> Result<()> {
     let common = git::common_dir(base)?;
     let exclude_path = common.join("info").join("exclude");
     fs::create_dir_all(exclude_path.parent().unwrap())?;
@@ -197,6 +260,9 @@ fn exclude_shared_paths(base: &Path, shared: &[String]) -> Result<()> {
         if !lines.contains(&relpath.as_str()) {
             to_add.push(relpath.as_str());
         }
+    }
+    if !lines.contains(&PROVISION_LOG_NAME) {
+        to_add.push(PROVISION_LOG_NAME);
     }
     if to_add.is_empty() {
         return Ok(());
@@ -289,9 +355,9 @@ mod tests {
     }
 
     #[test]
-    fn worktreeinclude_splits_shared_and_copy_and_skips_missing() {
+    fn worktreeinclude_registers_shared_dirs_whether_or_not_base_has_them() {
         let base = temp_dir("wti");
-        fs::create_dir_all(base.join("plans")).unwrap();
+        fs::create_dir_all(base.join("local")).unwrap();
         fs::write(
             base.join(".worktreeinclude"),
             "# comment\n\nplans/\nlocal/\n**/.env*\n",
@@ -299,7 +365,7 @@ mod tests {
         .unwrap();
 
         let (shared, copy) = parse_worktreeinclude(&base).unwrap();
-        assert_eq!(shared, vec!["plans".to_string()]);
+        assert_eq!(shared, vec!["plans".to_string(), "local".to_string()]);
         assert_eq!(copy, vec!["**/.env*".to_string()]);
     }
 
@@ -328,5 +394,74 @@ mod tests {
             fs::read_to_string(base.join("plans").join("a.md")).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn link_base_shared_path_moves_real_content_aside_and_symlinks() {
+        let base = temp_dir("link-base");
+        let shared_root = temp_dir("link-shared");
+        let backup_root = temp_dir("link-backup");
+        fs::create_dir_all(base.join("local")).unwrap();
+        fs::write(base.join("local").join("note.txt"), "hi").unwrap();
+        fs::create_dir_all(shared_root.join("local")).unwrap();
+
+        link_base_shared_path(&base, &shared_root, &backup_root, "local").unwrap();
+
+        let meta = fs::symlink_metadata(base.join("local")).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(base.join("local")).unwrap(),
+            shared_root.join("local")
+        );
+        assert_eq!(
+            fs::read_to_string(backup_root.join("local").join("note.txt")).unwrap(),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn link_base_shared_path_with_no_content_just_symlinks() {
+        let base = temp_dir("link-empty-base");
+        let shared_root = temp_dir("link-empty-shared");
+        let backup_root = temp_dir("link-empty-backup");
+        fs::create_dir_all(shared_root.join("plans")).unwrap();
+
+        link_base_shared_path(&base, &shared_root, &backup_root, "plans").unwrap();
+
+        assert!(
+            fs::symlink_metadata(base.join("plans"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!backup_root.join("plans").exists());
+    }
+
+    #[test]
+    fn link_base_shared_path_is_idempotent_when_already_correct() {
+        let base = temp_dir("link-idempotent-base");
+        let shared_root = temp_dir("link-idempotent-shared");
+        let backup_root = temp_dir("link-idempotent-backup");
+        fs::create_dir_all(&shared_root).unwrap();
+        symlink(shared_root.join("plans"), base.join("plans")).unwrap();
+
+        link_base_shared_path(&base, &shared_root, &backup_root, "plans").unwrap();
+        link_base_shared_path(&base, &shared_root, &backup_root, "plans").unwrap();
+
+        assert_eq!(
+            fs::read_link(base.join("plans")).unwrap(),
+            shared_root.join("plans")
+        );
+    }
+
+    #[test]
+    fn link_base_shared_path_errors_on_conflicting_symlink() {
+        let base = temp_dir("link-conflict-base");
+        let shared_root = temp_dir("link-conflict-shared");
+        let backup_root = temp_dir("link-conflict-backup");
+        symlink("/somewhere/else", base.join("plans")).unwrap();
+
+        let err = link_base_shared_path(&base, &shared_root, &backup_root, "plans").unwrap_err();
+        assert!(err.to_string().contains("refusing to replace"));
     }
 }

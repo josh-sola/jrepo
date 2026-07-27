@@ -128,6 +128,17 @@ pub fn worktree_remove(base: &Path, tree_path: &Path, force: bool) -> Result<()>
     Ok(())
 }
 
+pub fn submodule_deinit_all(tree_path: &Path) -> Result<()> {
+    let out = run(&["submodule", "deinit", "-f", "--all"], tree_path)?;
+    if !out.status.success() {
+        bail!(
+            "git submodule deinit failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn worktree_prune(base: &Path) -> Result<()> {
     let out = run(&["worktree", "prune"], base)?;
     if !out.status.success() {
@@ -150,18 +161,64 @@ pub fn is_dirty(path: &Path) -> Result<bool> {
     Ok(!out.stdout.is_empty())
 }
 
-/// `None` means no upstream is configured, not that the tree is clean.
-pub fn upstream_ref(path: &Path) -> Option<String> {
+/// `None` means no upstream is configured, not that the branch is clean.
+/// Resolves the branch's own upstream by name rather than `HEAD`'s, so it
+/// works from `base` even when `branch` isn't the currently checked-out ref
+/// there (or the tree that had it checked out is already gone).
+pub fn branch_upstream(path: &Path, branch: &str) -> Option<String> {
     stdout_trimmed(
         &[
             "rev-parse",
             "--abbrev-ref",
             "--symbolic-full-name",
-            "@{upstream}",
+            &format!("{branch}@{{upstream}}"),
         ],
         path,
     )
     .ok()
+}
+
+pub fn delete_branch(base: &Path, branch: &str) -> Result<()> {
+    let out = run(&["branch", "-D", branch], base)?;
+    if !out.status.success() {
+        bail!(
+            "git branch -D {branch} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub struct WorktreeEntry {
+    pub path: std::path::PathBuf,
+    pub branch: Option<String>,
+}
+
+/// Porcelain output is blocks of `key value` lines separated by a blank
+/// line, one block per worktree; a bare or detached entry has no `branch`
+/// line at all, which is why `branch` is optional rather than defaulted.
+pub fn worktree_list(base: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = stdout_trimmed(&["worktree", "list", "--porcelain"], base)?;
+    let mut entries = Vec::new();
+    let mut path = None;
+    let mut branch = None;
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            if let Some(path) = path.take() {
+                entries.push(WorktreeEntry {
+                    path,
+                    branch: branch.take(),
+                });
+            }
+            path = Some(std::path::PathBuf::from(p));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            branch = Some(b.trim_start_matches("refs/heads/").to_string());
+        }
+    }
+    if let Some(path) = path.take() {
+        entries.push(WorktreeEntry { path, branch });
+    }
+    Ok(entries)
 }
 
 /// `--directory` folds a wholly-ignored directory (`node_modules/`,
