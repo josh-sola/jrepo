@@ -168,8 +168,13 @@ about that the registry does not.
 | `wt gc [--repo <r>]` | Reap trees with no commits ahead of trunk and no dirty files. Replaces the auto-cleanup lost with decision 3. |
 | `wt sync [<repo>]` | Fetch and fast-forward base; refuse if base is dirty. |
 | `wt adopt [<repo>]` | Move uncommitted work out of base into a fresh tree. |
-| `wt env refresh <selector>` | Re-run `internal-cli config generate-env` when copied env files go stale. |
+| `wt env refresh <selector>` | Re-copy the repo's `copy` globs from base into a tree, overwriting what is there. |
 | `wt doctor` | Reconcile registry against `git worktree list`; report and offer to fix. |
+
+`wt env refresh` deliberately does **not** run `internal-cli config generate-env`, as an
+earlier draft of this plan said it would. That command is monorepo-specific and needs AWS
+auth and network, so it cannot be a repo-agnostic step. Regenerating env files in base
+stays a manual step; refresh pushes base's current copies out to a tree.
 
 Selectors resolve in one order everywhere: exact uuid, uuid prefix, exact name, unique
 name substring, branch name. Ambiguity is an error listing the candidates, never a
@@ -326,10 +331,26 @@ Phase 2 submodule teardown corrupted base's shared submodule config on every rem
 check was simplified to a plain `git status --porcelain` emptiness check once base was
 reset to genuinely clean (decision 16).
 
-**Phase 4 — the other repos and upkeep.** Generalise provisioning to per-repo step lists,
-onboard helm and toy-apps, then `adopt` and `env refresh`. (`sync` moved to Phase 3 —
-the LaunchAgent needed it.) Migration of the monorepo base is a `git checkout master`,
-so it needs no phase of its own.
+**Phase 4 — the other repos and upkeep. Built.** Step detection generalised, `wt adopt`,
+and `wt env refresh`. (`sync` moved to Phase 3 — the LaunchAgent needed it.) Migration of
+the monorepo base was a `git checkout master`, so it needed no phase of its own. Adopting
+helm and toy-apps is a manual step, left until wanted.
+
+Step detection, in order: `.gitmodules` gives the submodule step; a root
+`pnpm-lock.yaml` gives `pnpm install --frozen-lockfile` then `pnpm build:packages`;
+`python/pyproject.toml` gives the monorepo's `uv sync --all-packages` plus a sync per
+known project; otherwise every direct subdirectory holding both a `pyproject.toml` and a
+`uv.lock` gets its own `uv sync`. Checked read-only against the real repos: helm produces
+no steps at all and toy-apps produces one sync for `planhub`.
+
+**helm producing nothing is correct, not a gap.** Its only generated state is per-chart
+`charts/*/charts/` and `Chart.lock` from `helm dependency update`, which needs network and
+only matters when working on one specific chart. Trees there are near-instant.
+
+When a repo has no `.worktreeinclude`, `shared` defaults to `["plans"]` rather than being
+empty. Otherwise helm and toy-apps trees would get no plans directory, quietly undoing the
+reason `shared/` exists. Neither repo gitignores `plans/`, so this leans on the
+`info/exclude` mechanism from decision 12.
 
 ---
 

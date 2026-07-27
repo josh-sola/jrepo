@@ -89,11 +89,25 @@ wt sync [<repo>]
     # (never `reset --hard`, never force). No argument syncs every
     # registered repo. Run by the LaunchAgent every 5 minutes.
 
-wt claude [<selector>|<repo>]
+wt adopt [<repo>] --name "<short summary>"
+    # move uncommitted work out of base into a fresh tree, for when you
+    # started editing in base by mistake. Refuses on a clean base. If the
+    # stash cannot be applied, it stays intact and the command exits
+    # non-zero rather than dropping it.
+
+wt env refresh <selector>
+    # re-copy the repo's env files from base into a tree, overwriting what
+    # is there. Regenerating them in base (from Parameter Store, needing
+    # AWS auth) is a separate manual step; this only pushes base's current
+    # copies outward.
+
+wt claude [<selector>|<repo>] [-- <claude args>]
     # exec `claude` (process replacement) with cwd set: a selector
     # resolves to that tree, a bare registered repo name means its base,
     # no argument means the current directory's tree or base if there is
     # one. Warns to stderr and proceeds anyway when the target is base.
+    # Anything after `--` goes straight to claude, e.g.
+    #   wt claude monorepo -- --model opus
 
 wt go <selector>
 wt cd <selector>

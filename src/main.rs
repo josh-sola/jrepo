@@ -1,5 +1,6 @@
 mod claude;
 mod context;
+mod env_refresh;
 mod git;
 mod proc;
 mod provision;
@@ -38,6 +39,16 @@ enum Command {
     /// Create a new worktree and provision it.
     New {
         repo: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        profile: Option<Vec<String>>,
+    },
+    /// Move uncommitted work out of base into a fresh tree.
+    Adopt {
+        repo: Option<String>,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -93,6 +104,11 @@ enum Command {
     },
     /// Fetch and fast-forward base's trunk; refuses if base is dirty.
     Sync { repo: Option<String> },
+    /// Env-file maintenance for a tree.
+    Env {
+        #[command(subcommand)]
+        action: EnvCommand,
+    },
     /// Exec `claude` with cwd set to a tree, a repo's base, or the cwd's tree.
     /// Anything after `--` is passed straight to `claude`.
     Claude {
@@ -113,6 +129,13 @@ enum Command {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum EnvCommand {
+    /// Re-copy the repo's `copy` globs from base into a tree, overwriting
+    /// whatever is already there.
+    Refresh { selector: String },
 }
 
 fn main() -> ExitCode {
@@ -156,6 +179,21 @@ fn run(root: &Path, command: Command) -> Result<()> {
             },
         )
         .map(|_| ()),
+        Command::Adopt {
+            repo,
+            name,
+            branch,
+            profile,
+        } => tree::adopt(
+            root,
+            tree::AdoptOptions {
+                repo,
+                name,
+                branch,
+                profiles: profile,
+            },
+        )
+        .map(|_| ()),
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -169,6 +207,9 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
         Command::Sync { repo } => sync::sync(root, repo),
+        Command::Env { action } => match action {
+            EnvCommand::Refresh { selector } => env_refresh::refresh(root, &selector),
+        },
         Command::Claude { target, args } => claude::exec_claude(root, target, &args),
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
         Command::SessionContext { path } => context::session_context(root, path),
@@ -238,23 +279,65 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|(t, _)| unique_id_prefix(&t.id, &store.trees))
+        .collect();
+    let w = |header: &str, vals: &mut dyn Iterator<Item = usize>| {
+        vals.chain(std::iter::once(header.len())).max().unwrap_or(0)
+    };
+    let name_w = w(
+        "NAME",
+        &mut rows.iter().map(|(t, _)| t.name.chars().count()),
+    );
+    let repo_w = w(
+        "REPO",
+        &mut rows.iter().map(|(t, _)| t.repo.chars().count()),
+    );
+    let branch_w = w(
+        "BRANCH",
+        &mut rows.iter().map(|(t, _)| t.branch.chars().count()),
+    );
+    let state_w = w(
+        "STATE",
+        &mut rows.iter().map(|(t, _)| state_str(t.state).len()),
+    );
+    let id_w = w("UUID", &mut ids.iter().map(String::len));
+
     println!(
-        "{:<24} {:<12} {:<28} {:<12} {:<8} DIRTY",
+        "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} DIRTY",
         "NAME", "REPO", "BRANCH", "STATE", "UUID"
     );
-    for (t, dirty) in rows {
-        let short_id = &t.id.to_string()[..8];
+    for ((t, dirty), id) in rows.iter().zip(&ids) {
         println!(
-            "{:<24} {:<12} {:<28} {:<12} {:<8} {}",
+            "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} {}",
             t.name,
             t.repo,
             t.branch,
             state_str(t.state),
-            short_id,
-            if dirty { "dirty" } else { "" }
+            id,
+            if *dirty { "dirty" } else { "" }
         );
     }
     Ok(())
+}
+
+/// A uuidv7 leads with a millisecond timestamp, so trees created minutes
+/// apart share their first characters. This column doubles as a selector, so
+/// it grows until it matches exactly one registered tree.
+fn unique_id_prefix(id: &Uuid, all: &[store::Tree]) -> String {
+    let full = id.to_string();
+    for len in 8..full.len() {
+        let candidate = &full[..len];
+        let matches = all
+            .iter()
+            .filter(|t| t.id.to_string().starts_with(candidate))
+            .count();
+        if matches <= 1 {
+            return candidate.to_string();
+        }
+    }
+    full
 }
 
 fn state_str(state: store::TreeState) -> &'static str {
@@ -427,5 +510,44 @@ fn cmd_wait(root: &Path, selector: Option<String>, timeout_secs: u64) -> Result<
             );
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::path::PathBuf;
+    use store::{Tree, TreeState};
+
+    fn tree(id: &str) -> Tree {
+        Tree {
+            id: id.parse().unwrap(),
+            repo: "monorepo".into(),
+            name: "t".into(),
+            branch: "josh/t".into(),
+            path: PathBuf::from("/tmp/t"),
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+        }
+    }
+
+    #[test]
+    fn id_prefix_grows_past_a_shared_uuidv7_timestamp() {
+        let a = tree("019fa4ef-6669-7f32-a29c-a459aee6716b");
+        let b = tree("019fa4ef-e6e2-78c2-977a-f55f5f00ab25");
+        let all = vec![a.clone(), b.clone()];
+
+        assert_eq!(unique_id_prefix(&a.id, &all), "019fa4ef-6");
+        assert_eq!(unique_id_prefix(&b.id, &all), "019fa4ef-e");
+        assert_eq!(
+            unique_id_prefix(&a.id, std::slice::from_ref(&a)),
+            "019fa4ef"
+        );
     }
 }

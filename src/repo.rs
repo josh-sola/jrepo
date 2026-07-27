@@ -121,12 +121,17 @@ const GLOB_CHARS: &[char] = &['*', '?', '['];
 /// into every tree. A directory absent from base is still registered, so a
 /// path the manifest reserves for durable state starts working before
 /// anything has been written to it.
+///
+/// A repo with no manifest — helm, toy-apps — still defaults `shared` to
+/// `plans`: durable plans are the reason `shared/` exists at all, so a repo
+/// that never opted in still gets a `plans/` directory in every tree instead
+/// of silently going without one.
 fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let path = base.join(".worktreeinclude");
     let contents = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), vec!["**/.env*".to_string()]));
+            return Ok((vec!["plans".to_string()], vec!["**/.env*".to_string()]));
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
@@ -334,6 +339,12 @@ fn write_guard_hook(hooks_dir: &Path, name: &str, repo_name: &str) -> Result<()>
         .with_context(|| format!("chmod {}", path.display()))
 }
 
+/// helm gets none of these: chart dependencies (`charts/*/charts/`,
+/// `Chart.lock`) come from `helm dependency update`, which needs network and
+/// is only wanted when actively working on one chart, not on every tree. A
+/// step here would run it unconditionally against every chart on every
+/// `wt new`, so helm is deliberately left with an empty step list rather
+/// than scanned for `Chart.yaml`.
 fn detect_steps(base: &Path) -> Vec<Step> {
     let mut steps = Vec::new();
 
@@ -393,9 +404,42 @@ fn detect_steps(base: &Path) -> Vec<Step> {
                 });
             }
         }
+    } else {
+        steps.extend(detect_standalone_uv_projects(base));
     }
 
     steps
+}
+
+/// A repo with no monorepo-shaped `python/pyproject.toml` root project can
+/// still have independent uv projects a level down — toy-apps' `planhub/`
+/// is the case this exists for. Each direct subdirectory that owns both a
+/// `pyproject.toml` and a `uv.lock` gets its own `uv sync` step; sorted so
+/// the step order doesn't depend on directory-read order.
+fn detect_standalone_uv_projects(base: &Path) -> Vec<Step> {
+    let Ok(entries) = fs::read_dir(base) else {
+        return Vec::new();
+    };
+
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_dir() && path.join("pyproject.toml").exists() && path.join("uv.lock").exists()
+        })
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    names.sort();
+
+    names
+        .into_iter()
+        .map(|name| Step {
+            label: format!("uv-sync-{name}"),
+            profile: "python".to_string(),
+            cwd: name,
+            cmd: vec!["uv".to_string(), "sync".to_string()],
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -425,11 +469,53 @@ mod tests {
     }
 
     #[test]
-    fn missing_worktreeinclude_defaults_to_env_copy_only() {
+    fn missing_worktreeinclude_defaults_to_plans_shared_and_env_copy() {
         let base = temp_dir("noWti");
         let (shared, copy) = parse_worktreeinclude(&base).unwrap();
-        assert!(shared.is_empty());
+        assert_eq!(shared, vec!["plans".to_string()]);
         assert_eq!(copy, vec!["**/.env*".to_string()]);
+    }
+
+    #[test]
+    fn detect_steps_finds_no_python_step_when_python_has_no_dependencies() {
+        let base = temp_dir("no-python");
+        assert!(detect_steps(&base).is_empty());
+    }
+
+    #[test]
+    fn detect_steps_adds_a_step_per_standalone_uv_project() {
+        let base = temp_dir("standalone-uv");
+        for name in ["planhub", "not-a-uv-project"] {
+            fs::create_dir_all(base.join(name)).unwrap();
+        }
+        fs::write(base.join("planhub").join("pyproject.toml"), "").unwrap();
+        fs::write(base.join("planhub").join("uv.lock"), "").unwrap();
+        // Only a pyproject.toml, no uv.lock — must not be picked up.
+        fs::write(base.join("not-a-uv-project").join("pyproject.toml"), "").unwrap();
+
+        let steps = detect_steps(&base);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].label, "uv-sync-planhub");
+        assert_eq!(steps[0].profile, "python");
+        assert_eq!(steps[0].cwd, "planhub");
+        assert_eq!(steps[0].cmd, vec!["uv".to_string(), "sync".to_string()]);
+    }
+
+    #[test]
+    fn detect_steps_prefers_the_monorepo_python_shape_when_present() {
+        let base = temp_dir("monorepo-shape");
+        fs::create_dir_all(base.join("python")).unwrap();
+        fs::write(base.join("python").join("pyproject.toml"), "").unwrap();
+        // A standalone-looking project alongside `python/` must not also
+        // produce a step — the monorepo shape takes over entirely.
+        fs::create_dir_all(base.join("other-project")).unwrap();
+        fs::write(base.join("other-project").join("pyproject.toml"), "").unwrap();
+        fs::write(base.join("other-project").join("uv.lock"), "").unwrap();
+
+        let steps = detect_steps(&base);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].label, "uv-sync-python");
+        assert_eq!(steps[0].cwd, "python");
     }
 
     #[test]

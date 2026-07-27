@@ -227,6 +227,89 @@ fn shared_symlinks_stay_invisible_to_git_status_in_base_and_tree() {
     );
 }
 
+/// helm and toy-apps have no `.worktreeinclude` at all, and their
+/// `.gitignore`s never mention `plans/` either — so `plans` only becomes
+/// invisible to git through `info/exclude`, never through a repo-authored
+/// ignore pattern. This proves the default-shared path (no manifest) is
+/// just as invisible to `git status` as the manifest-driven path above.
+#[test]
+fn plans_default_share_stays_invisible_to_git_status_with_no_manifest_and_no_gitignore_entry() {
+    let tmp = unique_dir("no-manifest-plans");
+    let bare = tmp.join("origin.git");
+    let work = tmp.join("work");
+    git(&["init", "--bare", "--quiet", bare.to_str().unwrap()], &tmp);
+    git(&["symbolic-ref", "HEAD", "refs/heads/master"], &bare);
+    git(
+        &["init", "--quiet", "-b", "master", work.to_str().unwrap()],
+        &tmp,
+    );
+
+    std::fs::write(work.join("README.md"), "fixture\n").unwrap();
+    // A .gitignore exists, like helm's and toy-apps' do, but it never
+    // mentions `plans` — nothing here covers the symlink `wt` will add.
+    std::fs::write(work.join(".gitignore"), "*.log\n").unwrap();
+
+    git(&["add", "-A"], &work);
+    git(
+        &[
+            "-c",
+            "user.email=wt-cli-test@example.com",
+            "-c",
+            "user.name=wt-cli-test",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+        &work,
+    );
+    git(&["remote", "add", "origin", bare.to_str().unwrap()], &work);
+    git(&["push", "-q", "origin", "master"], &work);
+    git(&["fetch", "-q", "origin"], &work);
+    git(&["remote", "set-head", "origin", "-a"], &work);
+
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", work.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let base_status = git_status_porcelain(&work);
+    assert!(
+        base_status.is_empty(),
+        "base git status not clean after init with no manifest:\n{base_status}"
+    );
+    assert!(
+        std::fs::symlink_metadata(work.join("plans"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "base should still get a plans symlink with no .worktreeinclude"
+    );
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "no manifest check"]);
+    assert_success(&out, "new");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
+    assert_success(&run_wt(&root, &["wait", "no manifest check"]), "wait");
+
+    let tree_status = git_status_porcelain(&tree_path);
+    assert!(
+        tree_status.is_empty(),
+        "tree git status not clean after new with no manifest:\n{tree_status}"
+    );
+    assert!(
+        std::fs::symlink_metadata(tree_path.join("plans"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the tree should get a plans symlink by default with no .worktreeinclude"
+    );
+}
+
 #[test]
 fn new_with_unslugifiable_name_errors_clearly() {
     let tmp = unique_dir("badslug");
@@ -1523,4 +1606,321 @@ fn status_flags_a_provisioning_tree_whose_recorded_pid_is_dead() {
     );
 
     assert_success(&run_wt(&root, &["rm", "wedged tree", "--force"]), "cleanup");
+}
+
+fn git_stash_list(path: &Path) -> String {
+    let out = Command::new("git")
+        .args(["stash", "list"])
+        .current_dir(path)
+        .output()
+        .expect("spawn git stash list");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn adopt_moves_tracked_edits_into_a_fresh_tree() {
+    let tmp = unique_dir("adopt-tracked");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    std::fs::write(base.join("README.md"), "edited in base by mistake\n").unwrap();
+
+    let out = run_wt(&root, &["adopt", "myrepo", "--name", "adopt tracked"]);
+    assert_success(&out, "adopt");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    assert!(
+        git_status_porcelain(&base).is_empty(),
+        "base should be clean after adopt moved the edit out"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tree_path.join("README.md")).unwrap(),
+        "edited in base by mistake\n",
+        "the tracked edit should have landed in the new tree"
+    );
+    assert!(
+        git_status_porcelain(&tree_path).contains("README.md"),
+        "the tree should see the edit as an uncommitted change"
+    );
+    assert!(
+        git_stash_list(&base).is_empty(),
+        "a clean pop should have dropped the stash"
+    );
+
+    assert_success(&run_wt(&root, &["wait", "adopt tracked"]), "wait");
+    assert_success(
+        &run_wt(
+            &root,
+            &["rm", "adopt tracked", "--force", "--delete-branch"],
+        ),
+        "cleanup",
+    );
+}
+
+#[test]
+fn adopt_moves_untracked_files_into_a_fresh_tree() {
+    let tmp = unique_dir("adopt-untracked");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    std::fs::write(base.join("scratch.txt"), "started this in base\n").unwrap();
+
+    let out = run_wt(&root, &["adopt", "myrepo", "--name", "adopt untracked"]);
+    assert_success(&out, "adopt");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    assert!(
+        !base.join("scratch.txt").exists(),
+        "the untracked file should have moved out of base"
+    );
+    assert!(
+        git_status_porcelain(&base).is_empty(),
+        "base should be clean after adopt"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tree_path.join("scratch.txt")).unwrap(),
+        "started this in base\n"
+    );
+
+    assert_success(&run_wt(&root, &["wait", "adopt untracked"]), "wait");
+    assert_success(
+        &run_wt(
+            &root,
+            &["rm", "adopt untracked", "--force", "--delete-branch"],
+        ),
+        "cleanup",
+    );
+}
+
+#[test]
+fn adopt_refuses_on_a_clean_base() {
+    let tmp = unique_dir("adopt-clean");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let out = run_wt(&root, &["adopt", "myrepo", "--name", "should fail"]);
+    assert!(!out.status.success(), "adopt should refuse a clean base");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("clean") && stderr.contains("nothing to adopt"),
+        "expected a clean-base refusal message: {stderr}"
+    );
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        0,
+        "no tree should be created when adopt refuses"
+    );
+}
+
+/// Engineers a real merge conflict: base is dirtied against its current
+/// commit, then a *different* commit touching the same file lands on
+/// origin before the tree is created — so the stash's parent commit and the
+/// tree's starting commit disagree on `file.txt`, and popping the stash
+/// onto the tree can't apply cleanly.
+#[test]
+fn adopt_pop_conflict_leaves_the_stash_intact() {
+    let tmp = unique_dir("adopt-conflict");
+    let bare = tmp.join("origin.git");
+    let base = tmp.join("work");
+    git(&["init", "--bare", "--quiet", bare.to_str().unwrap()], &tmp);
+    git(&["symbolic-ref", "HEAD", "refs/heads/master"], &bare);
+    git(
+        &["init", "--quiet", "-b", "master", base.to_str().unwrap()],
+        &tmp,
+    );
+    std::fs::write(base.join("file.txt"), "original\n").unwrap();
+    git(&["add", "-A"], &base);
+    git(
+        &[
+            "-c",
+            "user.email=wt-cli-test@example.com",
+            "-c",
+            "user.name=wt-cli-test",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+        &base,
+    );
+    git(&["remote", "add", "origin", bare.to_str().unwrap()], &base);
+    git(&["push", "-q", "origin", "master"], &base);
+    git(&["fetch", "-q", "origin"], &base);
+    git(&["remote", "set-head", "origin", "-a"], &base);
+
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    // Dirty base with an edit that will conflict with a commit that lands
+    // on origin between the stash and the new tree's checkout.
+    std::fs::write(base.join("file.txt"), "conflict edit\n").unwrap();
+    push_new_commit_to_origin(&bare, &tmp, "file.txt");
+
+    let out = run_wt(&root, &["adopt", "myrepo", "--name", "conflict adopt"]);
+    assert!(
+        !out.status.success(),
+        "adopt should fail when the pop conflicts"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stash") && stderr.contains("intact"),
+        "expected the stash-intact message: {stderr}"
+    );
+    assert!(
+        stderr.contains("stash pop"),
+        "expected recovery instructions: {stderr}"
+    );
+
+    assert!(
+        git_status_porcelain(&base).is_empty(),
+        "base's dirty edit should still be stashed, not left behind"
+    );
+    assert_eq!(
+        git_stash_list(&base).lines().count(),
+        1,
+        "the stash must still be intact after a failed pop"
+    );
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the half-adopted tree should stay registered for the user to resolve"
+    );
+    assert_eq!(entries[0]["state"], "failed");
+    let tree_path = PathBuf::from(entries[0]["path"].as_str().unwrap());
+    assert!(
+        tree_path.exists(),
+        "the tree must survive a failed pop so its conflict can be resolved by hand"
+    );
+
+    git(&["stash", "drop"], &base);
+    std::fs::remove_dir_all(&tree_path).ok();
+    Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&base)
+        .status()
+        .unwrap();
+    run_wt(
+        &root,
+        &["rm", "conflict adopt", "--force", "--delete-branch"],
+    );
+}
+
+#[test]
+fn env_refresh_recopies_and_overwrites_a_stale_env_file() {
+    let tmp = unique_dir("env-refresh");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    std::fs::write(base.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(base.join(".env"), "A=1\n").unwrap();
+    git(&["add", "-A"], &base);
+    git(
+        &[
+            "-c",
+            "user.email=wt-cli-test@example.com",
+            "-c",
+            "user.name=wt-cli-test",
+            "commit",
+            "-q",
+            "-m",
+            "add gitignored env",
+        ],
+        &base,
+    );
+    git(&["push", "-q", "origin", "master"], &base);
+    git(&["fetch", "-q", "origin"], &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "env refresh target"]);
+    assert_success(&out, "new");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_success(&run_wt(&root, &["wait", "env refresh target"]), "wait");
+
+    assert_eq!(
+        std::fs::read_to_string(tree_path.join(".env")).unwrap(),
+        "A=1\n"
+    );
+
+    // base's env changes after the tree already has a now-stale copy.
+    std::fs::write(base.join(".env"), "A=2\n").unwrap();
+
+    let refresh = run_wt(&root, &["env", "refresh", "env refresh target"]);
+    assert_success(&refresh, "env refresh");
+    let stdout = String::from_utf8_lossy(&refresh.stdout);
+    assert!(
+        stdout.contains(".env"),
+        "expected the copied file to be reported: {stdout}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(tree_path.join(".env")).unwrap(),
+        "A=2\n",
+        "env refresh should overwrite the tree's stale copy"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "env refresh target", "--delete-branch"]),
+        "cleanup",
+    );
 }

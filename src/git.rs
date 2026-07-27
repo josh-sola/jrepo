@@ -292,6 +292,62 @@ pub fn ignored_files(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// `refs/stash` lives in the common git dir, so a stash taken in one
+/// worktree is visible from every other worktree of the same clone — this
+/// is what lets `wt adopt` push here and pop in `stash_pop` against a tree
+/// that didn't exist yet when the stash was made.
+/// Returns the new stash commit so the caller can prove which entry is its
+/// own before popping.
+pub fn stash_push_include_untracked(path: &Path, message: &str) -> Result<String> {
+    let out = run(
+        &["stash", "push", "--include-untracked", "-m", message],
+        path,
+    )?;
+    if !out.status.success() {
+        bail!(
+            "git stash push failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    stash_top(path)?.context("git stash push reported success but left no stash entry")
+}
+
+fn stash_top(path: &Path) -> Result<Option<String>> {
+    let out = run(&["rev-parse", "--verify", "--quiet", "stash@{0}"], path)?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if sha.is_empty() { None } else { Some(sha) })
+}
+
+/// A failed pop (conflict, or the target tree already dirty) leaves the
+/// stash entry in place on its own — git only drops it after a clean apply
+/// — so the caller needs no extra step to keep it intact on failure.
+///
+/// `expected` must be the stash commit this caller pushed. `git stash pop`
+/// always takes the newest entry, so without the check an unrelated stash
+/// pushed in the meantime would be popped into the tree instead.
+pub fn stash_pop(path: &Path, expected: &str) -> Result<()> {
+    match stash_top(path)? {
+        Some(top) if top == expected => {}
+        Some(top) => bail!(
+            "refusing to pop: the newest stash is {top}, not the {expected} pushed for this \
+             tree; recover by hand with `git stash list` and `git stash pop <entry>`"
+        ),
+        None => bail!("refusing to pop: the stash pushed for this tree ({expected}) is gone"),
+    }
+
+    let out = run(&["stash", "pop"], path)?;
+    if !out.status.success() {
+        bail!(
+            "git stash pop failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn commits_ahead(path: &Path, range: &str) -> Result<bool> {
     let out = run(&["log", "--oneline", range], path)?;
     if !out.status.success() {
@@ -301,4 +357,45 @@ pub fn commits_ahead(path: &Path, range: &str) -> Result<bool> {
         );
     }
     Ok(!out.stdout.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn fixture_repo() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wt-git-test-{}", Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            run(&args, &dir).unwrap();
+        }
+        fs::write(dir.join("tracked.txt"), "one\n").unwrap();
+        run(&["add", "-A"], &dir).unwrap();
+        run(&["commit", "-qm", "init"], &dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stash_pop_refuses_when_a_newer_unrelated_stash_arrived() {
+        let repo = fixture_repo();
+        fs::write(repo.join("tracked.txt"), "ours\n").unwrap();
+        let ours = stash_push_include_untracked(&repo, "ours").unwrap();
+
+        fs::write(repo.join("tracked.txt"), "theirs\n").unwrap();
+        let theirs = stash_push_include_untracked(&repo, "theirs").unwrap();
+        assert_ne!(ours, theirs);
+
+        let err = stash_pop(&repo, &ours).unwrap_err().to_string();
+        assert!(err.contains("refusing to pop"), "unexpected error: {err}");
+        assert_eq!(stash_top(&repo).unwrap().as_deref(), Some(theirs.as_str()));
+
+        fs::remove_dir_all(&repo).ok();
+    }
 }

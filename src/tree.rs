@@ -39,6 +39,17 @@ pub fn slugify(name: &str) -> String {
 }
 
 pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
+    let (id, tree_path, log_path) = create_tree(root, &opts)?;
+    start_provisioning(root, id, &log_path, &opts.profiles)?;
+    println!("{}", tree_path.display());
+    Ok(tree_path)
+}
+
+/// Worktree creation, shared-state wiring, and the registry write — stops
+/// short of starting provisioning so `wt adopt` can pop its stash into the
+/// tree first, before a background install could touch any of the same
+/// files. `wt new` runs this immediately followed by `start_provisioning`.
+fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf)> {
     let store = store::load(root)?;
     let repo = store.repos.get(&opts.repo).cloned().with_context(|| {
         format!(
@@ -119,25 +130,117 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
     if let Err(e) = wire_shared_symlinks(&repo_dir.join("shared"), &tree_path, &repo.shared)
         .and_then(|()| copy_globs(&repo.base, &tree_path, &repo.copy, &repo.shared))
     {
-        return mark_failed(
+        return Err(mark_failed::<()>(
             root,
             id,
             &tree_path,
             &format!("wiring shared state failed:\n{e:#}\n"),
             "wiring shared state failed",
-        );
+        )
+        .unwrap_err());
     }
 
-    let pid = spawn_background_provisioning(root, id, &log_path, &opts.profiles)?;
+    Ok((id, tree_path, log_path))
+}
+
+fn start_provisioning(
+    root: &Path,
+    id: Uuid,
+    log_path: &Path,
+    profiles: &Option<Vec<String>>,
+) -> Result<()> {
+    let pid = spawn_background_provisioning(root, id, log_path, profiles)?;
     store::with_store_lock(root, |s| {
         if let Some(t) = s.trees.iter_mut().find(|t| t.id == id) {
             t.provision_pid = Some(pid);
         }
         Ok(())
     })?;
+    Ok(())
+}
 
+pub struct AdoptOptions {
+    pub repo: Option<String>,
+    pub name: String,
+    pub branch: Option<String>,
+    pub profiles: Option<Vec<String>>,
+}
+
+/// Moves uncommitted work out of base into a fresh tree — the escape hatch
+/// for when editing started in base by mistake (base blocks commits, not
+/// edits). `refs/stash` lives in the common git dir, so it is visible from
+/// every worktree of the same clone; that's what lets a stash taken in base
+/// be popped straight into the tree `wt new` just created from it, no patch
+/// file needed.
+pub fn adopt(root: &Path, opts: AdoptOptions) -> Result<PathBuf> {
+    let store = store::load(root)?;
+    let (repo_name, repo) = resolve_adopt_repo(&store, opts.repo)?;
+
+    if !git::is_dirty(&repo.base)? {
+        bail!(
+            "{repo_name}'s base ({}) is clean; there is nothing to adopt",
+            repo.base.display()
+        );
+    }
+
+    let stash_sha =
+        git::stash_push_include_untracked(&repo.base, &format!("wt adopt: {}", opts.name))?;
+
+    let new_opts = NewOptions {
+        repo: repo_name.clone(),
+        name: opts.name.clone(),
+        branch: opts.branch.clone(),
+        profiles: opts.profiles.clone(),
+    };
+    let (id, tree_path, log_path) = create_tree(root, &new_opts).map_err(|e| {
+        anyhow::anyhow!(
+            "adopted work is stashed in {repo_name}'s base; creating the tree failed: {e:#}\n\
+             recover it with: git -C {} stash pop",
+            repo.base.display()
+        )
+    })?;
+
+    if let Err(e) = git::stash_pop(&tree_path, &stash_sha) {
+        return Err(mark_failed::<()>(
+            root,
+            id,
+            &tree_path,
+            &format!(
+                "git stash pop failed:\n{e:#}\n\nthe stash is intact; resolve the conflict in \
+                 the tree and finish by hand with:\n  git -C {} stash pop\nonce resolved, drop \
+                 it with:\n  git -C {} stash drop\n",
+                tree_path.display(),
+                repo.base.display(),
+            ),
+            "adopt: stash pop failed; the stash is intact",
+        )
+        .unwrap_err());
+    }
+
+    start_provisioning(root, id, &log_path, &opts.profiles)?;
     println!("{}", tree_path.display());
     Ok(tree_path)
+}
+
+/// `Some(name)` looks the repo up by name; `None` resolves from the current
+/// directory, since `wt adopt` is meant to be run from inside the base
+/// checkout it's rescuing work out of.
+fn resolve_adopt_repo(store: &store::Store, repo: Option<String>) -> Result<(String, Repo)> {
+    if let Some(name) = repo {
+        let repo = store.repos.get(&name).cloned().with_context(|| {
+            format!("unknown repo '{name}'. Known repos: {}", known_repos(store))
+        })?;
+        return Ok((name, repo));
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = fs::canonicalize(&cwd).unwrap_or(cwd);
+    store
+        .repos
+        .iter()
+        .find(|(_, r)| cwd.starts_with(&r.base))
+        .map(|(name, repo)| (name.clone(), repo.clone()))
+        .context("current directory is not a registered repo's base; pass a repo name")
 }
 
 /// Re-execs the binary as `wt __provision` instead of threading, so the
@@ -176,13 +279,16 @@ fn spawn_background_provisioning(
 /// Leaves the tree on disk and registered as `Failed` rather than cleaning
 /// up — a half-provisioned tree is still worth inspecting or resuming by
 /// hand, and deleting it would throw away whatever steps did complete.
-fn mark_failed(
+/// Generic over its `Ok` type since it never actually produces one — every
+/// path through this function ends in `bail!` — which lets each caller's
+/// `?`/`return Err(...)` line up with whatever type that caller returns.
+fn mark_failed<T>(
     root: &Path,
     id: Uuid,
     tree_path: &Path,
     log_contents: &str,
     message: &str,
-) -> Result<PathBuf> {
+) -> Result<T> {
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
     fs::write(&log_path, log_contents)
         .with_context(|| format!("writing {}", log_path.display()))?;
@@ -248,10 +354,19 @@ fn matches_glob(pattern: &str, filename: &str) -> bool {
 /// filesystem: a plain walk would stat every file in whatever the repo
 /// gitignores wholesale (build caches, `node_modules`, `.venv`s) just to
 /// find a dozen `.env` files. A tracked file is never a candidate either —
-/// if it's tracked it's already in the worktree.
-fn copy_globs(base: &Path, tree_path: &Path, patterns: &[String], shared: &[String]) -> Result<()> {
+/// if it's tracked it's already in the worktree. `fs::copy` overwrites an
+/// existing destination, which is what makes this reusable as `wt env
+/// refresh`'s re-copy. Returns the relative paths actually copied, so a
+/// caller can report them.
+pub(crate) fn copy_globs(
+    base: &Path,
+    tree_path: &Path,
+    patterns: &[String],
+    shared: &[String],
+) -> Result<Vec<String>> {
+    let mut copied = Vec::new();
     if patterns.is_empty() {
-        return Ok(());
+        return Ok(copied);
     }
     let shared_paths: Vec<&Path> = shared.iter().map(Path::new).collect();
 
@@ -274,8 +389,9 @@ fn copy_globs(base: &Path, tree_path: &Path, patterns: &[String], shared: &[Stri
         }
         fs::copy(&src, &dst)
             .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+        copied.push(relpath);
     }
-    Ok(())
+    Ok(copied)
 }
 
 pub fn rm_tree(root: &Path, selector: &str, force: bool, delete_branch: bool) -> Result<()> {
