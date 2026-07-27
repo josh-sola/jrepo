@@ -1,0 +1,24 @@
+#!/bin/bash
+# Example label-hook: name a plant after its `wt` worktree instead of its
+# directory, which is a uuid.
+#
+# Install by copying to ~/.claude/planter/label-hook and making it executable.
+# It receives the session's directory as $1 and prints a label, or prints nothing
+# to let planter fall back to the directory's basename. It runs once per session,
+# so it can afford to be slow.
+#
+# See also label-hook.git-branch for a version that works in any git repo.
+set -uo pipefail
+
+dir="${1%/}"
+registry="$HOME/repos/wt/data.json"
+
+[[ "$dir" == "$HOME/repos/wt/"* ]] || exit 0
+[[ -f "$registry" ]] || exit 0
+
+# The tree has to be bound before the test: inside startswith() the input is the
+# path string, so a bare .path would be read against that instead.
+jq -r --arg d "$dir/" \
+    '[.trees[]? | . as $t | select($d | startswith($t.path + "/")) | $t.name]
+     | first // ""' \
+    "$registry" 2>/dev/null

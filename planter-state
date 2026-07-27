@@ -1,0 +1,166 @@
+#!/bin/bash
+# Records one Claude Code session's state for the plants overlay.
+#
+# Reads a hook payload on stdin; the event to record is the first argument:
+#
+#   start        SessionStart     the plant appears
+#   prompt       UserPromptSubmit you gave Claude something to do
+#   tool         PostToolUse      still going (this is what clears a "!" once
+#                                 you have approved a permission prompt)
+#   stop         Stop             Claude's turn ended
+#   notify       Notification     a permission prompt, or Claude went quiet
+#   agent-start  SubagentStart    a subagent began
+#   agent-stop   SubagentStop     a subagent finished
+#   end          SessionEnd       the plant leaves
+#
+# Runs on every tool call, so it keeps to three jq invocations at most. Never
+# fails and never writes to stdout: a hook that does either can block a prompt
+# or leak text into the session's context.
+set -uo pipefail
+
+event="${1:-}"
+dir="${CLAUDE_PLANTER_DIR:-$HOME/.claude/planter}"
+
+# The hot path, taken on most tool calls: a tool finished in a session whose plant
+# is already awake, so there is nothing to record. Answered with a single grep,
+# before spending a jq on the payload. Claude Code exports the session id to its
+# children; if that ever stops being true, or the id names no awake plant, this
+# falls through to the full path below and stays correct.
+if [[ "$event" == "tool" && -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    if grep -q '"state": *"working"' "$dir/$CLAUDE_CODE_SESSION_ID.json" 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+# read -d '' takes the whole payload with a builtin, saving a process.
+payload=""
+IFS= read -r -d '' payload || true
+
+# Subagent events report the subagent's own id in .session_id, so prefer the
+# parent's id and record the work against the session you actually see.
+IFS=$'\t' read -r sid cwd < <(
+    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // "")] | @tsv' \
+        <<<"$payload" 2>/dev/null
+)
+[[ -n "${sid:-}" ]] || exit 0
+
+mkdir -p "$dir" 2>/dev/null
+file="$dir/$sid.json"
+dir_hook="$dir/label-hook"
+
+if [[ "$event" == "end" ]]; then
+    rm -f "$file"
+    exit 0
+fi
+
+# Same short-circuit as above, for the case where the session id came from the
+# payload rather than the environment.
+if [[ "$event" == "tool" ]]; then
+    grep -q '"state": *"working"' "$file" 2>/dev/null && exit 0
+fi
+
+now="$(date +%s)"
+created="" agents=0 pid="" state="waiting" turn=0 label=""
+
+if [[ -f "$file" ]]; then
+    IFS=$'\t' read -r created agents pid state turn label < <(
+        jq -r '[(.created_at // "" | tostring), (.agents // 0 | tostring),
+                (.pid // "" | tostring), (.state // "waiting"),
+                (.turn // 0 | tostring), (.label // "")] | @tsv' "$file" 2>/dev/null
+    )
+else
+    # Only a real session event may create a plant. A subagent or tool event for an
+    # unknown session means the session predates these hooks; leave it alone
+    # rather than invent a plant for it.
+    case "$event" in
+        tool | agent-start | agent-stop) exit 0 ;;
+    esac
+fi
+
+# Nothing to record: the plant already looks the way this event would leave it.
+[[ "$event" == "tool" && "$state" == "working" ]] && exit 0
+
+# The label is worked out once, when the plant is created, and never changed after.
+# The payload's cwd follows the session's *shell*, which wanders into agent
+# worktrees and subdirectories as work goes on, so a label that tracked it would
+# rename itself mid-session. CLAUDE_PROJECT_DIR, where Claude Code provides it,
+# is the session's root and does not wander.
+if [[ -z "${label:-}" ]]; then
+    dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+    dir="${dir%/}"
+    label=""
+
+    # A directory basename is a poor label for worktrees named after a uuid or a
+    # ticket id. If $CLAUDE_PLANTER_DIR/label-hook exists, it gets the session's
+    # directory and may print a better name; anything it prints wins. This runs
+    # once per session, never on the tool path.
+    if [[ -x "$dir_hook" ]]; then
+        label="$("$dir_hook" "$dir" 2>/dev/null | head -1)"
+        label="${label//[$'\n\r\t']/}"
+    fi
+
+    [[ -n "$label" ]] || label="${dir##*/}"
+fi
+
+[[ "${agents:-}" =~ ^[0-9]+$ ]] || agents=0
+[[ "${turn:-}" =~ ^[01]$ ]] || turn=0
+[[ "${created:-}" =~ ^[0-9]+$ ]] || created="$now"
+
+case "$event" in
+    start)
+        state="waiting"
+        turn=0
+        ;;
+    prompt)
+        state="working"
+        turn=1
+        ;;
+    tool) state="working" ;;
+    notify) state="attention" ;;
+    agent-start)
+        agents=$((agents + 1))
+        state="working"
+        ;;
+    agent-stop)
+        ((agents > 0)) && agents=$((agents - 1))
+        # The last background agent finishing after the turn ended is the moment
+        # the session really becomes your move.
+        ((agents == 0 && turn == 0)) && state="waiting"
+        ;;
+    stop)
+        turn=0
+        # A finished turn is only your move if nothing is still running for you.
+        ((agents > 0)) && state="working" || state="waiting"
+        ;;
+esac
+
+# The claude process that owns this session. The overlay uses it to drop plants
+# whose session died without ever running SessionEnd. Claude Code exports the pid
+# to its children; the walk up the process tree is the fallback if that changes.
+if [[ ! "${pid:-}" =~ ^[0-9]+$ ]] || ((pid == 0)); then
+    pid=0
+    if [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]]; then
+        pid="$CLAUDE_PID"
+    else
+        p="$PPID"
+        for _ in 1 2 3 4 5 6; do
+            [[ -n "$p" && "$p" -gt 1 ]] || break
+            if [[ "$(ps -p "$p" -o comm= 2>/dev/null)" == *claude* ]]; then
+                pid="$p"
+                break
+            fi
+            p="$(ps -p "$p" -o ppid= 2>/dev/null | tr -d ' ')"
+        done
+    fi
+fi
+
+tmp="$file.tmp.$$"
+jq -nc \
+    --arg sid "$sid" --arg label "$label" --arg state "$state" \
+    --argjson agents "$agents" --argjson pid "$pid" \
+    --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
+    '{session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
+      pid: $pid, created_at: $created, updated_at: $now}' \
+    >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
+rm -f "$tmp" 2>/dev/null
+exit 0
