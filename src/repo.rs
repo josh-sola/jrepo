@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,6 +55,7 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
         link_base_shared_path(&base, &shared_dir, &backup_dir, relpath)?;
     }
     exclude_shared_paths(&base, &shared)?;
+    install_base_commit_block(&repo_dir, &base, &opts.name)?;
 
     let steps = detect_steps(&base);
 
@@ -277,6 +278,60 @@ fn exclude_shared_paths(base: &Path, shared: &[String]) -> Result<()> {
     fs::write(&tmp, out).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, &exclude_path)
         .with_context(|| format!("renaming {} into place", tmp.display()))
+}
+
+const HOOKS_DIR_NAME: &str = "hooks";
+
+/// Blocks commits in base without touching `.git/hooks`: the monorepo sets
+/// `core.hooksPath=.husky` repo-wide, which makes `.git/hooks/*` dead code.
+/// A `--worktree`-scoped `core.hooksPath` is the only override git offers
+/// that applies to just this checkout and not to any linked worktree, since
+/// each worktree resolves `core.hooksPath` from its own `config.worktree`
+/// (or, for the main worktree, the common one) rather than a shared file.
+fn install_base_commit_block(repo_dir: &Path, base: &Path, repo_name: &str) -> Result<()> {
+    let hooks_dir = repo_dir.join(HOOKS_DIR_NAME);
+    fs::create_dir_all(&hooks_dir)?;
+    write_guard_hook(&hooks_dir, "pre-commit", repo_name)?;
+    write_guard_hook(&hooks_dir, "pre-push", repo_name)?;
+
+    match git::config_get(base, "--local", "extensions.worktreeConfig").as_deref() {
+        Some("true") => {}
+        None => git::config_set(base, "--local", "extensions.worktreeConfig", "true")?,
+        Some(other) => {
+            eprintln!(
+                "warning: {} has extensions.worktreeConfig={other}; the base commit block needs \
+                 it set to true and was not installed",
+                base.display()
+            );
+            return Ok(());
+        }
+    }
+
+    let hooks_dir_str = hooks_dir.to_string_lossy().to_string();
+    match git::config_get(base, "--worktree", "core.hooksPath") {
+        Some(existing) if existing == hooks_dir_str => {}
+        Some(existing) => {
+            eprintln!(
+                "warning: {} already has a worktree-scoped core.hooksPath ({existing}); leaving \
+                 it in place instead of installing the base commit block",
+                base.display()
+            );
+        }
+        None => git::config_set(base, "--worktree", "core.hooksPath", &hooks_dir_str)?,
+    }
+    Ok(())
+}
+
+fn write_guard_hook(hooks_dir: &Path, name: &str, repo_name: &str) -> Result<()> {
+    let path = hooks_dir.join(name);
+    let script = format!(
+        "#!/bin/sh\necho \"error: this is {repo_name}'s base checkout — it stays on trunk.\" >&2\n\
+         echo \"run: wt new {repo_name} --name \\\"<short summary>\\\" and commit there instead.\" >&2\n\
+         exit 1\n"
+    );
+    fs::write(&path, script).with_context(|| format!("writing {}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod {}", path.display()))
 }
 
 fn detect_steps(base: &Path) -> Vec<Step> {

@@ -12,9 +12,14 @@ every other tree instead of duplicated per tree.
 ./install.sh
 ```
 
-This runs `cargo install --path .` (so `wt` lands on `~/.cargo/bin/wt`) and
-adds a `wt()` shell function to `~/.zshrc`, marker-guarded so re-running is
-safe. Open a new shell, or `source ~/.zshrc`, afterward.
+This runs `cargo install --path .` (so `wt` lands on `~/.cargo/bin/wt`),
+adds a `wt()` shell function to `~/.zshrc`, symlinks `~/.claude/skills/wt`
+to `plugin/`, registers the `SessionStart`/`CwdChanged` hook in
+`~/.claude/settings.json`, and writes (but does not load) a LaunchAgent that
+runs `wt sync` every 5 minutes. Every step is marker-guarded so re-running is
+safe. Open a new shell, or `source ~/.zshrc`, afterward; run the
+`launchctl bootstrap` command the installer prints when you want the
+background sync active.
 
 The shell function exists only because a child process can't change its
 parent shell's directory: `wt go`/`wt cd` resolve a selector to a path and
@@ -79,6 +84,17 @@ wt doctor [--fix]
     # --fix drops stale entries and runs `git worktree prune`. Never
     # touches a worktree wt didn't create.
 
+wt sync [<repo>]
+    # fetch and fast-forward base's trunk; refuses if base is dirty
+    # (never `reset --hard`, never force). No argument syncs every
+    # registered repo. Run by the LaunchAgent every 5 minutes.
+
+wt claude [<selector>|<repo>]
+    # exec `claude` (process replacement) with cwd set: a selector
+    # resolves to that tree, a bare registered repo name means its base,
+    # no argument means the current directory's tree or base if there is
+    # one. Warns to stderr and proceeds anyway when the target is base.
+
 wt go <selector>
 wt cd <selector>
     # shell-function only: cd into a worktree
@@ -90,3 +106,29 @@ Ambiguity is an error listing the candidates — never a guess.
 
 Provisioning steps and the shared/copy path lists are per-repo data in
 `data.json`, seeded from a repo's `.worktreeinclude` if it has one.
+
+## Integrations
+
+- **Statusline.** `statusline.sh` calls `wt name --path "$PWD"` and falls
+  back to the directory basename when that prints nothing.
+- **Session hook.** `hooks/session-context.sh` backs the `SessionStart` and
+  `CwdChanged` Claude Code hooks: in a tree it surfaces the tree's name,
+  branch, and `plans/` path; in base it surfaces that base stays on trunk
+  and `wt new` is how to start work. `CwdChanged` can't inject model
+  context (no `additionalContext` support there), so it delivers the same
+  text as a `systemMessage` instead — a real Claude Code limitation, not a
+  half-finished feature.
+- **Skill.** `plugin/` is a Claude Code skill documenting `wt` for agents,
+  installed at `~/.claude/skills/wt`.
+- **Base commit block.** `wt init` sets a `--worktree`-scoped
+  `core.hooksPath` on base pointing at generated `pre-commit`/`pre-push`
+  hooks that fail with a message pointing at `wt new`. This needs
+  `extensions.worktreeConfig` (`wt init` enables it if unset) and never
+  overwrites an existing worktree-scoped `core.hooksPath`. `git worktree
+  add` copies base's `config.worktree` into every new tree, so `wt new`
+  clears the copied `core.hooksPath` from each tree right after creating
+  it — otherwise every tree would inherit base's block instead of whatever
+  hooks path the repo normally uses (e.g. Husky's `.husky`).
+- **LaunchAgent.** `com.joshbassin.wt.sync`, written (not loaded) by
+  `install.sh`, runs `wt sync` every 5 minutes and logs to
+  `~/repos/wt/wt-sync.log` / `wt-sync.err.log`.

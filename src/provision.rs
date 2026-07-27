@@ -58,6 +58,7 @@ pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<
             store::with_store_lock(root, |s| {
                 if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
                     t.state = TreeState::Failed;
+                    t.provision_pid = None;
                 }
                 Ok(())
             })?;
@@ -71,6 +72,7 @@ pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<
             t.step_label = None;
             t.step_index = None;
             t.step_total = None;
+            t.provision_pid = None;
         }
         Ok(())
     })?;

@@ -88,6 +88,9 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
     let tree_path = repo_dir.join("trees").join(id.to_string());
     let start_point = format!("origin/{}", repo.trunk);
     git::worktree_add(&repo.base, &tree_path, &branch, &start_point)?;
+    if let Err(e) = git::clear_worktree_hooks_path(&tree_path) {
+        eprintln!("warning: could not clear inherited worktree hooksPath: {e:#}");
+    }
     let tree_path = fs::canonicalize(&tree_path)?;
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
 
@@ -108,6 +111,7 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
             step_index: None,
             step_total: None,
             log_path: Some(log_path.clone()),
+            provision_pid: None,
         });
         Ok(())
     })?;
@@ -124,7 +128,13 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
         );
     }
 
-    spawn_background_provisioning(root, id, &log_path, &opts.profiles)?;
+    let pid = spawn_background_provisioning(root, id, &log_path, &opts.profiles)?;
+    store::with_store_lock(root, |s| {
+        if let Some(t) = s.trees.iter_mut().find(|t| t.id == id) {
+            t.provision_pid = Some(pid);
+        }
+        Ok(())
+    })?;
 
     println!("{}", tree_path.display());
     Ok(tree_path)
@@ -140,7 +150,7 @@ fn spawn_background_provisioning(
     id: Uuid,
     log_path: &Path,
     profiles: &Option<Vec<String>>,
-) -> Result<()> {
+) -> Result<u32> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     let stdout_log =
         fs::File::create(log_path).with_context(|| format!("creating {}", log_path.display()))?;
@@ -159,8 +169,8 @@ fn spawn_background_provisioning(
         .stderr(stderr_log)
         .process_group(0);
 
-    cmd.spawn().context("spawning background provisioning")?;
-    Ok(())
+    let child = cmd.spawn().context("spawning background provisioning")?;
+    Ok(child.id())
 }
 
 /// Leaves the tree on disk and registered as `Failed` rather than cleaning
@@ -275,11 +285,20 @@ pub fn rm_tree(root: &Path, selector: &str, force: bool, delete_branch: bool) ->
     let name = tree.name.clone();
     let branch = tree.branch.clone();
     let tree_path = tree.path.clone();
+    let state = tree.state;
+    let provision_pid = tree.provision_pid;
     let repo = store
         .repos
         .get(&tree.repo)
         .with_context(|| format!("tree '{name}' references unknown repo '{}'", tree.repo))?
         .clone();
+
+    if state == TreeState::Provisioning && !force {
+        bail!(
+            "tree '{name}' is still provisioning; run `wt wait '{name}'` first, or pass --force \
+             to stop it and remove anyway"
+        );
+    }
 
     let unpushed = branch_has_unpushed_commits(&repo.base, &branch, &repo.trunk)?;
 
@@ -296,21 +315,28 @@ pub fn rm_tree(root: &Path, selector: &str, force: bool, delete_branch: bool) ->
             }
         }
 
-        let remove_result = remove_worktree(&repo.base, &tree_path, force);
+        // Only reachable with `force` when still provisioning (the guard
+        // above already refused otherwise), so it's always correct to stop
+        // the child here before the directory disappears under it.
+        if state == TreeState::Provisioning {
+            crate::proc::stop_provisioning_child(provision_pid, id);
+        }
+
+        let remove_result = remove_tree_dir(&tree_path);
         if tree_path.exists() {
             let err = match remove_result {
                 Ok(()) => anyhow::anyhow!(
-                    "git reported success but {} is still on disk",
+                    "removal reported success but {} is still on disk",
                     tree_path.display()
                 ),
                 Err(e) => e,
             };
             bail!(
                 "failed to remove worktree at {}: {err:#}. The registry entry is kept; remove it \
-                 by hand (git -C {} worktree remove --force \"{}\") or run `wt doctor --fix`.",
+                 by hand (rm -rf \"{}\" && git -C {} worktree prune) or run `wt doctor --fix`.",
                 tree_path.display(),
-                repo.base.display(),
-                tree_path.display()
+                tree_path.display(),
+                repo.base.display()
             );
         }
         if let Err(e) = remove_result {
@@ -343,22 +369,31 @@ pub fn rm_tree(root: &Path, selector: &str, force: bool, delete_branch: bool) ->
     Ok(())
 }
 
-/// A submodule-containing tree makes `git worktree remove` refuse outright;
-/// deinit first and fall back to attempting removal anyway if that fails,
-/// so an unrelated submodule problem never blocks a removal that would
-/// otherwise succeed. Verified empirically: even after a clean deinit, git
-/// still refuses a former submodule path without `--force` on the remove
-/// itself, so a tree with submodules always gets `--force` regardless of
-/// the caller's own flag — our dirty/unpushed checks already ran earlier.
-fn remove_worktree(base: &Path, tree_path: &Path, force: bool) -> Result<()> {
-    let mut force = force;
-    if tree_path.join(".gitmodules").exists() {
-        if let Err(e) = git::submodule_deinit_all(tree_path) {
-            eprintln!("warning: submodule deinit failed ({e}); attempting removal anyway");
+/// Deletes the tree's directory directly instead of calling `git worktree
+/// remove`. wt's own dirty/unpushed guards already ran by this point, so
+/// git's refusal buys nothing — and for a tree with submodules, routing
+/// around that refusal the obvious way (`git submodule deinit` first) is
+/// wrong: deinit rewrites `submodule.<name>.url`/`.active` in the *common*
+/// `.git/config`, shared by base and every other worktree, corrupting their
+/// submodule registration too. The caller's `git worktree prune` afterward
+/// clears the now-stale administrative entry this leaves behind.
+/// A few retries: a step that was still running when it got signalled can
+/// keep a writer inside the tree for a moment after the signal is sent, and
+/// that writer can lose the race with this walk by a hair.
+fn remove_tree_dir(tree_path: &Path) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 0..3 {
+        match fs::remove_dir_all(tree_path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
         }
-        force = true;
     }
-    git::worktree_remove(base, tree_path, force)
+    Err(last_err.unwrap()).with_context(|| format!("removing {}", tree_path.display()))
 }
 
 fn branch_has_unpushed_commits(base: &Path, branch: &str, trunk: &str) -> Result<bool> {
@@ -554,6 +589,7 @@ mod tests {
             step_index: None,
             step_total: None,
             log_path: None,
+            provision_pid: None,
         };
 
         let reason = gc_skip_reason(&repo, &tree).unwrap().unwrap();

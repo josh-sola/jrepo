@@ -72,6 +72,15 @@ pub struct Tree {
     pub step_total: Option<u32>,
     #[serde(rename = "logPath", default, skip_serializing_if = "Option::is_none")]
     pub log_path: Option<PathBuf>,
+    /// The `wt __provision` child's pid, so a teardown mid-provisioning can
+    /// stop it before deleting the directory out from under it. `None`
+    /// once provisioning reaches `ready` or `failed`.
+    #[serde(
+        rename = "provisionPid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provision_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +225,7 @@ mod tests {
             step_index: None,
             step_total: None,
             log_path: None,
+            provision_pid: None,
         }
     }
 

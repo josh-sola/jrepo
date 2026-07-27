@@ -111,31 +111,17 @@ pub fn worktree_add(base: &Path, tree_path: &Path, branch: &str, start_point: &s
     Ok(())
 }
 
-pub fn worktree_remove(base: &Path, tree_path: &Path, force: bool) -> Result<()> {
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    let path_str = tree_path.to_string_lossy().to_string();
-    args.push(&path_str);
-    let out = run(&args, base)?;
-    if !out.status.success() {
-        bail!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-pub fn submodule_deinit_all(tree_path: &Path) -> Result<()> {
-    let out = run(&["submodule", "deinit", "-f", "--all"], tree_path)?;
-    if !out.status.success() {
-        bail!(
-            "git submodule deinit failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+/// `git worktree add` copies the main worktree's `config.worktree` into
+/// every new linked worktree's admin dir when `extensions.worktreeConfig`
+/// is on (verified empirically) — so a `core.hooksPath` set on base to
+/// block commits there arrives already active in every fresh tree unless
+/// something clears it. A missing key here is normal, not an error:
+/// `--unset-all` exits non-zero when there was nothing copied.
+pub fn clear_worktree_hooks_path(tree_path: &Path) -> Result<()> {
+    run(
+        &["config", "--worktree", "--unset-all", "core.hooksPath"],
+        tree_path,
+    )?;
     Ok(())
 }
 
@@ -159,6 +145,60 @@ pub fn is_dirty(path: &Path) -> Result<bool> {
         );
     }
     Ok(!out.stdout.is_empty())
+}
+
+pub fn status_porcelain(path: &Path) -> Result<Vec<String>> {
+    let out = run(&["status", "--porcelain"], path)?;
+    if !out.status.success() {
+        bail!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn current_branch(path: &Path) -> Result<String> {
+    stdout_trimmed(&["rev-parse", "--abbrev-ref", "HEAD"], path)
+}
+
+pub fn rev_parse(path: &Path, rev: &str) -> Result<String> {
+    stdout_trimmed(&["rev-parse", rev], path)
+}
+
+pub fn merge_ff_only(path: &Path, rev: &str) -> Result<()> {
+    let out = run(&["merge", "--ff-only", rev], path)?;
+    if !out.status.success() {
+        bail!(
+            "git merge --ff-only {rev} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// `scope` is `--local` or `--worktree`. `None` means unset, not an error —
+/// `git config --get` exits non-zero for a missing key.
+pub fn config_get(path: &Path, scope: &str, key: &str) -> Option<String> {
+    let out = run(&["config", scope, "--get", key], path).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub fn config_set(path: &Path, scope: &str, key: &str, value: &str) -> Result<()> {
+    let out = run(&["config", scope, key, value], path)?;
+    if !out.status.success() {
+        bail!(
+            "git config {scope} {key} {value} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// `None` means no upstream is configured, not that the branch is clean.

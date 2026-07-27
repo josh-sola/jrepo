@@ -1,7 +1,11 @@
+mod claude;
+mod context;
 mod git;
+mod proc;
 mod provision;
 mod repo;
 mod store;
+mod sync;
 mod tree;
 
 use std::path::{Path, PathBuf};
@@ -87,12 +91,22 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Fetch and fast-forward base's trunk; refuses if base is dirty.
+    Sync { repo: Option<String> },
+    /// Exec `claude` with cwd set to a tree, a repo's base, or the cwd's tree.
+    Claude { target: Option<String> },
     /// Runs a tree's provisioning steps; spawned detached by `wt new`.
     #[command(name = "__provision", hide = true)]
     Provision {
         tree_id: Uuid,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+    },
+    /// Prints SessionStart/CwdChanged hook context; backs `hooks/session-context.sh`.
+    #[command(name = "__session-context", hide = true)]
+    SessionContext {
+        #[arg(long)]
+        path: Option<PathBuf>,
     },
 }
 
@@ -149,7 +163,10 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
+        Command::Sync { repo } => sync::sync(root, repo),
+        Command::Claude { target } => claude::exec_claude(root, target),
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
+        Command::SessionContext { path } => context::session_context(root, path),
     }
 }
 
@@ -261,6 +278,23 @@ fn step_str(t: &store::Tree) -> String {
     }
 }
 
+/// A `provisioning` tree whose recorded pid is no longer alive is wedged,
+/// not progressing — a killed child leaves the row in `provisioning`
+/// forever otherwise. `None` (not yet recorded, or an older registry entry)
+/// is not flagged: there is nothing to compare against.
+fn provisioning_is_stale(t: &store::Tree) -> bool {
+    t.state == store::TreeState::Provisioning
+        && t.provision_pid.is_some_and(|pid| !proc::pid_alive(pid))
+}
+
+fn status_state_str(t: &store::Tree) -> String {
+    if provisioning_is_stale(t) {
+        format!("{} (stale)", state_str(t.state))
+    } else {
+        state_str(t.state).to_string()
+    }
+}
+
 fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
     let store = store::load(root)?;
     let trees: Vec<&store::Tree> = match &selector {
@@ -283,6 +317,7 @@ fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
                     "branch": t.branch,
                     "path": t.path,
                     "state": t.state,
+                    "stale": provisioning_is_stale(t),
                     "stepLabel": t.step_label,
                     "stepIndex": t.step_index,
                     "stepTotal": t.step_total,
@@ -301,7 +336,7 @@ fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
     }
 
     println!(
-        "{:<24} {:<12} {:<13} {:<32} {:<8} LOG",
+        "{:<24} {:<12} {:<21} {:<32} {:<8} LOG",
         "NAME", "REPO", "STATE", "STEP", "ELAPSED"
     );
     for t in trees {
@@ -311,10 +346,10 @@ fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
             .as_ref()
             .map_or("-".to_string(), |p| p.display().to_string());
         println!(
-            "{:<24} {:<12} {:<13} {:<32} {:<8} {}",
+            "{:<24} {:<12} {:<21} {:<32} {:<8} {}",
             t.name,
             t.repo,
-            state_str(t.state),
+            status_state_str(t),
             step_str(t),
             elapsed,
             log

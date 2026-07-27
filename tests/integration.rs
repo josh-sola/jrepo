@@ -379,8 +379,13 @@ fn fixture_repo_with_submodule(dir: &Path) -> PathBuf {
     base
 }
 
+/// `git submodule deinit` rewrites `submodule.<name>.url`/`.active` in the
+/// *common* `.git/config` — shared by base and every other worktree — so a
+/// tree teardown must never call it. This asserts the exact submodule
+/// config and status in base are byte-identical before and after `wt rm`,
+/// not just that the tree itself is gone.
 #[test]
-fn rm_deinits_submodules_before_removing_worktree() {
+fn rm_never_touches_shared_submodule_config() {
     let tmp = unique_dir("submodule-rm");
     let base = fixture_repo_with_submodule(&tmp);
     let root = tmp.join("wt-root");
@@ -441,8 +446,12 @@ fn rm_deinits_submodules_before_removing_worktree() {
         .expect("spawn git worktree remove");
     assert!(
         !plain_remove.status.success(),
-        "expected a plain 'git worktree remove' to refuse a tree with a checked-out submodule"
+        "expected a plain 'git worktree remove' to refuse a tree with a checked-out submodule \
+         — this is exactly the refusal wt must route around without calling submodule deinit"
     );
+
+    let config_before = submodule_config(&base);
+    let status_before = submodule_status(&base);
 
     assert_success(&run_wt(&root, &["rm", "submodule tree"]), "rm");
     assert!(
@@ -451,10 +460,49 @@ fn rm_deinits_submodules_before_removing_worktree() {
         tree_path.display()
     );
 
+    let worktrees = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&base)
+        .output()
+        .expect("spawn git worktree list");
+    assert!(
+        !String::from_utf8_lossy(&worktrees.stdout).contains(tree_path.to_str().unwrap()),
+        "git worktree list still mentions the removed tree"
+    );
+
+    assert_eq!(
+        submodule_config(&base),
+        config_before,
+        "wt rm must never rewrite the shared submodule config"
+    );
+    assert_eq!(
+        submodule_status(&base),
+        status_before,
+        "wt rm must never change base's own submodule status"
+    );
+
     let out = run_wt(&root, &["ls", "--json"]);
     assert_success(&out, "ls --json");
     let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(entries.as_array().unwrap().len(), 0);
+}
+
+fn submodule_config(base: &Path) -> String {
+    let out = Command::new("git")
+        .args(["config", "--get-regexp", "^submodule\\."])
+        .current_dir(base)
+        .output()
+        .expect("spawn git config --get-regexp");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn submodule_status(base: &Path) -> String {
+    let out = Command::new("git")
+        .args(["submodule", "status"])
+        .current_dir(base)
+        .output()
+        .expect("spawn git submodule status");
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 #[test]
@@ -921,4 +969,558 @@ fn doctor_reports_stale_and_unregistered_entries_and_fix_prunes_stale_ones() {
         &base,
     );
     git(&["branch", "-D", "manual-branch"], &base);
+}
+
+fn git_rev_parse(path: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(path)
+        .output()
+        .expect("spawn git rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Pushes one new commit straight to `bare` from a throwaway clone, so a
+/// test can put `origin/<trunk>` ahead of `base` without touching `base`
+/// itself.
+fn push_new_commit_to_origin(bare: &Path, tmp: &Path, filename: &str) {
+    let clone_dir = tmp.join(format!("advance-{}", Uuid::now_v7()));
+    git(
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone_dir.to_str().unwrap(),
+        ],
+        tmp,
+    );
+    std::fs::write(clone_dir.join(filename), "advance\n").unwrap();
+    git(&["add", "-A"], &clone_dir);
+    git(
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "advance",
+        ],
+        &clone_dir,
+    );
+    git(&["push", "-q", "origin", "master"], &clone_dir);
+}
+
+#[test]
+fn sync_fast_forwards_a_clean_base_on_trunk() {
+    let tmp = unique_dir("sync-ff");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
+    let head_before = git_rev_parse(&base, "HEAD");
+
+    let out = run_wt(&root, &["sync", "myrepo"]);
+    assert_success(&out, "sync");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("fast-forwarded"),
+        "expected a fast-forward line: {stdout}"
+    );
+
+    assert_ne!(
+        head_before,
+        git_rev_parse(&base, "HEAD"),
+        "base HEAD should have moved"
+    );
+    assert!(
+        base.join("advance.txt").exists(),
+        "fast-forward should update base's working tree"
+    );
+}
+
+#[test]
+fn sync_refuses_and_touches_nothing_when_base_is_dirty() {
+    let tmp = unique_dir("sync-dirty");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
+    std::fs::write(base.join("dirty.txt"), "uncommitted\n").unwrap();
+    let head_before = git_rev_parse(&base, "HEAD");
+
+    let out = run_wt(&root, &["sync", "myrepo"]);
+    assert!(!out.status.success(), "sync should fail when base is dirty");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("dirty"),
+        "expected a dirty message: {stdout}"
+    );
+
+    assert_eq!(
+        head_before,
+        git_rev_parse(&base, "HEAD"),
+        "a dirty base must not be fast-forwarded"
+    );
+    assert!(
+        base.join("dirty.txt").exists(),
+        "the dirty file itself must be left alone"
+    );
+}
+
+#[test]
+fn sync_skips_fast_forward_when_base_is_on_another_branch() {
+    let tmp = unique_dir("sync-branch");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    git(&["checkout", "-q", "-b", "not-trunk"], &base);
+
+    let out = run_wt(&root, &["sync", "myrepo"]);
+    assert_success(&out, "sync");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("skipping fast-forward"),
+        "expected a skip message: {stdout}"
+    );
+}
+
+/// Runs `wt claude` with `PATH` pointed at an empty directory, so resolution
+/// always reaches the same "claude is not on PATH" failure regardless of
+/// whether the host actually has `claude` installed — the assertions below
+/// only care what happened *before* that point.
+fn run_wt_claude_without_claude_on_path(root: &Path, args: &[&str]) -> Output {
+    Command::new(wt_bin())
+        .args(args)
+        .env("WT_ROOT", root)
+        .env("PATH", "/nonexistent-bin-dir")
+        .output()
+        .expect("spawn wt")
+}
+
+#[test]
+fn claude_on_a_bare_repo_name_warns_about_base_then_fails_on_missing_binary() {
+    let tmp = unique_dir("claude-base");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "myrepo"]);
+    assert!(
+        !out.status.success(),
+        "expected failure with claude off PATH"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("base is for reading"),
+        "missing base notice: {stderr}"
+    );
+    assert!(
+        stderr.contains("not on PATH"),
+        "missing not-on-PATH error: {stderr}"
+    );
+}
+
+#[test]
+fn claude_on_a_tree_selector_skips_the_base_notice() {
+    let tmp = unique_dir("claude-tree");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "claude target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "claude target"]), "wait");
+
+    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "claude target"]);
+    assert!(
+        !out.status.success(),
+        "expected failure with claude off PATH"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("base is for reading"),
+        "a tree target should not print the base notice: {stderr}"
+    );
+    assert!(
+        stderr.contains("not on PATH"),
+        "missing not-on-PATH error: {stderr}"
+    );
+}
+
+#[test]
+fn claude_on_an_unknown_selector_fails_before_touching_path_lookup() {
+    let tmp = unique_dir("claude-unknown");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "nope"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no tree matches selector"),
+        "expected a selector-resolution error, not a PATH error: {stderr}"
+    );
+}
+
+#[test]
+fn init_blocks_commits_in_base_but_not_in_a_tree() {
+    let tmp = unique_dir("commit-block");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    std::fs::write(base.join("blocked.txt"), "nope\n").unwrap();
+    git(&["add", "-A"], &base);
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "should be blocked",
+        ])
+        .current_dir(&base)
+        .output()
+        .expect("spawn git commit");
+    assert!(
+        !commit.status.success(),
+        "a commit in base should be blocked"
+    );
+    assert!(
+        String::from_utf8_lossy(&commit.stderr).contains("wt new"),
+        "the block message should point at `wt new`: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "commit ok here"]);
+    assert_success(&out, "new");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_success(&run_wt(&root, &["wait", "commit ok here"]), "wait");
+
+    std::fs::write(tree_path.join("allowed.txt"), "yes\n").unwrap();
+    git(&["add", "-A"], &tree_path);
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "should succeed",
+        ])
+        .current_dir(&tree_path)
+        .output()
+        .expect("spawn git commit");
+    assert!(
+        commit.status.success(),
+        "a commit in a tree must still succeed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+#[test]
+fn init_is_idempotent_about_the_commit_block() {
+    let tmp = unique_dir("commit-block-idem");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    let args = ["init", "myrepo", "--adopt", base.to_str().unwrap()];
+
+    assert_success(&run_wt(&root, &args), "first init");
+    assert_success(&run_wt(&root, &args), "second init");
+
+    let hooks_path_after = Command::new("git")
+        .args(["config", "--worktree", "--get", "core.hooksPath"])
+        .current_dir(&base)
+        .output()
+        .expect("spawn git config");
+    assert!(hooks_path_after.status.success());
+
+    std::fs::write(base.join("blocked-again.txt"), "nope\n").unwrap();
+    git(&["add", "-A"], &base);
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "still blocked",
+        ])
+        .current_dir(&base)
+        .output()
+        .expect("spawn git commit");
+    assert!(
+        !commit.status.success(),
+        "the block must survive re-running init"
+    );
+}
+
+/// Appends a step to a registered repo's config directly in `data.json` —
+/// there's no CLI surface for authoring a repo's provisioning steps, and a
+/// test that needs a tree to stay `provisioning` for a controlled window
+/// needs a step slower than anything auto-detected from a bare fixture repo.
+fn inject_step(root: &Path, repo_name: &str, label: &str, cmd: &[&str]) {
+    let data_path = root.join("data.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
+    value["repos"][repo_name]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "label": label,
+            "profile": "test",
+            "cwd": ".",
+            "cmd": cmd,
+        }));
+    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+fn mutate_tree_json(root: &Path, tree_name: &str, f: impl FnOnce(&mut serde_json::Value)) {
+    let data_path = root.join("data.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
+    let tree = value["trees"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["name"] == tree_name)
+        .expect("tree not found in data.json");
+    f(tree);
+    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+fn pgrep_matches(needle: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-f", needle])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn rm_refuses_a_provisioning_tree_without_force_then_stops_it_with_force() {
+    let tmp = unique_dir("rm-provisioning");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+
+    let marker = format!("wt-test-spin-{}", Uuid::now_v7());
+    inject_step(
+        &root,
+        "myrepo",
+        "spin",
+        &[
+            "sh",
+            "-c",
+            &format!("echo {marker}; while true; do sleep 0.2; done"),
+        ],
+    );
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "spinning tree"]);
+    assert_success(&out, "new");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    // Give the detached child a moment to actually exec the spin step.
+    for _ in 0..50 {
+        if pgrep_matches(&marker) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        pgrep_matches(&marker),
+        "the spin step should be running before either rm attempt"
+    );
+
+    let status = run_wt(&root, &["status", "--json"]);
+    assert_success(&status, "status --json");
+    let entries: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(entries[0]["name"], "spinning tree");
+    assert_eq!(entries[0]["state"], "provisioning");
+
+    let refused = run_wt(&root, &["rm", "spinning tree"]);
+    assert!(
+        !refused.status.success(),
+        "rm without --force must refuse a provisioning tree"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("provisioning") && stderr.contains("--force"),
+        "expected a provisioning refusal message: {stderr}"
+    );
+    assert!(tree_path.exists(), "tree must survive a refused rm");
+    assert!(
+        pgrep_matches(&marker),
+        "the spin step must still be running after a refused rm"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "spinning tree", "--force"]),
+        "rm --force",
+    );
+    assert!(!tree_path.exists(), "tree should be gone after --force");
+
+    for _ in 0..20 {
+        if !pgrep_matches(&marker) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !pgrep_matches(&marker),
+        "the spin step should be stopped by rm --force"
+    );
+}
+
+#[test]
+fn rm_force_removes_a_tree_whose_recorded_pid_is_long_gone() {
+    let tmp = unique_dir("rm-dead-pid");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "dead pid tree"]);
+    assert_success(&out, "new");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_success(&run_wt(&root, &["wait", "dead pid tree"]), "wait");
+
+    // Simulate a killed-and-reaped child: state forced back to
+    // `provisioning` with a pid outside any real range, so the `rm --force`
+    // path has to fall through its "already gone" case rather than one it
+    // can actually verify and signal.
+    mutate_tree_json(&root, "dead pid tree", |t| {
+        t["state"] = serde_json::json!("provisioning");
+        t["provisionPid"] = serde_json::json!(999_999);
+    });
+
+    let out = run_wt(&root, &["rm", "dead pid tree", "--force"]);
+    assert_success(&out, "rm --force on a tree with a dead recorded pid");
+    assert!(!tree_path.exists());
+}
+
+#[test]
+fn status_flags_a_provisioning_tree_whose_recorded_pid_is_dead() {
+    let tmp = unique_dir("status-stale");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "wedged tree"]);
+    assert_success(&out, "new");
+    assert_success(&run_wt(&root, &["wait", "wedged tree"]), "wait");
+
+    // A provisioning row with a pid that no longer resolves to anything is
+    // indistinguishable from real progress unless `status` says otherwise.
+    mutate_tree_json(&root, "wedged tree", |t| {
+        t["state"] = serde_json::json!("provisioning");
+        t["provisionPid"] = serde_json::json!(999_999);
+    });
+
+    let json_status = run_wt(&root, &["status", "--json"]);
+    assert_success(&json_status, "status --json");
+    let entries: serde_json::Value = serde_json::from_slice(&json_status.stdout).unwrap();
+    assert_eq!(entries[0]["stale"], true);
+
+    let text_status = run_wt(&root, &["status"]);
+    assert_success(&text_status, "status");
+    let stdout = String::from_utf8_lossy(&text_status.stdout);
+    assert!(
+        stdout.contains("stale"),
+        "expected a stale marker in status output: {stdout}"
+    );
+
+    assert_success(&run_wt(&root, &["rm", "wedged tree", "--force"]), "cleanup");
 }
