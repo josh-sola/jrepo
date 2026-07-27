@@ -94,7 +94,12 @@ enum Command {
     /// Fetch and fast-forward base's trunk; refuses if base is dirty.
     Sync { repo: Option<String> },
     /// Exec `claude` with cwd set to a tree, a repo's base, or the cwd's tree.
-    Claude { target: Option<String> },
+    /// Anything after `--` is passed straight to `claude`.
+    Claude {
+        target: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Runs a tree's provisioning steps; spawned detached by `wt new`.
     #[command(name = "__provision", hide = true)]
     Provision {
@@ -164,7 +169,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
         Command::Sync { repo } => sync::sync(root, repo),
-        Command::Claude { target } => claude::exec_claude(root, target),
+        Command::Claude { target, args } => claude::exec_claude(root, target, &args),
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
         Command::SessionContext { path } => context::session_context(root, path),
     }

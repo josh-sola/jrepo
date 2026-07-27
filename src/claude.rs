@@ -8,7 +8,7 @@ use crate::store::{self, Store};
 
 /// Execs `claude` with cwd set to the resolved target, replacing this
 /// process so the terminal, signals, and exit code pass straight through.
-pub fn exec_claude(root: &Path, target: Option<String>) -> Result<()> {
+pub fn exec_claude(root: &Path, target: Option<String>, args: &[String]) -> Result<()> {
     let store = store::load(root)?;
     let (cwd, is_base) = resolve_target(&store, target)?;
 
@@ -16,7 +16,7 @@ pub fn exec_claude(root: &Path, target: Option<String>) -> Result<()> {
         eprintln!("base is for reading; run `wt new <repo> --name \"...\"` to start work instead");
     }
 
-    let err = Command::new("claude").current_dir(&cwd).exec();
+    let err = Command::new("claude").current_dir(&cwd).args(args).exec();
     if err.kind() == std::io::ErrorKind::NotFound {
         bail!("`claude` is not on PATH");
     }
