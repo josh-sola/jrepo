@@ -51,7 +51,8 @@ rm -rf ~/.claude/planter     # state too, if you want it gone
 - **Drag** a plant to move the row. The position is remembered.
 - **⌘-drag** a plant to reorder it. Plants swap as the cursor crosses each
   neighbour, and the order is remembered per session.
-- **Right-click** for labels, **Reset order**, and **Quit**.
+- **Right-click** for labels, **Reset order**, and **Quit**. The label choice is
+  remembered, so hiding them once is enough.
 - Clicks between plants pass straight through to the window underneath.
 - The row hides itself when no sessions are live.
 

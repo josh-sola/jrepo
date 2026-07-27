@@ -19,7 +19,7 @@ struct Plant {
     var label: String
     /// What the overlay draws: shortened to keep the row tidy, then made unique.
     var display: String = ""
-    /// How many subagents are running for this session, drawn as seedlings.
+    /// How many subagents are running for this session, drawn as side buds.
     var agents: Int = 0
     var state: PlantState
     var createdAt: Double
@@ -52,9 +52,10 @@ enum Store {
 
     static var positionFile: URL { dir.appendingPathComponent("overlay-position.json") }
     static var orderFile: URL { dir.appendingPathComponent("order.json") }
+    static var prefsFile: URL { dir.appendingPathComponent("prefs.json") }
 
     private static var reservedFiles: Set<String> {
-        ["overlay-position.json", "order.json"]
+        ["overlay-position.json", "order.json", "prefs.json"]
     }
 
     /// Reads every live plant, oldest session first. Deletes the state files of
@@ -109,6 +110,23 @@ enum Store {
             let rb = rank[b.element.sessionID] ?? Int.max
             return ra == rb ? a.offset < b.offset : ra < rb
         }.map(\.element)
+    }
+
+    /// Whether labels were on last time. Nil means never chosen, so the default
+    /// applies. Kept so that hiding them from the right-click menu survives a
+    /// restart — otherwise a login item would bring them back every morning.
+    static func loadShowLabels() -> Bool? {
+        guard let data = try? Data(contentsOf: prefsFile),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return json["show_labels"] as? Bool
+    }
+
+    static func saveShowLabels(_ show: Bool) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["show_labels": show])
+        else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: prefsFile)
     }
 
     static func loadOrder() -> [String] {

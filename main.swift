@@ -211,6 +211,7 @@ final class PlanterView: NSView {
 
     @objc private func toggleLabels() {
         layout.showLabels.toggle()
+        Store.saveShowLabels(layout.showLabels)
         (window?.delegate as? OverlayController)?.refresh(force: true)
     }
 
@@ -458,9 +459,10 @@ if let path = flagValue("--preview") {
     exit(0)
 }
 
+// --no-labels wins for this run; otherwise the last right-click choice stands.
 let layout = Layout(
     scale: CGFloat(Double(flagValue("--scale") ?? "") ?? 3),
-    showLabels: !args.contains("--no-labels")
+    showLabels: args.contains("--no-labels") ? false : (Store.loadShowLabels() ?? true)
 )
 
 let app = NSApplication.shared
