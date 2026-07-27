@@ -6,8 +6,11 @@
 #   start        SessionStart     the plant appears
 #   prompt       UserPromptSubmit you gave Claude something to do
 #   tool         PostToolUse      still going (this is what clears a "!" once
-#                                 you have approved a permission prompt)
+#                and PostToolUseFailure  you have approved a permission prompt;
+#                                 the failure variant matters because a denied or
+#                                 failing call fires only that one)
 #   stop         Stop             Claude's turn ended
+#   permission   PermissionRequest a permission dialog is on screen
 #   notify       Notification     a permission prompt, or an idle nudge
 #   agent-start  SubagentStart    a subagent began
 #   agent-stop   SubagentStop     a subagent finished
@@ -38,8 +41,9 @@ IFS= read -r -d '' payload || true
 
 # Subagent events report the subagent's own id in .session_id, so prefer the
 # parent's id and record the work against the session you actually see.
-IFS=$'\t' read -r sid cwd message < <(
-    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // ""), (.message // "")] | @tsv' \
+IFS=$'\t' read -r sid cwd message ntype < <(
+    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // ""),
+            (.message // ""), (.notification_type // "")] | @tsv' \
         <<<"$payload" 2>/dev/null
 )
 [[ -n "${sid:-}" ]] || exit 0
@@ -133,15 +137,32 @@ case "$event" in
         state="working"
         since=0
         ;;
-    # Claude Code sends one notification when it needs permission and another
-    # when a session has simply gone quiet. Only the first is actually blocking,
-    # so only the first raises a "!"; the quiet one is already being told by the
-    # wilt, and hoisting a "!" for it was a false alarm.
+    # The dialog is on screen right now. This is the reliable signal: Claude Code
+    # holds notifications back for a few seconds, so a prompt you answer quickly
+    # never produces one, which left the "!" never appearing in practice.
+    permission)
+        start_waiting
+        state="attention"
+        ;;
+    # A backstop for permission prompts, and the only signal for the other
+    # notification kinds. A session that has merely gone quiet is not blocking, so
+    # it stays wilted rather than raising a "!" — the wilt already says it, and a
+    # "!" for it was a false alarm. notification_type is the documented field;
+    # the message text is the fallback if it is ever absent.
     notify)
         start_waiting
-        case "$message" in
-        *"waiting for your input"*) state="waiting" ;;
-        *) state="attention" ;;
+        case "${ntype:-}" in
+        permission_prompt | agent_needs_input | elicitation_dialog) state="attention" ;;
+        idle_prompt) state="waiting" ;;
+        "")
+            case "$message" in
+            *"waiting for your input"*) state="waiting" ;;
+            *) state="attention" ;;
+            esac
+            ;;
+        # Anything else (auth_success, agent_completed, …) is not about you being
+        # needed, so it must not change how the plant looks.
+        *) ;;
         esac
         ;;
     agent-start)

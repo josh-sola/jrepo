@@ -84,7 +84,9 @@ jq --arg hook "$hook" --arg own "$own_hooks" '
   | wire("SessionStart";    "start")
   | wire("UserPromptSubmit";"prompt")
   | wire("PostToolUse";     "tool")
+  | wire("PostToolUseFailure";"tool")
   | wire("Stop";            "stop")
+  | wire("PermissionRequest";"permission")
   | wire("Notification";    "notify")
   | wire("SubagentStart";   "agent-start")
   | wire("SubagentStop";    "agent-stop")
@@ -94,7 +96,16 @@ jq --arg hook "$hook" --arg own "$own_hooks" '
 # Never leave a half-written settings file behind.
 jq -e . "$tmp" >/dev/null
 mv "$tmp" "$settings"
-echo "wired 8 hooks into $settings"
+
+# Report what is actually in the file, not what this script meant to put there.
+# A hardcoded count once claimed nine hooks while writing eight.
+wired="$(jq -r --arg own "$own_hooks" '
+  [.hooks // {} | to_entries[]
+   | .key as $event
+   | .value[] | (.hooks // [])[] | select((.command // "") | test($own)) | $event]
+  | sort | join(" ")' "$settings")"
+echo "wired into $settings:"
+echo "  ${wired:-nothing — something went wrong}"
 
 # Leftovers from when this was called claude-pets.
 if [[ -e "$HOME/.local/bin/pets" || -e "$HOME/.claude/hooks/pet-state" ]]; then

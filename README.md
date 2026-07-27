@@ -24,9 +24,9 @@ the thing you actually want to know: which session you have been ignoring longes
 The clock starts when a session becomes your move, and survives an idle
 notification, so nothing resets it but you.
 
-Only a real permission prompt raises a `!`. Claude Code also notifies when a
-session has merely gone quiet, and treating that as blocking was a false alarm —
-the wilt is already saying it.
+Only a real permission prompt raises a `!`, and it appears the moment the dialog
+does. Claude Code also notifies when a session has merely gone quiet; treating that
+as blocking was a false alarm, since the wilt is already saying it.
 
 Every session gets its own colour from a palette of eight, picked by hashing the
 session id, so a plant keeps its variety for its whole life.
@@ -42,8 +42,8 @@ planter                      # start the overlay
 ```
 
 `install.sh` builds `~/.local/bin/planter`, installs a hook at
-`~/.claude/hooks/planter-state`, and wires eight hooks into
-`~/.claude/settings.json`, backing it up first. It needs `swiftc` (the Xcode
+`~/.claude/hooks/planter-state`, and wires ten hooks into
+`~/.claude/settings.json`, printing exactly which,, backing it up first. It needs `swiftc` (the Xcode
 command line tools) and `jq`. Re-running replaces its own hook entries rather
 than stacking them.
 
@@ -121,8 +121,9 @@ overlay watches that directory.
 | --- | --- |
 | `SessionStart` | appears, wilted |
 | `UserPromptSubmit` | blooms |
-| `PostToolUse` | keeps blooming — this is what clears a `!` after you approve |
-| `Notification` | shows `!`, unless it is only an idle nudge |
+| `PostToolUse` / `PostToolUseFailure` | keeps blooming — this is what clears a `!` after you answer |
+| `PermissionRequest` | shows `!` — a dialog is on screen |
+| `Notification` | shows `!` too, unless it is only an idle nudge |
 | `Stop` | wilts, **unless** a subagent is still running |
 | `SubagentStart` / `SubagentStop` | counts running agents up and down |
 | `SessionEnd` | disappears |
@@ -146,6 +147,12 @@ mid-session.
 **Wilting advances on its own.** The overlay works the stage out from a timestamp
 each time it re-reads the directory, so a plant keeps wilting without any hook
 firing — which matters, because a session waiting for you fires nothing at all.
+
+**A `!` needs `PermissionRequest`, not `Notification`.** Claude Code holds
+notifications back for a few seconds, so a dialog you answer quickly never
+produces one — which meant the `!` almost never appeared. `PermissionRequest`
+fires the moment the dialog does. The hook writes nothing to stdout and always
+exits 0, so it never influences the permission decision itself.
 
 **`planter-state` runs on every tool call**, so the common case — a tool
 finishing in a session that is already blooming — is answered by one `grep` and
