@@ -33,6 +33,13 @@ session id, so a plant keeps its variety for its whole life.
 
 macOS only — it draws with AppKit.
 
+Built against Claude Code 2.1.220. Most of it needs only long-standing hooks, but
+four features depend on newer events: the `!` needs `PermissionRequest`, side buds
+need `SubagentStart`, labels follow `CwdChanged`, and a failed call clears the `!`
+via `PostToolUseFailure`. On an older build those hooks simply never fire, and the
+rest still works — check `install.sh`'s output against your own
+`claude --version` if a feature seems missing.
+
 ## Install
 
 ```sh

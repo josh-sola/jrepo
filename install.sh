@@ -32,6 +32,11 @@ if [[ "${1:-}" == "--uninstall" ]]; then
               | map(select(((.hooks // []) | map(.command // "") | join(" ")
                             | test($own)) | not)));
           reduce (.hooks // {} | keys[]) as $e (.; strip($e))
+          # Leave no empty "SomeEvent": [] behind. An uninstall that litters the
+          # settings file with its own leftovers is how you end up wondering, months
+          # later, what put them there.
+          | .hooks = ((.hooks // {}) | with_entries(select(.value | length > 0)))
+          | if (.hooks | length) == 0 then del(.hooks) else . end
         ' "$settings" >"$tmp"
         jq -e . "$tmp" >/dev/null
         mv "$tmp" "$settings"
