@@ -21,6 +21,8 @@ struct Plant {
     var display: String = ""
     /// How many subagents are running for this session, drawn as side buds.
     var agents: Int = 0
+    /// How far gone the wilt is, from how long this session has been waiting.
+    var waitStage: Int = 0
     var state: PlantState
     var createdAt: Double
     var hue: CGFloat = 0
@@ -35,6 +37,17 @@ private func shorten(_ label: String) -> String {
     // Keep both ends: the tail of a branch or worktree name is usually the part
     // that distinguishes it.
     return label.prefix(6) + "…" + label.suffix(5)
+}
+
+/// How long a session must have been waiting for you before its plant wilts
+/// further. Chosen so a session you are actively reading stays at stage 0, and one
+/// you have forgotten ends up unmistakable.
+private let wiltAfter: [Double] = [2 * 60, 10 * 60]
+
+private func wiltStage(waitingSince since: Double, now: Double) -> Int {
+    guard since > 0 else { return 0 }
+    let age = now - since
+    return wiltAfter.filter { age >= $0 }.count
 }
 
 /// Eight widely separated hues. Sessions pick one by hash, so a plant keeps its
@@ -65,6 +78,7 @@ enum Store {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
 
+        let now = Date().timeIntervalSince1970
         var plants: [Plant] = []
         for name in names where name.hasSuffix(".json") && !reservedFiles.contains(name) {
             let url = dir.appendingPathComponent(name)
@@ -82,6 +96,9 @@ enum Store {
                 sessionID: sessionID,
                 label: (json["label"] as? String) ?? "claude",
                 agents: (json["agents"] as? Int) ?? 0,
+                waitStage: wiltStage(
+                    waitingSince: (json["since"] as? Double) ?? 0, now: now
+                ),
                 state: PlantState(raw: (json["state"] as? String) ?? "waiting"),
                 createdAt: (json["created_at"] as? Double) ?? 0
             ))

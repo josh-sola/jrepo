@@ -40,9 +40,11 @@ final class PlanterView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func image(for plant: Plant) -> NSImage {
-        let frames = Sprites.frames(for: plant.state, agents: plant.agents)
+        let frames = Sprites.frames(
+            for: plant.state, agents: plant.agents, stage: plant.waitStage
+        )
         let index = frameIndex % frames.count
-        let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(min(plant.agents, Sprites.maxBuds))"
+        let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(min(plant.agents, Sprites.maxBuds))-\(plant.waitStage)"
         if let cached = imageCache[key] { return cached }
         let img = Sprites.image(rows: frames[index], hue: plant.hue)
         imageCache[key] = img
@@ -284,7 +286,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // One sprite frame per tick, so a bounce cycles twice a second. Reload
         // state half as often, which is still quick enough to feel immediate.
         view.frameIndex = tick
-        let animated = view.plants.contains { Sprites.frames(for: $0.state, agents: $0.agents).count > 1 }
+        let animated = view.plants.contains { $0.state == .working }
         refresh(force: animated, reload: tick % 2 == 0 && !view.isReordering)
     }
 
@@ -292,7 +294,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if reload { view.plants = demoPlants ?? Store.load() }
 
         // Only touch the window when something a viewer would notice changed.
-        let signature = view.plants.map { "\($0.sessionID):\($0.state.rawValue):\($0.hue):\($0.display):\($0.agents)" }
+        let signature = view.plants.map { "\($0.sessionID):\($0.state.rawValue):\($0.hue):\($0.display):\($0.agents):\($0.waitStage)" }
             .joined(separator: "|") + "|labels=\(view.layout.showLabels)"
         let changed = signature != lastSignature
         lastSignature = signature
@@ -354,6 +356,8 @@ func writePreview(to path: String, scale: CGFloat = 6) {
         ("1 agent", [Sprites.frames(for: .working, agents: 1)[0]]),
         ("2 agents", [Sprites.frames(for: .working, agents: 2)[0]]),
         ("waiting", Sprites.frames(for: .waiting)),
+        ("wilt 2min", Sprites.frames(for: .waiting, stage: 1)),
+        ("wilt 10min", Sprites.frames(for: .waiting, stage: 2)),
         ("attention", Sprites.frames(for: .attention)),
     ]
     let flat = frames.flatMap { name, list in list.enumerated().map { ("\(name)\($0.offset + 1)", $0.element) } }
@@ -417,7 +421,10 @@ func printPlants() {
     }
     let labelWidth = (plants.map(\.label.count).max() ?? 8) + 2
     for plant in plants {
-        print(pad(plant.label, labelWidth) + pad(plant.state.rawValue, 11)
+        let state = plant.state == .working
+            ? plant.state.rawValue + (plant.agents > 0 ? " +\(plant.agents)" : "")
+            : plant.state.rawValue + " \(plant.waitStage)"
+        print(pad(plant.label, labelWidth) + pad(state, 14)
             + String(format: "hue=%.2f  ", Double(plant.hue)) + plant.sessionID)
     }
 }

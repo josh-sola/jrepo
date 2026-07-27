@@ -84,6 +84,49 @@ enum Sprites {
         "....#sFssFs#........",
     ]
 
+    // Wilting is progressive: the longer a session waits for you, the worse its
+    // plant looks. A row of identically wilted plants cannot tell you which one you
+    // have been ignoring longest, which is the thing you actually want to know.
+    // Stage 1: the flower has dropped off, leaving a bare tip, and a third petal
+    // has fallen.
+    private static let wilt1 = [
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        ".......GG...........",
+        ".......Gg...........",
+        "......GGgG..........",
+        "....GggGgggG........",
+        "...Gg..Gg..gG.......",
+        "....#FsFsFs#........",
+    ]
+
+    // Stage 2: collapsed onto the soil, most of the petals gone.
+    private static let wilt2 = [
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        "....................",
+        ".......G............",
+        "...GggGgGGgg........",
+        "....#FFssFF#........",
+    ]
+
+    /// How far gone a wilted plant is: 0 fresh, 1 flower dropped, 2 collapsed.
+    static let wiltStages = 3
+
+    private static func wiltMap(_ stage: Int) -> [String] {
+        [wilt, wilt1, wilt2][min(max(stage, 0), wiltStages - 1)]
+    }
+
     // White body, dark outline, so it reads against a dark desktop and a light one
     // alike. Kept inside the plant's own columns, in the space the wilted plant
     // leaves above itself: a glyph sticking out to the side would widen every
@@ -137,15 +180,15 @@ enum Sprites {
     /// Side buds are only drawn on a blooming plant: a session with agents running
     /// is never wilted anyway, because Stop keeps it blooming until the last one
     /// finishes.
-    static func frames(for state: PlantState, agents: Int = 0) -> [[String]] {
+    static func frames(for state: PlantState, agents: Int = 0, stage: Int = 0) -> [[String]] {
         let buds = [budRight, budLeft].prefix(max(0, min(agents, maxBuds)))
         switch state {
         case .working:
             return [composite([pot, bloomA] + buds), composite([pot, bloomB] + buds)]
         case .waiting:
-            return [waitingFrame]
+            return [composite([pot, wiltMap(stage)])]
         case .attention:
-            return [attentionFrame]
+            return [composite([pot, wiltMap(stage), bangGlyph])]
         }
     }
 
@@ -154,8 +197,9 @@ enum Sprites {
     /// don't hold them apart — which is what made a label-less row look spread out.
     static let (inkMinX, inkWidth): (Int, Int) = {
         var lo = width, hi = -1
-        var all = [waitingFrame, attentionFrame]
+        var all: [[String]] = []
         for n in 0...maxBuds { all += frames(for: .working, agents: n) }
+        for s in 0..<wiltStages { all += frames(for: .waiting, stage: s) + frames(for: .attention, stage: s) }
         for rows in all {
             for row in rows {
                 for (x, ch) in row.enumerated() where ch != "." && x < width {

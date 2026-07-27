@@ -11,11 +11,22 @@ thing you keep losing track of is which one needs you.
 | --- | --- |
 | **Blooming**, swaying gently | Claude is working |
 | Blooming **with side buds** | Subagents are running — one bud each, up to two |
-| **Wilted**: half height, flower closed, petals dropped on the soil | Its turn ended. Your move |
-| Wilted **with a `!`** | Blocked on a permission prompt, or gone quiet waiting for input |
+| **Wilted**: flower closed, petals on the soil | Its turn ended. Your move |
+| Wilted, **flower dropped** | Waiting more than 2 minutes |
+| **Collapsed** onto the soil | Waiting more than 10 minutes |
+| Wilted **with a `!`** | Blocked on a permission prompt |
 
 Work done by a subagent counts as working, so a session that delegated and is
 waiting on its agents keeps flowering rather than looking idle.
+
+Wilting is progressive, because a row of identically wilted plants can't tell you
+the thing you actually want to know: which session you have been ignoring longest.
+The clock starts when a session becomes your move, and survives an idle
+notification, so nothing resets it but you.
+
+Only a real permission prompt raises a `!`. Claude Code also notifies when a
+session has merely gone quiet, and treating that as blocking was a false alarm —
+the wilt is already saying it.
 
 Every session gets its own colour from a palette of eight, picked by hashing the
 session id, so a plant keeps its variety for its whole life.
@@ -111,7 +122,7 @@ overlay watches that directory.
 | `SessionStart` | appears, wilted |
 | `UserPromptSubmit` | blooms |
 | `PostToolUse` | keeps blooming — this is what clears a `!` after you approve |
-| `Notification` | shows `!` |
+| `Notification` | shows `!`, unless it is only an idle nudge |
 | `Stop` | wilts, **unless** a subagent is still running |
 | `SubagentStart` / `SubagentStop` | counts running agents up and down |
 | `SessionEnd` | disappears |
@@ -131,6 +142,10 @@ without a `SessionEnd` never leaves one behind.
 directory follows its *shell*, which wanders into subdirectories and temporary
 agent worktrees as work goes on, so a label that tracked it would rename itself
 mid-session.
+
+**Wilting advances on its own.** The overlay works the stage out from a timestamp
+each time it re-reads the directory, so a plant keeps wilting without any hook
+firing — which matters, because a session waiting for you fires nothing at all.
 
 **`planter-state` runs on every tool call**, so the common case — a tool
 finishing in a session that is already blooming — is answered by one `grep` and

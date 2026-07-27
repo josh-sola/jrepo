@@ -8,7 +8,7 @@
 #   tool         PostToolUse      still going (this is what clears a "!" once
 #                                 you have approved a permission prompt)
 #   stop         Stop             Claude's turn ended
-#   notify       Notification     a permission prompt, or Claude went quiet
+#   notify       Notification     a permission prompt, or an idle nudge
 #   agent-start  SubagentStart    a subagent began
 #   agent-stop   SubagentStop     a subagent finished
 #   end          SessionEnd       the plant leaves
@@ -38,8 +38,8 @@ IFS= read -r -d '' payload || true
 
 # Subagent events report the subagent's own id in .session_id, so prefer the
 # parent's id and record the work against the session you actually see.
-IFS=$'\t' read -r sid cwd < <(
-    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // "")] | @tsv' \
+IFS=$'\t' read -r sid cwd message < <(
+    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // ""), (.message // "")] | @tsv' \
         <<<"$payload" 2>/dev/null
 )
 [[ -n "${sid:-}" ]] || exit 0
@@ -60,13 +60,14 @@ if [[ "$event" == "tool" ]]; then
 fi
 
 now="$(date +%s)"
-created="" agents=0 pid="" state="waiting" turn=0 label=""
+created="" agents=0 pid="" state="waiting" turn=0 label="" since=0
 
 if [[ -f "$file" ]]; then
-    IFS=$'\t' read -r created agents pid state turn label < <(
+    IFS=$'\t' read -r created agents pid state turn label since < <(
         jq -r '[(.created_at // "" | tostring), (.agents // 0 | tostring),
                 (.pid // "" | tostring), (.state // "waiting"),
-                (.turn // 0 | tostring), (.label // "")] | @tsv' "$file" 2>/dev/null
+                (.turn // 0 | tostring), (.label // ""),
+                (.since // 0 | tostring)] | @tsv' "$file" 2>/dev/null
     )
 else
     # Only a real session event may create a plant. A subagent or tool event for an
@@ -86,8 +87,8 @@ fi
 # rename itself mid-session. CLAUDE_PROJECT_DIR, where Claude Code provides it,
 # is the session's root and does not wander.
 if [[ -z "${label:-}" ]]; then
-    dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
-    dir="${dir%/}"
+    session_dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+    session_dir="${session_dir%/}"
     label=""
 
     # A directory basename is a poor label for worktrees named after a uuid or a
@@ -95,42 +96,77 @@ if [[ -z "${label:-}" ]]; then
     # directory and may print a better name; anything it prints wins. This runs
     # once per session, never on the tool path.
     if [[ -x "$dir_hook" ]]; then
-        label="$("$dir_hook" "$dir" 2>/dev/null | head -1)"
+        label="$("$dir_hook" "$session_dir" 2>/dev/null | head -1)"
         label="${label//[$'\n\r\t']/}"
     fi
 
-    [[ -n "$label" ]] || label="${dir##*/}"
+    [[ -n "$label" ]] || label="${session_dir##*/}"
 fi
 
 [[ "${agents:-}" =~ ^[0-9]+$ ]] || agents=0
+[[ "${since:-}" =~ ^[0-9]+$ ]] || since=0
+
 [[ "${turn:-}" =~ ^[01]$ ]] || turn=0
 [[ "${created:-}" =~ ^[0-9]+$ ]] || created="$now"
+
+# The clock behind a plant's progressive wilt: when this stretch of waiting for
+# you began. Held across an idle nudge, so a nudge cannot reset the wilt.
+start_waiting() {
+    case "$state" in
+    waiting | attention) ((since > 0)) || since="$now" ;;
+    *) since="$now" ;;
+    esac
+}
 
 case "$event" in
     start)
         state="waiting"
         turn=0
+        since="$now"
         ;;
     prompt)
         state="working"
         turn=1
+        since=0
         ;;
-    tool) state="working" ;;
-    notify) state="attention" ;;
+    tool)
+        state="working"
+        since=0
+        ;;
+    # Claude Code sends one notification when it needs permission and another
+    # when a session has simply gone quiet. Only the first is actually blocking,
+    # so only the first raises a "!"; the quiet one is already being told by the
+    # wilt, and hoisting a "!" for it was a false alarm.
+    notify)
+        start_waiting
+        case "$message" in
+        *"waiting for your input"*) state="waiting" ;;
+        *) state="attention" ;;
+        esac
+        ;;
     agent-start)
         agents=$((agents + 1))
         state="working"
+        since=0
         ;;
     agent-stop)
         ((agents > 0)) && agents=$((agents - 1))
         # The last background agent finishing after the turn ended is the moment
         # the session really becomes your move.
-        ((agents == 0 && turn == 0)) && state="waiting"
+        if ((agents == 0 && turn == 0)); then
+            state="waiting"
+            start_waiting
+        fi
         ;;
     stop)
         turn=0
         # A finished turn is only your move if nothing is still running for you.
-        ((agents > 0)) && state="working" || state="waiting"
+        if ((agents > 0)); then
+            state="working"
+        else
+            start_waiting
+            state="waiting"
+        fi
         ;;
 esac
 
@@ -159,8 +195,9 @@ jq -nc \
     --arg sid "$sid" --arg label "$label" --arg state "$state" \
     --argjson agents "$agents" --argjson pid "$pid" \
     --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
+    --argjson since "$since" \
     '{session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
-      pid: $pid, created_at: $created, updated_at: $now}' \
+      since: $since, pid: $pid, created_at: $created, updated_at: $now}' \
     >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
 rm -f "$tmp" 2>/dev/null
 exit 0
