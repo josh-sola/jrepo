@@ -47,8 +47,13 @@ wt init <name> --adopt <path> [--branch-prefix <prefix>]
     # register an existing clone as a repo's base
 
 wt new <repo> --name "<short summary>" [--branch <b>] [--profile node,python]
+                                       [--claude [-- <claude args>]]
     # worktree add + registry + shared state + env copy, then return the
-    # path in ~2s; provisioning steps run detached in the background
+    # path in ~2s; provisioning steps run detached in the background.
+    # --claude opens a session in the new tree instead of stopping there:
+    #   wt new monorepo --name "fix the thing" --claude -- --model opus
+    # The session starts while provisioning is still running, so run
+    # `wt wait` inside it before anything that has to build.
 
 wt ls [--repo <r>] [--json]
     # list registered worktrees: name, repo, branch, state, uuid, dirty flag

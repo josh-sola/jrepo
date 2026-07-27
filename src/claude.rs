@@ -16,7 +16,12 @@ pub fn exec_claude(root: &Path, target: Option<String>, args: &[String]) -> Resu
         eprintln!("base is for reading; run `wt new <repo> --name \"...\"` to start work instead");
     }
 
-    let err = Command::new("claude").current_dir(&cwd).args(args).exec();
+    exec_at(&cwd, args)
+}
+
+/// Only returns on failure: a successful `exec` replaces this process.
+pub fn exec_at(cwd: &Path, args: &[String]) -> Result<()> {
+    let err = Command::new("claude").current_dir(cwd).args(args).exec();
     if err.kind() == std::io::ErrorKind::NotFound {
         bail!("`claude` is not on PATH");
     }

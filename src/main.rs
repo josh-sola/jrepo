@@ -45,6 +45,11 @@ enum Command {
         branch: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+        /// Open a `claude` session in the new tree once it exists.
+        #[arg(long)]
+        claude: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Move uncommitted work out of base into a fresh tree.
     Adopt {
@@ -55,6 +60,11 @@ enum Command {
         branch: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+        /// Open a `claude` session in the new tree once it exists.
+        #[arg(long)]
+        claude: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// List registered worktrees.
     Ls {
@@ -169,31 +179,39 @@ fn run(root: &Path, command: Command) -> Result<()> {
             name,
             branch,
             profile,
-        } => tree::new_tree(
-            root,
-            tree::NewOptions {
-                repo,
-                name,
-                branch,
-                profiles: profile,
-            },
-        )
-        .map(|_| ()),
+            claude,
+            args,
+        } => {
+            let path = tree::new_tree(
+                root,
+                tree::NewOptions {
+                    repo,
+                    name,
+                    branch,
+                    profiles: profile,
+                },
+            )?;
+            open_if_requested(&path, claude, &args)
+        }
         Command::Adopt {
             repo,
             name,
             branch,
             profile,
-        } => tree::adopt(
-            root,
-            tree::AdoptOptions {
-                repo,
-                name,
-                branch,
-                profiles: profile,
-            },
-        )
-        .map(|_| ()),
+            claude,
+            args,
+        } => {
+            let path = tree::adopt(
+                root,
+                tree::AdoptOptions {
+                    repo,
+                    name,
+                    branch,
+                    profiles: profile,
+                },
+            )?;
+            open_if_requested(&path, claude, &args)
+        }
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -214,6 +232,17 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
         Command::SessionContext { path } => context::session_context(root, path),
     }
+}
+
+/// Provisioning is still running in the background at this point; the
+/// session starts anyway so code can be read immediately, and `wt wait`
+/// inside it blocks when a build actually has to succeed.
+fn open_if_requested(tree_path: &Path, claude: bool, args: &[String]) -> Result<()> {
+    if !claude {
+        return Ok(());
+    }
+    eprintln!("opening a claude session in {}", tree_path.display());
+    claude::exec_at(tree_path, args)
 }
 
 fn cmd_path(root: &Path, selector: &str) -> Result<()> {
