@@ -31,7 +31,8 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
         let plans = tree.path.join("plans");
         if plans.is_dir() {
             lines.push(format!(
-                "Plans for this tree live at {} — read and write them there.",
+                "Plans live at {} — read and write them there. Every tree of this repo shares \
+                 that directory and it survives teardown, so plans belong nowhere else.",
                 plans.display()
             ));
         }
