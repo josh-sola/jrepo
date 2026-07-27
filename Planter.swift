@@ -44,6 +44,10 @@ private func shorten(_ label: String) -> String {
 /// you have forgotten ends up unmistakable.
 private let wiltAfter: [Double] = [2 * 60, 10 * 60]
 
+/// How long a subagent tally may stand without fresh news before it is treated as
+/// stuck. Matches the bound in planter-state.
+private let staleAgentSeconds: Double = 30 * 60
+
 private func wiltStage(waitingSince since: Double, now: Double) -> Int {
     guard since > 0 else { return 0 }
     let age = now - since
@@ -92,14 +96,29 @@ enum Store {
                 continue
             }
 
+            let state = PlantState(raw: (json["state"] as? String) ?? "waiting")
+            let updated = (json["updated_at"] as? Double) ?? 0
+
+            // A plant that was already waiting before this clock existed carries no
+            // `since`, and nothing fires while a session waits, so it would never
+            // get one — leaving the most neglected session looking like the
+            // freshest. The file's last write is when it stopped, which is close
+            // enough to stand in.
+            var since = (json["since"] as? Double) ?? 0
+            if since == 0, state != .working { since = updated }
+
+            // The hook bounds a stuck agent tally on its next event, but a session
+            // sitting idle sends none, so bound it here too.
+            var agents = (json["agents"] as? Int) ?? 0
+            let agentsAt = (json["agents_at"] as? Double) ?? 0
+            if agents > 0, agentsAt > 0, now - agentsAt > staleAgentSeconds { agents = 0 }
+
             plants.append(Plant(
                 sessionID: sessionID,
                 label: (json["label"] as? String) ?? "claude",
-                agents: (json["agents"] as? Int) ?? 0,
-                waitStage: wiltStage(
-                    waitingSince: (json["since"] as? Double) ?? 0, now: now
-                ),
-                state: PlantState(raw: (json["state"] as? String) ?? "waiting"),
+                agents: agents,
+                waitStage: wiltStage(waitingSince: since, now: now),
+                state: state,
                 createdAt: (json["created_at"] as? Double) ?? 0
             ))
         }

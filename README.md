@@ -49,7 +49,7 @@ planter                      # start the overlay
 ```
 
 `install.sh` builds `~/.local/bin/planter`, installs a hook at
-`~/.claude/hooks/planter-state`, and wires eleven hooks into
+`~/.claude/hooks/planter-state`, and wires twelve hooks into
 `~/.claude/settings.json`, printing exactly which,, backing it up first. It needs `swiftc` (the Xcode
 command line tools) and `jq`. Re-running replaces its own hook entries rather
 than stacking them.
@@ -134,7 +134,7 @@ overlay watches that directory.
 | `PostToolUse` / `PostToolUseFailure` | keeps blooming — this is what clears a `!` after you answer |
 | `PermissionRequest` | shows `!` — a dialog is on screen |
 | `Notification` | shows `!` too, unless it is only an idle nudge |
-| `Stop` | wilts, **unless** a subagent is still running |
+| `Stop` / `StopFailure` | wilts, **unless** a subagent is still running |
 | `SubagentStart` / `SubagentStop` | counts running agents up and down |
 | `SessionEnd` | disappears |
 
@@ -144,6 +144,13 @@ Four details do most of the work:
 ends, and a synchronous `Agent` call holds that turn open. The counter exists for
 *background* agents, where the turn ends while work continues — the plant keeps
 flowering until the last one finishes.
+
+**A stuck subagent tally cannot last.** An interrupted agent's `SubagentStop`
+never arrives, and nothing on disk says which agents are alive, so the tally would
+stick above zero — leaving a plant blooming forever while it waits for you. It is
+bounded two ways: your next prompt clears it, and it expires after 30 minutes
+without news. The cost is that a background agent outliving a prompt loses its bud,
+which is worth much less than a plant that never wilts again.
 
 **Crashed sessions clean themselves up.** Each file records the pid of its claude
 process. The overlay drops any plant whose process is gone, so a session killed

@@ -10,6 +10,8 @@
 #                                 the failure variant matters because a denied or
 #                                 failing call fires only that one)
 #   stop         Stop             Claude's turn ended
+#                and StopFailure   (including when it ended on an API error, which
+#                                 would otherwise leave the plant blooming)
 #   cwd          CwdChanged       the session changed directory: relabel
 #   permission   PermissionRequest a permission dialog is on screen
 #   notify       Notification     a permission prompt, or an idle nudge
@@ -65,14 +67,15 @@ if [[ "$event" == "tool" ]]; then
 fi
 
 now="$(date +%s)"
-created="" agents=0 pid="" state="waiting" turn=0 label="" since=0
+created="" agents=0 pid="" state="waiting" turn=0 label="" since=0 agents_at=0
 
 if [[ -f "$file" ]]; then
-    IFS=$'\t' read -r created agents pid state turn label since < <(
+    IFS=$'\t' read -r created agents pid state turn label since agents_at < <(
         jq -r '[(.created_at // "" | tostring), (.agents // 0 | tostring),
                 (.pid // "" | tostring), (.state // "waiting"),
                 (.turn // 0 | tostring), (.label // ""),
-                (.since // 0 | tostring)] | @tsv' "$file" 2>/dev/null
+                (.since // 0 | tostring), (.agents_at // 0 | tostring)] | @tsv' \
+            "$file" 2>/dev/null
     )
 else
     # Only a real session event may create a plant. A subagent or tool event for an
@@ -114,6 +117,18 @@ fi
 
 [[ "${agents:-}" =~ ^[0-9]+$ ]] || agents=0
 [[ "${since:-}" =~ ^[0-9]+$ ]] || since=0
+[[ "${agents_at:-}" =~ ^[0-9]+$ ]] || agents_at=0
+
+# A SubagentStart whose SubagentStop never arrives — an interrupted or failed
+# agent — would leave the tally stuck above zero for good, and a stuck tally does
+# more than draw a bud that is not there: Stop keeps the plant blooming while it
+# waits for you, which breaks the one thing the plant is for. Nothing on disk says
+# which agents are alive, so the tally is bounded instead: it cannot outlive this
+# long, and a new prompt from you clears it outright.
+stale_agents=1800
+if ((agents > 0 && agents_at > 0 && now - agents_at > stale_agents)); then
+    agents=0
+fi
 
 [[ "${turn:-}" =~ ^[01]$ ]] || turn=0
 [[ "${created:-}" =~ ^[0-9]+$ ]] || created="$now"
@@ -137,6 +152,10 @@ case "$event" in
         state="working"
         turn=1
         since=0
+        # You driving again is the clearest moment to forgive a stuck tally. The
+        # cost is a background agent that outlives a prompt losing its bud, which
+        # is worth far less than a plant that never wilts again.
+        agents=0
         ;;
     tool)
         state="working"
@@ -175,11 +194,13 @@ case "$event" in
         ;;
     agent-start)
         agents=$((agents + 1))
+        agents_at="$now"
         state="working"
         since=0
         ;;
     agent-stop)
         ((agents > 0)) && agents=$((agents - 1))
+        agents_at="$now"
         # The last background agent finishing after the turn ended is the moment
         # the session really becomes your move.
         if ((agents == 0 && turn == 0)); then
@@ -224,9 +245,10 @@ jq -nc \
     --arg sid "$sid" --arg label "$label" --arg state "$state" \
     --argjson agents "$agents" --argjson pid "$pid" \
     --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
-    --argjson since "$since" \
+    --argjson since "$since" --argjson agents_at "$agents_at" \
     '{session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
-      since: $since, pid: $pid, created_at: $created, updated_at: $now}' \
+      since: $since, agents_at: $agents_at, pid: $pid,
+      created_at: $created, updated_at: $now}' \
     >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
 rm -f "$tmp" 2>/dev/null
 exit 0

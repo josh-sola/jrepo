@@ -92,6 +92,7 @@ jq --arg hook "$hook" --arg own "$own_hooks" '
   | wire("PostToolUse";     "tool")
   | wire("PostToolUseFailure";"tool")
   | wire("Stop";            "stop")
+  | wire("StopFailure";     "stop")
   | wire("PermissionRequest";"permission")
   | wire("Notification";    "notify")
   | wire("SubagentStart";   "agent-start")
