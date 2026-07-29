@@ -89,12 +89,19 @@ fi
 # Nothing to record: the plant already looks the way this event would leave it.
 [[ "$event" == "tool" && "$state" == "working" ]] && exit 0
 
+# A launcher that knows a good name for its session hands it over in
+# PLANTER_LABEL, which wins over both the label-hook and the directory
+# fallback below — and since it is re-read from the environment on every
+# event, it stays correct without ever calling the hook.
+if [[ -n "${PLANTER_LABEL:-}" ]]; then
+    label="$PLANTER_LABEL"
+
 # The label is worked out when the plant is created, and again whenever the session
 # actually changes directory. CwdChanged is the signal for that: reading cwd off
 # every event instead would rename the plant constantly, because that field follows
 # the shell rather than the session. A subagent's directory changes carry the
 # subagent's own session id, so they cannot rename the session you are watching.
-if [[ -z "${label:-}" || "$event" == "cwd" ]]; then
+elif [[ -z "${label:-}" || "$event" == "cwd" ]]; then
     if [[ "$event" == "cwd" ]]; then
         session_dir="${cwd:-$PWD}"
     else
@@ -220,6 +227,19 @@ case "$event" in
         ;;
 esac
 
+# Colour and row position, like the label above, come from the launcher's
+# environment and are re-validated on every write rather than trusted from a
+# prior file — junk here must never reach disk, so an invalid value falls back
+# to a real JSON null, not the string "null".
+color_json="null"
+case "${PLANTER_COLOR:-}" in
+    red | orange | yellow | green | cyan | blue | purple | pink)
+        color_json="\"$PLANTER_COLOR\"" ;;
+esac
+
+tab_json="null"
+[[ "${PLANTER_TAB_INDEX:-}" =~ ^[1-9][0-9]*$ ]] && tab_json="$PLANTER_TAB_INDEX"
+
 # The claude process that owns this session. The overlay uses it to drop plants
 # whose session died without ever running SessionEnd. Claude Code exports the pid
 # to its children; the walk up the process tree is the fallback if that changes.
@@ -246,9 +266,10 @@ jq -nc \
     --argjson agents "$agents" --argjson pid "$pid" \
     --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
     --argjson since "$since" --argjson agents_at "$agents_at" \
+    --argjson color "$color_json" --argjson tab "$tab_json" \
     '{session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
       since: $since, agents_at: $agents_at, pid: $pid,
-      created_at: $created, updated_at: $now}' \
+      created_at: $created, updated_at: $now, color: $color, tab: $tab}' \
     >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
 rm -f "$tmp" 2>/dev/null
 exit 0

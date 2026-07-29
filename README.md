@@ -29,7 +29,10 @@ does. Claude Code also notifies when a session has merely gone quiet; treating t
 as blocking was a false alarm, since the wilt is already saying it.
 
 Every session gets its own colour from a palette of eight, picked by hashing the
-session id, so a plant keeps its variety for its whole life.
+session id, so a plant keeps its variety for its whole life. A launcher that
+already knows better can set `PLANTER_COLOR`, `PLANTER_LABEL`, and
+`PLANTER_TAB_INDEX` on the `claude` process to choose that session's colour,
+name, and place in the row directly — see "How it works" below.
 
 macOS only — it draws with AppKit.
 
@@ -106,7 +109,9 @@ the plants closer together.
 A directory basename is a poor label if your worktrees are named after a uuid or
 a ticket id. If `~/.claude/planter/label-hook` exists and is executable, it is
 handed the session's directory, and whatever it prints becomes the label. It runs
-once per session, so it can afford to be slow. Two examples ship in `examples/`:
+once per session, so it can afford to be slow. A `PLANTER_LABEL` set on the
+`claude` process wins over both, and skips running the hook at all. Two examples
+ship in `examples/`:
 
 ```sh
 cp examples/label-hook.git-branch ~/.claude/planter/label-hook
@@ -188,6 +193,15 @@ finishing in a session that is already blooming — is answered by one `grep` an
 nothing else, about 10ms. If you would rather not pay it, delete the `PostToolUse`
 entry from `~/.claude/settings.json`; all you lose is that a `!` then stays up
 until the turn ends, instead of clearing when you approve.
+
+A launcher that starts a `claude` process can set three environment variables
+on it, and the hook picks them up on every event for that session's whole life:
+`PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
+`purple`, `pink`) fixes its colour instead of hashing the session id,
+`PLANTER_LABEL` fixes its name instead of the label-hook or directory basename,
+and `PLANTER_TAB_INDEX` (a 1-based position) fixes its place in the row instead
+of sorting by creation time. Any of the three left unset falls back to today's
+behaviour.
 
 Set `CLAUDE_PLANTER_DIR` to move the state directory. Both the hook and the
 overlay respect it, which is also how to try things out without touching your

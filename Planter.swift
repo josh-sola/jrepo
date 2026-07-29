@@ -26,6 +26,12 @@ struct Plant {
     var state: PlantState
     var createdAt: Double
     var hue: CGFloat = 0
+    /// An explicit colour name from the launcher, e.g. "red". Reserved ahead of
+    /// hash-derived hues so a collision can never steal a requested colour.
+    var color: String? = nil
+    /// 1-based row position from the launcher. Sessions without one sort to the
+    /// end, in creation order.
+    var tab: Int? = nil
 }
 
 /// Labels wider than this would push their plant's cell out of line with the
@@ -57,6 +63,13 @@ private func wiltStage(waitingSince since: Double, now: Double) -> Int {
 /// Eight widely separated hues. Sessions pick one by hash, so a plant keeps its
 /// colour for its whole life; collisions shift to the next free slot.
 let plantHues: [CGFloat] = [0.02, 0.09, 0.15, 0.33, 0.47, 0.58, 0.72, 0.88]
+
+/// The launcher's palette names, indexed the same as `plantHues` above, so
+/// `PLANTER_COLOR=red` and a hashed slot of 0 land on the same hue.
+private let colorSlots: [String: Int] = [
+    "red": 0, "orange": 1, "yellow": 2, "green": 3,
+    "cyan": 4, "blue": 5, "purple": 6, "pink": 7,
+]
 
 enum Store {
     static var dir: URL = {
@@ -119,14 +132,24 @@ enum Store {
                 agents: agents,
                 waitStage: wiltStage(waitingSince: since, now: now),
                 state: state,
-                createdAt: (json["created_at"] as? Double) ?? 0
+                createdAt: (json["created_at"] as? Double) ?? 0,
+                color: json["color"] as? String,
+                tab: json["tab"] as? Int
             ))
         }
 
         plants.sort { ($0.createdAt, $0.sessionID) < ($1.createdAt, $1.sessionID) }
         // Hues are assigned in creation order, before any reordering, so dragging a
-        // plant along the row never changes its colour.
+        // plant along the row — or a later session claiming an earlier tab — never
+        // changes an existing plant's colour.
         assignHues(&plants)
+        // Display order: an explicit tab wins, then creation order for anyone
+        // without one. applySavedOrder runs after and still has final say — a
+        // ⌘-drag overrides everything, including an explicit tab.
+        plants.sort {
+            ($0.tab ?? Int.max, $0.createdAt, $0.sessionID) <
+                ($1.tab ?? Int.max, $1.createdAt, $1.sessionID)
+        }
         applySavedOrder(&plants)
         setDisplayLabels(&plants)
         return plants
@@ -185,9 +208,32 @@ enum Store {
         return errno == EPERM
     }
 
+    /// Assigns hues in creation order, regardless of how `plants` is ordered when
+    /// called — display order changes (a ⌘-drag, an explicit tab) must never
+    /// recolour a plant. Explicit `color` requests are reserved first, so a
+    /// hash-derived collision can only ever probe around them, never take one.
     private static func assignHues(_ plants: inout [Plant]) {
+        let byCreation = plants.indices.sorted {
+            (plants[$0].createdAt, plants[$0].sessionID) <
+                (plants[$1].createdAt, plants[$1].sessionID)
+        }
+
         var taken = Set<Int>()
-        for i in plants.indices {
+        var reserved = Set<Int>()
+
+        for i in byCreation {
+            guard let name = plants[i].color, var slot = colorSlots[name] else { continue }
+            var tries = 0
+            while taken.contains(slot) && tries < plantHues.count {
+                slot = (slot + 1) % plantHues.count
+                tries += 1
+            }
+            taken.insert(slot)
+            reserved.insert(i)
+            plants[i].hue = plantHues[slot]
+        }
+
+        for i in byCreation where !reserved.contains(i) {
             var slot = abs(stableHash(plants[i].sessionID)) % plantHues.count
             var tries = 0
             while taken.contains(slot) && tries < plantHues.count {
