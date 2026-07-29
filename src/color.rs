@@ -1,16 +1,19 @@
 use std::io::IsTerminal;
 
-/// Claude Code's `/color` palette, each paired with a dark background hex
-/// tuned to match. Order is load-bearing: `pick` indexes into it by hash.
+/// Claude Code's `/color` palette, each paired with a near-black background
+/// hex tuned to match. They are all one uniform step off a lighter set, which
+/// is what keeps them even: no colour reads brighter than its neighbours, so
+/// a tab is tinted rather than coloured. Darken or lighten them together.
+/// Order is load-bearing: `pick` indexes into it by hash.
 pub const PALETTE: [(&str, &str); 8] = [
-    ("red", "#2a1416"),
-    ("blue", "#101c2e"),
-    ("green", "#12251a"),
-    ("yellow", "#262010"),
-    ("purple", "#211630"),
-    ("orange", "#2b1a0f"),
-    ("pink", "#2b1421"),
-    ("cyan", "#0f2427"),
+    ("red", "#170b0c"),
+    ("blue", "#090f19"),
+    ("green", "#0a140e"),
+    ("yellow", "#151209"),
+    ("purple", "#120c1a"),
+    ("orange", "#180e08"),
+    ("pink", "#180b12"),
+    ("cyan", "#081415"),
 ];
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
