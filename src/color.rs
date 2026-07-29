@@ -1,0 +1,80 @@
+use std::io::IsTerminal;
+
+/// Claude Code's `/color` palette, each paired with a dark background hex
+/// tuned to match. Order is load-bearing: `pick` indexes into it by hash.
+pub const PALETTE: [(&str, &str); 8] = [
+    ("red", "#2a1416"),
+    ("blue", "#101c2e"),
+    ("green", "#12251a"),
+    ("yellow", "#262010"),
+    ("purple", "#211630"),
+    ("orange", "#2b1a0f"),
+    ("pink", "#2b1421"),
+    ("cyan", "#0f2427"),
+];
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// `std`'s `DefaultHasher` is explicitly unstable across releases, which
+/// would move a tree's color out from under the user on a toolchain bump.
+fn fnv1a64(s: &str) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in s.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+pub fn pick(repo: &str, name: &str) -> (&'static str, &'static str) {
+    let key = format!("{repo}/{}", crate::tree::slugify(name));
+    let hash = fnv1a64(&key);
+    PALETTE[(hash % PALETTE.len() as u64) as usize]
+}
+
+/// An OSC 11 background sticks for the rest of the terminal session; nothing
+/// resets it. Guarded on a tty so a redirected run gets no escape bytes.
+pub fn set_background(hex: &str) {
+    if std::io::stderr().is_terminal() {
+        eprint!("\x1b]11;{hex}\x1b\\");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn pick_is_deterministic() {
+        assert_eq!(pick("monorepo", "fix login"), pick("monorepo", "fix login"));
+    }
+
+    #[test]
+    fn pick_ignores_slug_equivalent_spelling() {
+        assert_eq!(pick("monorepo", "fix login"), pick("monorepo", "fix-login"));
+    }
+
+    #[test]
+    fn pick_reaches_every_palette_entry() {
+        let colors: HashSet<&str> = (0..200)
+            .map(|i| pick("monorepo", &format!("t{i}")).0)
+            .collect();
+        assert_eq!(colors.len(), 8, "expected all 8 colors, got {colors:?}");
+    }
+
+    #[test]
+    fn every_palette_hex_is_six_hex_digits() {
+        for (name, hex) in PALETTE {
+            let digits = hex.strip_prefix('#').unwrap_or_else(|| {
+                panic!("{name}'s hex '{hex}' is missing a leading '#'");
+            });
+            assert_eq!(digits.len(), 6, "{name}'s hex '{hex}' is not 6 digits");
+            assert!(
+                digits.chars().all(|c| c.is_ascii_hexdigit()),
+                "{name}'s hex '{hex}' has a non-hex digit"
+            );
+        }
+    }
+}

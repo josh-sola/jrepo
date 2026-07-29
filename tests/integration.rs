@@ -346,6 +346,20 @@ fn new_with_unslugifiable_name_errors_clearly() {
 }
 
 #[test]
+fn launch_on_an_unknown_repo_fails_before_touching_claude() {
+    let tmp = unique_dir("launch-unknown");
+    let root = tmp.join("wt-root");
+
+    let out = run_wt(&root, &["launch", "bogus-repo", "foo"]);
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown repo"),
+        "expected an unknown-repo error, got: {stderr}"
+    );
+}
+
+#[test]
 fn name_matches_longest_registered_path_prefix() {
     let tmp = unique_dir("name");
     let base = fixture_repo(&tmp);

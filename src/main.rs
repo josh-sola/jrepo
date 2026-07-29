@@ -1,4 +1,5 @@
 mod claude;
+mod color;
 mod context;
 mod env_refresh;
 mod git;
@@ -63,6 +64,18 @@ enum Command {
         /// Open a `claude` session in the new tree once it exists.
         #[arg(long)]
         claude: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Open a claude session in <repo>'s <name> tree, creating it if needed.
+    /// Anything after `--` is passed straight to `claude`.
+    Launch {
+        repo: String,
+        name: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        profile: Option<Vec<String>>,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -214,6 +227,13 @@ fn run(root: &Path, command: Command) -> Result<()> {
             )?;
             open_if_requested(root, &path, claude, &args)
         }
+        Command::Launch {
+            repo,
+            name,
+            branch,
+            profile,
+            args,
+        } => cmd_launch(root, repo, name, branch, profile, &args),
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -260,6 +280,66 @@ fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String
 
     eprintln!("provisioning finished; opening a claude session");
     claude::exec_at(tree_path, args)
+}
+
+fn cmd_launch(
+    root: &Path,
+    repo: String,
+    name: String,
+    branch: Option<String>,
+    profile: Option<Vec<String>>,
+    args: &[String],
+) -> Result<()> {
+    let existing = store::load(root)?
+        .trees
+        .iter()
+        .find(|t| {
+            t.repo == repo && (t.name == name || tree::slugify(&t.name) == tree::slugify(&name))
+        })
+        .map(|t| t.id);
+
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let path = tree::new_tree(
+                root,
+                tree::NewOptions {
+                    repo: repo.clone(),
+                    name: name.clone(),
+                    branch,
+                    profiles: profile,
+                },
+            )?;
+            store::load(root)?
+                .trees
+                .iter()
+                .find(|t| t.path == path)
+                .map(|t| t.id)
+                .with_context(|| format!("{} is not a registered tree", path.display()))?
+        }
+    };
+
+    eprintln!("waiting for provisioning before opening a session...");
+    let tree_path = wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
+        format!(
+            "not opening a session; inspect '{name}' with `wt status`, then `wt claude` into it \
+             once you know why"
+        )
+    })?;
+
+    eprintln!("provisioning finished; opening a claude session");
+    let (color, hex) = color::pick(&repo, &name);
+    color::set_background(hex);
+    claude::exec_at(&tree_path, &launch_args(&name, args, color))
+}
+
+/// Claude takes the color as a slash-command prompt: the `--agent-color`
+/// launch flag does not set the prompt-bar color.
+fn launch_args(name: &str, passthrough: &[String], color: &str) -> Vec<String> {
+    let mut args = vec!["-n".to_string(), name.to_string()];
+    args.extend(passthrough.iter().cloned());
+    args.push(format!("/color {color}"));
+    args
 }
 
 fn cmd_path(root: &Path, selector: &str) -> Result<()> {
@@ -586,6 +666,19 @@ mod tests {
             log_path: None,
             provision_pid: None,
         }
+    }
+
+    #[test]
+    fn launch_args_orders_name_flag_passthrough_then_color_last() {
+        let args = launch_args(
+            "fix login",
+            &["--model".to_string(), "opus".to_string()],
+            "blue",
+        );
+        assert_eq!(
+            args,
+            vec!["-n", "fix login", "--model", "opus", "/color blue"]
+        );
     }
 
     #[test]
