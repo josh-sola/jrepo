@@ -329,7 +329,8 @@ mod tests {
 
     #[test]
     fn parse_claude_ttys_matches_exact_comm_and_ttys_prefix() {
-        let text = "ttys001 claude\nttys002 zsh\nttys003 /opt/homebrew/bin/claude\nconsole claude\n";
+        let text =
+            "ttys001 claude\nttys002 zsh\nttys003 /opt/homebrew/bin/claude\nconsole claude\n";
         assert_eq!(
             parse_claude_ttys(text),
             vec!["/dev/ttys001".to_string(), "/dev/ttys003".to_string()]

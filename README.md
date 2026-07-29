@@ -55,15 +55,22 @@ wt new <repo> --name "<short summary>" [--branch <b>] [--profile node,python]
     # Progress prints while it waits. A failed install refuses to open a
     # session and tells you to check `wt status`.
 
-wt launch <repo> <name> [--branch <b>] [--profile node,python] [-- <claude args>]
-    # find <repo>'s <name> tree, creating it (like `wt new`) if it doesn't
-    # exist, wait for provisioning, then open a claude session in it. The
-    # session gets a color derived from repo+name — both as Claude's
-    # prompt-bar color and the terminal background — so a tab is
-    # identifiable at a glance:
-    #   wt launch monorepo "fix login" -- --model opus
+wt launch <worktree> [repo] [--branch <b>] [--profile node,python] [-- <claude args>]
+    # find <worktree>, creating it in <repo> (like `wt new`) if it doesn't
+    # exist there, wait for provisioning, then open a claude session in it.
+    # <repo> can be omitted if exactly one tree matches <worktree>, or the
+    # current directory's repo breaks the tie. The session gets a color
+    # derived from repo+name — both as Claude's prompt-bar color and the
+    # terminal background — so a tab is identifiable at a glance:
+    #   wt launch "fix login" monorepo -- --model opus
     # If <claude args> already contains a bare prompt, claude receives two
     # positional prompts and the trailing /color one may be ignored.
+    #
+    # A worktree starting with `@` is a scratch session: it opens in
+    # <repo>'s base with the same naming and coloring, but creates no
+    # worktree and touches nothing in the registry. --branch and --profile
+    # don't apply and are an error alongside it:
+    #   wt launch @poking-around monorepo
 
 wt ls [--repo <r>] [--json]
     # list registered worktrees: name, repo, branch, state, uuid, dirty flag

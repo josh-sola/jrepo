@@ -350,12 +350,116 @@ fn launch_on_an_unknown_repo_fails_before_touching_claude() {
     let tmp = unique_dir("launch-unknown");
     let root = tmp.join("wt-root");
 
-    let out = run_wt(&root, &["launch", "bogus-repo", "foo"]);
+    let out = run_wt(&root, &["launch", "foo", "bogus-repo"]);
     assert!(!out.status.success(), "expected launch to fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("unknown repo"),
         "expected an unknown-repo error, got: {stderr}"
+    );
+}
+
+#[test]
+fn launch_without_repo_and_no_match_errors_without_creating_anything() {
+    let tmp = unique_dir("launch-no-match");
+    let root = tmp.join("wt-root");
+
+    let out = run_wt(&root, &["launch", "ghost-name"]);
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no tree named"),
+        "expected a no-match error, got: {stderr}"
+    );
+
+    let out = run_wt(&root, &["ls", "--json"]);
+    assert_success(&out, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        0,
+        "no tree should be registered after a no-match launch"
+    );
+}
+
+#[test]
+fn launch_ambiguous_name_across_repos_names_both_candidates() {
+    let tmp = unique_dir("launch-ambiguous");
+    let root = tmp.join("wt-root");
+
+    let dir_a = tmp.join("repo-a-src");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    let base_a = fixture_repo(&dir_a);
+    let dir_b = tmp.join("repo-b-src");
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let base_b = fixture_repo(&dir_b);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "repo-a", "--adopt", base_a.to_str().unwrap()],
+        ),
+        "init repo-a",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "repo-b", "--adopt", base_b.to_str().unwrap()],
+        ),
+        "init repo-b",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "repo-a", "--name", "same name"]),
+        "new in repo-a",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "repo-b", "--name", "same name"]),
+        "new in repo-b",
+    );
+
+    let out = run_wt(&root, &["launch", "same name"]);
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("repo-a") && stderr.contains("repo-b"),
+        "expected both candidates named, got: {stderr}"
+    );
+}
+
+#[test]
+fn launch_scratch_session_with_unknown_repo_errors() {
+    let tmp = unique_dir("launch-scratch-unknown");
+    let root = tmp.join("wt-root");
+
+    let out = run_wt(&root, &["launch", "@poking-around", "bogus-repo"]);
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown repo"),
+        "expected an unknown-repo error, got: {stderr}"
+    );
+}
+
+#[test]
+fn launch_scratch_session_with_branch_errors() {
+    let tmp = unique_dir("launch-scratch-branch");
+    let root = tmp.join("wt-root");
+
+    let out = run_wt(
+        &root,
+        &[
+            "launch",
+            "@poking-around",
+            "some-repo",
+            "--branch",
+            "josh/x",
+        ],
+    );
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--branch"),
+        "expected a --branch error, got: {stderr}"
     );
 }
 

@@ -201,6 +201,24 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
     bail!("no tree matches selector '{selector}'");
 }
 
+/// The longest matching tree path wins, so a tree nested under another
+/// repo's base resolves to its own repo rather than the enclosing one.
+pub fn repo_for_cwd<'a>(store: &'a Store, cwd: &Path) -> Option<&'a str> {
+    if let Some(tree) = store
+        .trees
+        .iter()
+        .filter(|t| cwd.starts_with(&t.path))
+        .max_by_key(|t| t.path.components().count())
+    {
+        return Some(&tree.repo);
+    }
+    store
+        .repos
+        .iter()
+        .find(|(_, r)| cwd.starts_with(&r.base))
+        .map(|(name, _)| name.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +333,59 @@ mod tests {
         let trees = vec![sample_tree("foo", "b1")];
         let err = resolve(&trees, "nope").unwrap_err();
         assert!(err.to_string().contains("no tree matches"));
+    }
+
+    fn sample_repo(base: &str) -> Repo {
+        Repo {
+            base: PathBuf::from(base),
+            trunk: "main".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: None,
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: BTreeMap::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn cwd_store() -> Store {
+        let mut store = Store::default();
+        store
+            .repos
+            .insert("monorepo".into(), sample_repo("/r/monorepo/base"));
+        store
+            .repos
+            .insert("toy-apps".into(), sample_repo("/r/toy-apps/base"));
+
+        let mut outer = sample_tree("outer", "josh/outer");
+        outer.path = PathBuf::from("/r/monorepo/trees/outer");
+        let mut nested = sample_tree("nested", "josh/nested");
+        nested.repo = "toy-apps".into();
+        nested.path = PathBuf::from("/r/monorepo/trees/outer/nested");
+        store.trees = vec![outer, nested];
+        store
+    }
+
+    #[test]
+    fn repo_for_cwd_prefers_the_longest_matching_tree_over_a_shorter_one() {
+        let store = cwd_store();
+        assert_eq!(
+            repo_for_cwd(&store, Path::new("/r/monorepo/trees/outer/nested/src")),
+            Some("toy-apps")
+        );
+        assert_eq!(
+            repo_for_cwd(&store, Path::new("/r/monorepo/trees/outer/src")),
+            Some("monorepo")
+        );
+    }
+
+    #[test]
+    fn repo_for_cwd_falls_back_to_a_base_then_gives_up() {
+        let store = cwd_store();
+        assert_eq!(
+            repo_for_cwd(&store, Path::new("/r/monorepo/base/packages/api")),
+            Some("monorepo")
+        );
+        assert_eq!(repo_for_cwd(&store, Path::new("/somewhere/else")), None);
     }
 }

@@ -69,11 +69,13 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Open a claude session in <repo>'s <name> tree, creating it if needed.
-    /// Anything after `--` is passed straight to `claude`.
+    /// Open a claude session in a worktree, creating it if needed. A
+    /// worktree starting with `@` is a scratch session that opens in the
+    /// repo's base instead, with nothing created. Anything after `--` is
+    /// passed straight to `claude`.
     Launch {
-        repo: String,
-        name: String,
+        worktree: String,
+        repo: Option<String>,
         #[arg(long)]
         branch: Option<String>,
         #[arg(long, value_delimiter = ',')]
@@ -234,12 +236,12 @@ fn run(root: &Path, command: Command) -> Result<()> {
             open_if_requested(root, &path, claude, &args)
         }
         Command::Launch {
+            worktree,
             repo,
-            name,
             branch,
             profile,
             args,
-        } => cmd_launch(root, repo, name, branch, profile, &args),
+        } => cmd_launch(root, worktree, repo, branch, profile, &args),
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -292,53 +294,196 @@ fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String
     claude::exec_at(tree_path, args, &[])
 }
 
+#[derive(Debug)]
+enum LaunchPlan {
+    /// `label` keeps the leading `@`, so a scratch session reads differently
+    /// from a tree of the same name in the tab and the statusline.
+    Scratch {
+        repo: String,
+        label: String,
+    },
+    Existing {
+        id: Uuid,
+    },
+    New {
+        repo: String,
+        name: String,
+    },
+}
+
+fn resolve_launch(
+    store: &store::Store,
+    worktree: &str,
+    repo_arg: Option<&str>,
+    has_branch_or_profile: bool,
+    cwd_repo: Option<&str>,
+) -> Result<LaunchPlan> {
+    if let Some(label) = worktree.strip_prefix('@') {
+        if label.is_empty() {
+            bail!("a scratch session needs a name after '@', e.g. '@poking-around'");
+        }
+        if has_branch_or_profile {
+            bail!(
+                "a scratch session opens in the repo's base and creates nothing, so --branch and \
+                 --profile don't apply; drop them or drop the leading '@'"
+            );
+        }
+        let repo = match repo_arg {
+            Some(r) => r.to_string(),
+            None => cwd_repo.map(str::to_string).with_context(|| {
+                format!(
+                    "'{worktree}' has no repo, and the current directory isn't inside a \
+                     registered repo; pass one: wt launch {worktree} <repo>"
+                )
+            })?,
+        };
+        if !store.repos.contains_key(&repo) {
+            bail!("unknown repo '{repo}'. Known repos: {}", known_repos(store));
+        }
+        return Ok(LaunchPlan::Scratch {
+            repo,
+            label: worktree.to_string(),
+        });
+    }
+
+    if let Some(repo) = repo_arg {
+        let existing = store.trees.iter().find(|t| {
+            t.repo == repo
+                && (t.name == worktree || tree::slugify(&t.name) == tree::slugify(worktree))
+        });
+        return Ok(match existing {
+            Some(t) => LaunchPlan::Existing { id: t.id },
+            None => LaunchPlan::New {
+                repo: repo.to_string(),
+                name: worktree.to_string(),
+            },
+        });
+    }
+
+    let matches: Vec<&store::Tree> = store
+        .trees
+        .iter()
+        .filter(|t| t.name == worktree || tree::slugify(&t.name) == tree::slugify(worktree))
+        .collect();
+
+    match matches.len() {
+        0 => bail!(
+            "no tree named '{worktree}'; to create one, pass the repo: wt launch {worktree} <repo>"
+        ),
+        1 => Ok(LaunchPlan::Existing { id: matches[0].id }),
+        _ => {
+            if let Some(cwd_repo) = cwd_repo
+                && let Some(t) = matches.iter().find(|t| t.repo == cwd_repo)
+            {
+                return Ok(LaunchPlan::Existing { id: t.id });
+            }
+            let candidates = matches
+                .iter()
+                .map(|t| format!("{}  {}", t.repo, t.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "'{worktree}' is ambiguous across repos: {candidates}; pass the repo: \
+                 wt launch {worktree} <repo>"
+            );
+        }
+    }
+}
+
+fn known_repos(store: &store::Store) -> String {
+    if store.repos.is_empty() {
+        "(none registered)".to_string()
+    } else {
+        store.repos.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// Returns the registered tree, whose name can differ from what the user
+/// typed when the match came through the slug. Color and the `-n` label
+/// derive from the returned name so a launch matches what `wt new` produced.
+fn wait_for_tree(root: &Path, id: Uuid) -> Result<store::Tree> {
+    let pending_name = store::load(root)?
+        .trees
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+
+    eprintln!("waiting for provisioning before opening a session...");
+    wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
+        format!(
+            "not opening a session; inspect '{pending_name}' with `wt status`, then `wt claude` \
+             into it once you know why"
+        )
+    })?;
+    eprintln!("provisioning finished; opening a claude session");
+
+    store::load(root)?
+        .trees
+        .into_iter()
+        .find(|t| t.id == id)
+        .with_context(|| format!("tree {id} is no longer registered"))
+}
+
 fn cmd_launch(
     root: &Path,
-    repo: String,
-    name: String,
+    worktree: String,
+    repo: Option<String>,
     branch: Option<String>,
     profile: Option<Vec<String>>,
     args: &[String],
 ) -> Result<()> {
-    let existing = store::load(root)?
-        .trees
-        .iter()
-        .find(|t| {
-            t.repo == repo && (t.name == name || tree::slugify(&t.name) == tree::slugify(&name))
-        })
-        .map(|t| t.id);
+    let store = store::load(root)?;
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let cwd_repo = store::repo_for_cwd(&store, &cwd);
 
-    let id = match existing {
-        Some(id) => id,
-        None => {
+    let plan = resolve_launch(
+        &store,
+        &worktree,
+        repo.as_deref(),
+        branch.is_some() || profile.is_some(),
+        cwd_repo,
+    )?;
+
+    let (tree_path, color_repo, color_name, label) = match plan {
+        LaunchPlan::Scratch { repo, label } => {
+            let base = store
+                .repos
+                .get(&repo)
+                .expect("resolve_launch already checked this repo is registered")
+                .base
+                .clone();
+            eprintln!("opening a scratch session in {repo}'s base");
+            let stripped = label.trim_start_matches('@').to_string();
+            (base, repo, stripped, label)
+        }
+        LaunchPlan::Existing { id } => {
+            let tree = wait_for_tree(root, id)?;
+            (tree.path, tree.repo, tree.name.clone(), tree.name)
+        }
+        LaunchPlan::New { repo, name } => {
             let path = tree::new_tree(
                 root,
                 tree::NewOptions {
                     repo: repo.clone(),
-                    name: name.clone(),
+                    name,
                     branch,
                     profiles: profile,
                 },
             )?;
-            store::load(root)?
+            let id = store::load(root)?
                 .trees
                 .iter()
                 .find(|t| t.path == path)
                 .map(|t| t.id)
-                .with_context(|| format!("{} is not a registered tree", path.display()))?
+                .with_context(|| format!("{} is not a registered tree", path.display()))?;
+            let tree = wait_for_tree(root, id)?;
+            (tree.path, tree.repo, tree.name.clone(), tree.name)
         }
     };
 
-    eprintln!("waiting for provisioning before opening a session...");
-    let tree_path = wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
-        format!(
-            "not opening a session; inspect '{name}' with `wt status`, then `wt claude` into it \
-             once you know why"
-        )
-    })?;
-
-    eprintln!("provisioning finished; opening a claude session");
-    let (color, hex) = color::pick(&repo, &name);
+    let (color, hex) = color::pick(&color_repo, &color_name);
 
     // The tab probe reads and rewrites tab titles, so it runs before the
     // background-color write, which should be the last thing that touches
@@ -350,14 +495,14 @@ fn cmd_launch(
     }
     color::set_background(hex);
 
-    let mut env: Vec<(&str, &str)> = vec![("PLANTER_COLOR", color), ("PLANTER_LABEL", &name)];
+    let mut env: Vec<(&str, &str)> = vec![("PLANTER_COLOR", color), ("PLANTER_LABEL", &label)];
     let tab_index_str;
     if let Some(idx) = tabs.map(|t| t.mine) {
         tab_index_str = idx.to_string();
         env.push(("PLANTER_TAB_INDEX", &tab_index_str));
     }
 
-    claude::exec_at(&tree_path, &launch_args(&name, args, color), &env)
+    claude::exec_at(&tree_path, &launch_args(&label, args, color), &env)
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`
@@ -720,5 +865,163 @@ mod tests {
             unique_id_prefix(&a.id, std::slice::from_ref(&a)),
             "019fa4ef"
         );
+    }
+
+    fn sample_repo(base: &str) -> store::Repo {
+        store::Repo {
+            base: PathBuf::from(base),
+            trunk: "main".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: None,
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn store_with(repos: &[(&str, &str)], trees: Vec<Tree>) -> store::Store {
+        let mut repos_map = std::collections::BTreeMap::new();
+        for (name, base) in repos {
+            repos_map.insert((*name).to_string(), sample_repo(base));
+        }
+        store::Store {
+            repos: repos_map,
+            trees,
+            ..Default::default()
+        }
+    }
+
+    fn tree_in(id: &str, repo: &str, name: &str) -> Tree {
+        Tree {
+            id: id.parse().unwrap(),
+            repo: repo.into(),
+            name: name.into(),
+            branch: format!("josh/{}", tree::slugify(name)),
+            path: PathBuf::from(format!("/tmp/{name}")),
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+        }
+    }
+
+    #[test]
+    fn resolve_launch_repo_less_existing_tree_finds_its_repo() {
+        let t = tree_in(
+            "019fa4ef-6669-7f32-a29c-a459aee6716b",
+            "monorepo",
+            "fix login",
+        );
+        let store = store_with(&[("monorepo", "/base")], vec![t.clone()]);
+
+        match resolve_launch(&store, "fix login", None, false, None).unwrap() {
+            LaunchPlan::Existing { id } => assert_eq!(id, t.id),
+            _ => panic!("expected an existing tree"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_no_match_without_repo_errors_and_creates_nothing() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err = resolve_launch(&store, "ghost", None, false, None).unwrap_err();
+        assert!(
+            err.to_string().contains("no tree named 'ghost'"),
+            "message was: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_launch_ambiguous_name_across_repos_names_both_candidates() {
+        let a = tree_in(
+            "019fa4ef-6669-7f32-a29c-a459aee6716b",
+            "repo-a",
+            "shared name",
+        );
+        let b = tree_in(
+            "019fa4ef-e6e2-78c2-977a-f55f5f00ab25",
+            "repo-b",
+            "shared name",
+        );
+        let store = store_with(&[("repo-a", "/a"), ("repo-b", "/b")], vec![a, b]);
+
+        let err = resolve_launch(&store, "shared name", None, false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("repo-a  shared name"), "message was: {msg}");
+        assert!(msg.contains("repo-b  shared name"), "message was: {msg}");
+    }
+
+    #[test]
+    fn resolve_launch_ambiguous_name_is_broken_by_the_cwd_repo() {
+        let a = tree_in(
+            "019fa4ef-6669-7f32-a29c-a459aee6716b",
+            "repo-a",
+            "shared name",
+        );
+        let b = tree_in(
+            "019fa4ef-e6e2-78c2-977a-f55f5f00ab25",
+            "repo-b",
+            "shared name",
+        );
+        let store = store_with(&[("repo-a", "/a"), ("repo-b", "/b")], vec![a.clone(), b]);
+
+        match resolve_launch(&store, "shared name", None, false, Some("repo-a")).unwrap() {
+            LaunchPlan::Existing { id } => assert_eq!(id, a.id),
+            _ => panic!("expected the cwd repo's tree"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_plain_name_with_repo_creates_when_no_tree_matches() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+
+        match resolve_launch(&store, "fix login", Some("monorepo"), false, None).unwrap() {
+            LaunchPlan::New { repo, name } => {
+                assert_eq!(repo, "monorepo");
+                assert_eq!(name, "fix login");
+            }
+            _ => panic!("expected a new-tree plan"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_scratch_with_unknown_repo_errors() {
+        let store = store_with(&[], vec![]);
+        let err = resolve_launch(&store, "@poking-around", Some("bogus"), false, None).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown repo"),
+            "message was: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_launch_scratch_with_branch_or_profile_errors() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err =
+            resolve_launch(&store, "@poking-around", Some("monorepo"), true, None).unwrap_err();
+        assert!(err.to_string().contains("--branch"), "message was: {err}");
+    }
+
+    #[test]
+    fn resolve_launch_scratch_infers_repo_from_cwd() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+
+        match resolve_launch(&store, "@poking-around", None, false, Some("monorepo")).unwrap() {
+            LaunchPlan::Scratch { repo, label } => {
+                assert_eq!(repo, "monorepo");
+                assert_eq!(label, "@poking-around");
+            }
+            _ => panic!("expected a scratch session"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_scratch_without_repo_or_cwd_errors() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err = resolve_launch(&store, "@poking-around", None, false, None).unwrap_err();
+        assert!(err.to_string().contains("repo"), "message was: {err}");
     }
 }
