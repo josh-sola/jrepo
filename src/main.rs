@@ -3,6 +3,7 @@ mod color;
 mod context;
 mod env_refresh;
 mod git;
+mod planter;
 mod proc;
 mod provision;
 mod repo;
@@ -339,16 +340,19 @@ fn cmd_launch(
     eprintln!("provisioning finished; opening a claude session");
     let (color, hex) = color::pick(&repo, &name);
 
-    // The tab-index probe reads and rewrites tab titles, so it runs before
-    // the background-color write, which should be the last thing that
-    // touches the terminal. It must never block or fail a launch, so any
-    // error just drops PLANTER_TAB_INDEX.
-    let tab_index = tab::index().ok();
+    // The tab probe reads and rewrites tab titles, so it runs before the
+    // background-color write, which should be the last thing that touches
+    // the terminal. It must never block or fail a launch, so any error just
+    // drops PLANTER_TAB_INDEX and skips the renumber below.
+    let tabs = tab::probe().ok();
+    if let Some(tabs) = &tabs {
+        planter::renumber(tabs);
+    }
     color::set_background(hex);
 
     let mut env: Vec<(&str, &str)> = vec![("PLANTER_COLOR", color), ("PLANTER_LABEL", &name)];
     let tab_index_str;
-    if let Some(idx) = tab_index {
+    if let Some(idx) = tabs.map(|t| t.mine) {
         tab_index_str = idx.to_string();
         env.push(("PLANTER_TAB_INDEX", &tab_index_str));
     }

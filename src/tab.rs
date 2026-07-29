@@ -6,10 +6,21 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-/// Backs `wt __tab-index`. The caller's own tty is always a candidate, even
-/// with no `claude` running on it yet: `wt launch` calls this *before* exec'ing
+/// The caller's rank in its own Ghostty window, and the rank of every other
+/// tty mapped in that window — a consistent 1..n over the window, computed
+/// from one probe. `wt launch` writes `others` back into the other sessions'
+/// planter state files so a new tab correcting its own rank also corrects
+/// whichever tab it pushed down a slot.
+pub struct Tabs {
+    pub mine: usize,
+    pub others: Vec<(String, usize)>,
+}
+
+/// Backs `wt __tab-index` (via [`index`]) and the planter renumber (via
+/// [`Tabs::others`]). The caller's own tty is always a candidate, even with
+/// no `claude` running on it yet: `wt launch` calls this *before* exec'ing
 /// claude, so it has to count itself.
-pub fn index() -> Result<usize> {
+pub fn probe() -> Result<Tabs> {
     let my_tty = own_tty()?;
 
     let mut candidates = vec![my_tty.clone()];
@@ -77,36 +88,50 @@ pub fn index() -> Result<usize> {
         }
     }
 
-    rank(&my_tty, &tab_of_tty, &win_of_tty)
+    ranks_for_window(&my_tty, &tab_of_tty, &win_of_tty)
 }
 
-/// Ranks the caller's tab among the mapped tabs in the caller's own window,
-/// by ascending Ghostty tab index, deduped by tab index (a split means two
-/// ttys share one tab, so tabs are counted, not surfaces).
-fn rank(
+/// Prints this tab's own rank; backs `wt __tab-index`.
+pub fn index() -> Result<usize> {
+    Ok(probe()?.mine)
+}
+
+/// Ranks every mapped tty in the caller's own window by ascending Ghostty
+/// tab index, deduped by tab index (a split means two ttys share one tab, so
+/// tabs are counted, not surfaces). Returns the caller's own rank as `mine`
+/// and every other tty in that window as `others`; a tty in a different
+/// window never appears in either.
+fn ranks_for_window(
     my_tty: &str,
     tab_of_tty: &HashMap<String, i64>,
     win_of_tty: &HashMap<String, String>,
-) -> Result<usize> {
-    let my_tab = *tab_of_tty
-        .get(my_tty)
-        .context("this tab never reported back")?;
+) -> Result<Tabs> {
     let my_win = win_of_tty
         .get(my_tty)
         .context("this tab never reported back")?;
 
-    let mut tabs: Vec<i64> = tab_of_tty
+    let mut tab_indices: Vec<i64> = tab_of_tty
         .iter()
         .filter(|(tty, _)| win_of_tty.get(*tty) == Some(my_win))
         .map(|(_, &ti)| ti)
         .collect();
-    tabs.sort_unstable();
-    tabs.dedup();
+    tab_indices.sort_unstable();
+    tab_indices.dedup();
 
-    tabs.iter()
-        .position(|&ti| ti == my_tab)
-        .map(|p| p + 1)
-        .context("failed to rank this tab")
+    let rank_of = |ti: i64| tab_indices.iter().position(|&t| t == ti).map(|p| p + 1);
+
+    let mine = tab_of_tty
+        .get(my_tty)
+        .context("this tab never reported back")
+        .and_then(|&ti| rank_of(ti).context("failed to rank this tab"))?;
+
+    let others = tab_of_tty
+        .iter()
+        .filter(|(tty, _)| tty.as_str() != my_tty && win_of_tty.get(*tty) == Some(my_win))
+        .filter_map(|(tty, &ti)| rank_of(ti).map(|r| (tty.clone(), r)))
+        .collect();
+
+    Ok(Tabs { mine, others })
 }
 
 fn unique_run_id() -> u128 {
@@ -312,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_counts_tabs_not_surfaces_in_my_window() {
+    fn ranks_for_window_counts_tabs_not_surfaces_in_my_window() {
         let mut tab_of_tty = HashMap::new();
         let mut win_of_tty = HashMap::new();
 
@@ -328,9 +353,52 @@ mod tests {
             win_of_tty.insert(tty.to_string(), win.to_string());
         }
 
-        assert_eq!(rank("/dev/ttys001", &tab_of_tty, &win_of_tty).unwrap(), 1);
-        assert_eq!(rank("/dev/ttys002", &tab_of_tty, &win_of_tty).unwrap(), 1);
-        assert_eq!(rank("/dev/ttys003", &tab_of_tty, &win_of_tty).unwrap(), 2);
+        assert_eq!(
+            ranks_for_window("/dev/ttys001", &tab_of_tty, &win_of_tty)
+                .unwrap()
+                .mine,
+            1
+        );
+        assert_eq!(
+            ranks_for_window("/dev/ttys002", &tab_of_tty, &win_of_tty)
+                .unwrap()
+                .mine,
+            1
+        );
+        assert_eq!(
+            ranks_for_window("/dev/ttys003", &tab_of_tty, &win_of_tty)
+                .unwrap()
+                .mine,
+            2
+        );
+    }
+
+    #[test]
+    fn ranks_for_window_others_excludes_caller_and_other_windows() {
+        let mut tab_of_tty = HashMap::new();
+        let mut win_of_tty = HashMap::new();
+
+        for (tty, win, tab) in [
+            ("/dev/ttys001", "1", 3),
+            ("/dev/ttys002", "1", 3),
+            ("/dev/ttys003", "1", 5),
+            ("/dev/ttys004", "2", 1),
+        ] {
+            tab_of_tty.insert(tty.to_string(), tab);
+            win_of_tty.insert(tty.to_string(), win.to_string());
+        }
+
+        let mut others = ranks_for_window("/dev/ttys001", &tab_of_tty, &win_of_tty)
+            .unwrap()
+            .others;
+        others.sort();
+        assert_eq!(
+            others,
+            vec![
+                ("/dev/ttys002".to_string(), 1),
+                ("/dev/ttys003".to_string(), 2),
+            ]
+        );
     }
 
     #[test]
@@ -349,9 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn rank_errors_when_my_tty_never_reported() {
+    fn ranks_for_window_errors_when_my_tty_never_reported() {
         let tab_of_tty = HashMap::new();
         let win_of_tty = HashMap::new();
-        assert!(rank("/dev/ttys009", &tab_of_tty, &win_of_tty).is_err());
+        assert!(ranks_for_window("/dev/ttys009", &tab_of_tty, &win_of_tty).is_err());
     }
 }
