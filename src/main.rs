@@ -8,6 +8,7 @@ mod provision;
 mod repo;
 mod store;
 mod sync;
+mod tab;
 mod tree;
 
 use std::path::{Path, PathBuf};
@@ -152,6 +153,10 @@ enum Command {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Prints this tab's 1-based rank among the Ghostty tabs in the
+    /// caller's own window that are running Claude Code.
+    #[command(name = "__tab-index", hide = true)]
+    TabIndex,
 }
 
 #[derive(Subcommand)]
@@ -253,6 +258,10 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Claude { target, args } => claude::exec_claude(root, target, &args),
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
         Command::SessionContext { path } => context::session_context(root, path),
+        Command::TabIndex => {
+            println!("{}", tab::index()?);
+            Ok(())
+        }
     }
 }
 
@@ -279,7 +288,7 @@ fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String
     })?;
 
     eprintln!("provisioning finished; opening a claude session");
-    claude::exec_at(tree_path, args)
+    claude::exec_at(tree_path, args, &[])
 }
 
 fn cmd_launch(
@@ -329,8 +338,22 @@ fn cmd_launch(
 
     eprintln!("provisioning finished; opening a claude session");
     let (color, hex) = color::pick(&repo, &name);
+
+    // The tab-index probe reads and rewrites tab titles, so it runs before
+    // the background-color write, which should be the last thing that
+    // touches the terminal. It must never block or fail a launch, so any
+    // error just drops PLANTER_TAB_INDEX.
+    let tab_index = tab::index().ok();
     color::set_background(hex);
-    claude::exec_at(&tree_path, &launch_args(&name, args, color))
+
+    let mut env: Vec<(&str, &str)> = vec![("PLANTER_COLOR", color), ("PLANTER_LABEL", &name)];
+    let tab_index_str;
+    if let Some(idx) = tab_index {
+        tab_index_str = idx.to_string();
+        env.push(("PLANTER_TAB_INDEX", &tab_index_str));
+    }
+
+    claude::exec_at(&tree_path, &launch_args(&name, args, color), &env)
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`
