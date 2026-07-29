@@ -32,7 +32,8 @@ Every session gets its own colour from a palette of eight, picked by hashing the
 session id, so a plant keeps its variety for its whole life. A launcher that
 already knows better can set `PLANTER_COLOR`, `PLANTER_LABEL`, and
 `PLANTER_TAB_INDEX` on the `claude` process to choose that session's colour,
-name, and place in the row directly — see "How it works" below.
+name, and place in the row directly, and can rewrite that place later if its
+tabs move — see "How it works" below.
 
 macOS only — it draws with AppKit.
 
@@ -195,13 +196,20 @@ entry from `~/.claude/settings.json`; all you lose is that a `!` then stays up
 until the turn ends, instead of clearing when you approve.
 
 A launcher that starts a `claude` process can set three environment variables
-on it, and the hook picks them up on every event for that session's whole life:
+on it, and the hook reads them straight off the environment rather than
+remembering them, so nothing can drift:
 `PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
 `purple`, `pink`) fixes its colour instead of hashing the session id,
 `PLANTER_LABEL` fixes its name instead of the label-hook or directory basename,
-and `PLANTER_TAB_INDEX` (a 1-based position) fixes its place in the row instead
+and `PLANTER_TAB_INDEX` (a 1-based position) sets its place in the row instead
 of sorting by creation time. Any of the three left unset falls back to today's
 behaviour.
+
+`PLANTER_TAB_INDEX` is the exception: it only sets the position when the plant
+is created, because a tab index goes stale the moment tabs move. After
+creation the `tab` field in the state file is the record. A launcher that moves
+tabs can rewrite that field in another live session's file, and the hook
+carries the new value forward instead of stamping the old one back.
 
 Set `CLAUDE_PLANTER_DIR` to move the state directory. Both the hook and the
 overlay respect it, which is also how to try things out without touching your

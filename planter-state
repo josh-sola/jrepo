@@ -67,14 +67,15 @@ if [[ "$event" == "tool" ]]; then
 fi
 
 now="$(date +%s)"
-created="" agents=0 pid="" state="waiting" turn=0 label="" since=0 agents_at=0
+created="" agents=0 pid="" state="waiting" turn=0 label="" since=0 agents_at=0 tab=""
 
 if [[ -f "$file" ]]; then
-    IFS=$'\t' read -r created agents pid state turn label since agents_at < <(
+    IFS=$'\t' read -r created agents pid state turn label since agents_at tab < <(
         jq -r '[(.created_at // "" | tostring), (.agents // 0 | tostring),
                 (.pid // "" | tostring), (.state // "waiting"),
                 (.turn // 0 | tostring), (.label // ""),
-                (.since // 0 | tostring), (.agents_at // 0 | tostring)] | @tsv' \
+                (.since // 0 | tostring), (.agents_at // 0 | tostring),
+                (.tab // "" | tostring)] | @tsv' \
             "$file" 2>/dev/null
     )
 else
@@ -227,18 +228,27 @@ case "$event" in
         ;;
 esac
 
-# Colour and row position, like the label above, come from the launcher's
-# environment and are re-validated on every write rather than trusted from a
-# prior file — junk here must never reach disk, so an invalid value falls back
-# to a real JSON null, not the string "null".
+# Colour, like the label above, comes from the launcher's environment and is
+# re-validated on every write rather than trusted from a prior file — junk here
+# must never reach disk, so an invalid value falls back to a real JSON null,
+# not the string "null".
 color_json="null"
 case "${PLANTER_COLOR:-}" in
     red | orange | yellow | green | cyan | blue | purple | pink)
         color_json="\"$PLANTER_COLOR\"" ;;
 esac
 
+# Row position starts from PLANTER_TAB_INDEX too, but it is the one value the
+# environment cannot keep correct: it goes stale as soon as tabs move, and only
+# the launcher sees that happen. So a valid tab already on disk outranks the
+# environment, leaving the launcher free to renumber a session in place. Both
+# sources get the same validation, so junk cannot round-trip.
 tab_json="null"
-[[ "${PLANTER_TAB_INDEX:-}" =~ ^[1-9][0-9]*$ ]] && tab_json="$PLANTER_TAB_INDEX"
+if [[ "${tab:-}" =~ ^[1-9][0-9]*$ ]]; then
+    tab_json="$tab"
+elif [[ "${PLANTER_TAB_INDEX:-}" =~ ^[1-9][0-9]*$ ]]; then
+    tab_json="$PLANTER_TAB_INDEX"
+fi
 
 # The claude process that owns this session. The overlay uses it to drop plants
 # whose session died without ever running SessionEnd. Claude Code exports the pid
