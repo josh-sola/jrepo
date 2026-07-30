@@ -55,7 +55,7 @@ pub fn plan(stacks: &Stacks, branches: &[String], store: &Store, repo: &Repo) ->
         .collect()
 }
 
-fn step_for(entry: &stack::Entry, store: &Store, repo: &Repo) -> Step {
+pub(crate) fn step_for(entry: &stack::Entry, store: &Store, repo: &Repo) -> Step {
     let (dir, location) = match &entry.holder {
         stack::Holder::Tree { id, name, .. } => match store.trees.iter().find(|t| t.id == *id) {
             Some(t) => (

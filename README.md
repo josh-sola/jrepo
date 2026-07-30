@@ -46,22 +46,27 @@ parent shell's directory: `wt go`/`wt cd` resolve a selector to a path and
 wt init <name> --adopt <path> [--branch-prefix <prefix>]
     # register an existing clone as a repo's base
 
-wt new <repo> --name "<short summary>" [--branch <b>] [--profile node,python]
-                                       [--claude [-- <claude args>]]
+wt new <repo> --name "<short summary>" [--branch <b>] [--onto <sel>]
+                                       [--profile node,python] [--claude [-- <claude args>]]
     # worktree add + registry + shared state + env copy, then return the
     # path in ~2s; provisioning steps run detached in the background.
+    # --onto branches from <sel> instead of origin/<trunk>, joining
+    # whatever Graphite stack it belongs to: a wt tree selector (its live
+    # branch), a branch name, or a commit-ish.
     # --claude waits for provisioning, then opens a session in the tree:
     #   wt new monorepo --name "fix the thing" --claude -- --model opus
     # Progress prints while it waits. A failed install refuses to open a
     # session and tells you to check `wt status`.
 
-wt launch [worktree] [repo] [--branch <b>] [--profile node,python] [-- <claude args>]
-    # find <worktree>, creating it in <repo> (like `wt new`) if it doesn't
-    # exist there, wait for provisioning, then open a claude session in it.
-    # <repo> can be omitted if exactly one tree matches <worktree>, or the
-    # current directory's repo breaks the tie. The session gets a color
-    # derived from repo+name — both as Claude's prompt-bar color and the
-    # terminal background — so a tab is identifiable at a glance:
+wt launch [worktree] [repo] [--branch <b>] [--onto <sel>] [--profile node,python]
+                             [-- <claude args>]
+    # find <worktree>, creating it in <repo> (like `wt new`, including
+    # --onto) if it doesn't exist there, wait for provisioning, then open a
+    # claude session in it. <repo> can be omitted if exactly one tree
+    # matches <worktree>, or the current directory's repo breaks the tie.
+    # The session gets a color derived from repo+name — both as Claude's
+    # prompt-bar color and the terminal background — so a tab is
+    # identifiable at a glance:
     #   wt launch "fix login" monorepo -- --model opus
     # If <claude args> already contains a bare prompt, claude receives two
     # positional prompts and the trailing /color one may be ignored.
@@ -74,8 +79,8 @@ wt launch [worktree] [repo] [--branch <b>] [--profile node,python] [-- <claude a
     #
     # A worktree starting with `@` is a scratch session: it opens in
     # <repo>'s base with the same naming and coloring, but creates no
-    # worktree and touches nothing in the registry. --branch and --profile
-    # don't apply and are an error alongside it:
+    # worktree and touches nothing in the registry. --branch, --onto, and
+    # --profile don't apply and are an error alongside it:
     #   wt launch @poking-around monorepo
 
 wt ls [--repo <r>] [--json]
@@ -96,15 +101,20 @@ wt wait [selector] [--timeout <secs>]
     # non-zero on failure; with no selector, requires exactly one tree
     # currently provisioning
 
-wt rm <selector> [--force] [--delete-branch]
+wt rm <selector> [--force] [--delete-branch] [--reparent-children]
     # remove a worktree; refuses if dirty or has unpushed commits, or if
     # git's own removal genuinely fails (the registry entry is kept either
-    # way); --delete-branch skips branches with commits not on the remote
+    # way); --delete-branch skips branches with commits not on the remote,
+    # and refuses a branch with Graphite children instead of orphaning
+    # them — --reparent-children re-parents each one onto the deleted
+    # branch's own parent (trunk, if it has none) first; --force skips
+    # every check above
 
 wt gc [--repo <r>] [--dry-run]
     # reap every tree that is clean, not provisioning, and has no commits
-    # beyond origin/<trunk> — deletes its branch too; --dry-run touches
-    # nothing
+    # beyond origin/<trunk> — deletes its branch too; skips a tree whose
+    # branch has Graphite children rather than orphaning them; --dry-run
+    # touches nothing
 
 wt doctor [--fix]
     # compare the registry against `git worktree list`: stale entries,
@@ -112,10 +122,28 @@ wt doctor [--fix]
     # --fix drops stale entries and runs `git worktree prune`. Never
     # touches a worktree wt didn't create.
 
-wt sync [<repo>]
+wt sync [<repo>] [--stack]
     # fetch and fast-forward base's trunk; refuses if base is dirty
     # (never `reset --hard`, never force). No argument syncs every
     # registered repo. Run by the LaunchAgent every 5 minutes.
+    # --stack also restacks every Graphite stack in the repo that has
+    # branches in more than one worktree, walking bottom-up from wherever
+    # each branch lives; never deletes a branch, that's `gt sync`'s job.
+
+wt restack [selector] [--dry-run]
+    # restack a Graphite stack across every worktree that holds one of its
+    # branches, bottom-up, running each step in the tree that holds it.
+    # A selector is a worktree name/uuid first, then a branch name; with
+    # none, the stack containing the current tree's (or base's)
+    # checked-out branch. Stops at the first conflict and names where to
+    # continue; --dry-run prints the plan and runs nothing.
+
+wt stack [selector] [--json] [--all] [--all-branches]
+    # show the Graphite stack containing a branch, with wt identity — tree
+    # names instead of raw worktree paths — plus PR state and needs-restack
+    # flags. Selector resolves like `wt restack`'s. --all shows every stack
+    # in the repo; --all-branches also shows merged/closed branches, hidden
+    # by default; --json for agents.
 
 wt adopt [<repo>] --name "<short summary>"
     # move uncommitted work out of base into a fresh tree, for when you
@@ -155,11 +183,14 @@ Provisioning steps and the shared/copy path lists are per-repo data in
   back to the directory basename when that prints nothing.
 - **Session hook.** `hooks/session-context.sh` backs the `SessionStart` and
   `CwdChanged` Claude Code hooks: in a tree it surfaces the tree's name,
-  branch, and `plans/` path; in base it surfaces that base stays on trunk
-  and `wt new` is how to start work. `CwdChanged` can't inject model
-  context (no `additionalContext` support there), so it delivers the same
-  text as a `systemMessage` instead — a real Claude Code limitation, not a
-  half-finished feature.
+  branch, `plans/` path, and — when Graphite tracks the branch — its stack
+  position: the parent branch and which tree holds it, the children and
+  their trees, and a note when the tree is mid-stack that a restack of the
+  branch below belongs in that tree, not this one. In base it surfaces that
+  base stays on trunk and `wt new` is how to start work. `CwdChanged` can't
+  inject model context (no `additionalContext` support there), so it
+  delivers the same text as a `systemMessage` instead — a real Claude Code
+  limitation, not a half-finished feature.
 - **Skill.** `plugin/` is a Claude Code skill documenting `wt` for agents,
   installed at `~/.claude/skills/wt`.
 - **Base commit block.** `wt init` sets a `--worktree`-scoped

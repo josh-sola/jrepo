@@ -117,27 +117,25 @@ pub struct Graph {
     nodes: BTreeMap<String, Node>,
 }
 
-/// One query for the whole graph — cheap enough to run on every `wt`
-/// invocation that wants it, and `-readonly` so it never contends with a
-/// concurrent `gt` write or leaves `-wal`/`-shm` files behind in the shared
-/// git dir.
-pub fn graph(git_common_dir: &Path) -> Result<Graph> {
+fn fetch_rows(git_common_dir: &Path) -> Result<Vec<BranchRow>> {
     let json = query_json(
         git_common_dir,
         "SELECT branch_name, parent_branch_name, parent_branch_revision, state \
          FROM branch_metadata",
     )?;
-    let rows: Vec<BranchRow> = serde_json::from_str(&json).context("parsing branch_metadata")?;
+    serde_json::from_str(&json).context("parsing branch_metadata")
+}
 
+fn nodes_from_rows(rows: &[BranchRow]) -> BTreeMap<String, Node> {
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
-    for row in &rows {
+    for row in rows {
         let node = nodes.entry(row.branch_name.clone()).or_default();
         node.parent = row.parent_branch_name.clone();
         node.state = row.state.clone();
     }
     // Only recorded into a parent that has its own row: `parent_branch_name`
     // can dangle (a deleted branch Graphite never dropped the reference to).
-    for row in &rows {
+    for row in rows {
         if let Some(parent) = &row.parent_branch_name
             && nodes.contains_key(parent)
         {
@@ -148,6 +146,16 @@ pub fn graph(git_common_dir: &Path) -> Result<Graph> {
                 .push(row.branch_name.clone());
         }
     }
+    nodes
+}
+
+/// One query for the whole graph — cheap enough to run on every `wt`
+/// invocation that wants it, and `-readonly` so it never contends with a
+/// concurrent `gt` write or leaves `-wal`/`-shm` files behind in the shared
+/// git dir.
+pub fn graph(git_common_dir: &Path) -> Result<Graph> {
+    let rows = fetch_rows(git_common_dir)?;
+    let mut nodes = nodes_from_rows(&rows);
 
     let pr_infos = read_pr_info(git_common_dir);
     if let Some(prs) = &pr_infos {
@@ -171,6 +179,19 @@ pub fn graph(git_common_dir: &Path) -> Result<Graph> {
     }
 
     Ok(Graph { nodes })
+}
+
+/// Parent/child edges only, skipping the pull-request read and the
+/// needs-restack computation `graph` pays for the whole database — each
+/// branch whose cached fork point has gone stale costs `graph` a
+/// `merge-base` subprocess, which is fine for `wt stack` but too slow for a
+/// hook that runs on every prompt. Callers that only need "what is this
+/// branch's parent, what sits on top of it" want this instead.
+pub fn graph_light(git_common_dir: &Path) -> Result<Graph> {
+    let rows = fetch_rows(git_common_dir)?;
+    Ok(Graph {
+        nodes: nodes_from_rows(&rows),
+    })
 }
 
 /// A branch needs a restack when its parent's current head is not an
@@ -490,6 +511,26 @@ mod tests {
         assert_eq!(g.get("master").unwrap().children, vec!["a".to_string()]);
         assert_eq!(g.get("a").unwrap().children, vec!["b".to_string()]);
         assert!(g.get("b").unwrap().children.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn graph_light_has_the_same_edges_as_graph_but_no_restack_info() {
+        let dir = temp_common_dir();
+        make_db(
+            &dir,
+            &[
+                ("master", None, Some("TRUNK")),
+                ("a", Some("master"), None),
+                ("b", Some("a"), None),
+            ],
+        );
+        let g = graph_light(&dir).unwrap();
+        assert_eq!(g.get("master").unwrap().children, vec!["a".to_string()]);
+        assert_eq!(g.get("a").unwrap().parent.as_deref(), Some("master"));
+        assert_eq!(g.get("b").unwrap().parent.as_deref(), Some("a"));
+        assert_eq!(g.get("a").unwrap().needs_restack, None);
+        assert_eq!(g.get("a").unwrap().pr_number, None);
         fs::remove_dir_all(&dir).ok();
     }
 

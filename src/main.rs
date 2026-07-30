@@ -119,6 +119,11 @@ enum Command {
         force: bool,
         #[arg(long)]
         delete_branch: bool,
+        /// When the deleted branch has Graphite children, re-parent each
+        /// one onto the deleted branch's own parent (trunk, if it has none)
+        /// instead of refusing.
+        #[arg(long)]
+        reparent_children: bool,
     },
     /// Show provisioning status; every non-ready tree if no selector.
     Status {
@@ -302,7 +307,8 @@ fn run(root: &Path, command: Command) -> Result<()> {
             selector,
             force,
             delete_branch,
-        } => tree::rm_tree(root, &selector, force, delete_branch),
+            reparent_children,
+        } => tree::rm_tree(root, &selector, force, delete_branch, reparent_children),
         Command::Status { selector, json } => cmd_status(root, selector, json),
         Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
@@ -627,7 +633,7 @@ fn cmd_name(root: &Path, path: Option<PathBuf>) -> Result<()> {
 /// what's actually checked out. Falls back to the recorded branch on any
 /// git failure (still provisioning, path gone) rather than showing nothing.
 fn live_branch(t: &store::Tree) -> String {
-    git::current_branch(&t.path).unwrap_or_else(|_| t.branch.clone())
+    store::live_branch(t).unwrap_or_else(|| t.branch.clone())
 }
 
 fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {

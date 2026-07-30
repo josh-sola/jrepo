@@ -220,8 +220,10 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
 /// `None` on any git failure (path missing, still provisioning, not a
 /// worktree yet) rather than falling back to the recorded branch — a
 /// silent fallback here would make this tier indistinguishable from the
-/// recorded-branch tier above it.
-fn live_branch(t: &Tree) -> Option<String> {
+/// recorded-branch tier above it. Callers that want a branch unconditionally
+/// fall back to `Tree.branch` themselves: `resolve_index` needs `None` to
+/// stay distinct from the recorded-branch tier, so it can't default here.
+pub fn live_branch(t: &Tree) -> Option<String> {
     git::current_branch(&t.path).ok()
 }
 

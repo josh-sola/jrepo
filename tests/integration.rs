@@ -1011,6 +1011,124 @@ fn gc_dry_run_reports_then_real_run_reaps_clean_tree_and_deletes_branch() {
 }
 
 #[test]
+fn gc_skips_a_tree_whose_branch_has_graphite_children() {
+    let tmp = unique_dir("gc-children");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
+        ),
+        "new tree a",
+    );
+    assert_success(&run_wt(&root, &["wait", "tree a"]), "wait");
+    let path_out = run_wt(&root, &["path", "tree a"]);
+    assert_success(&path_out, "path");
+    let tree_a_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
+
+    // `b` is tracked as a Graphite child of `a` but has no worktree of its
+    // own — enough to prove the check, without needing a second tree.
+    let db = base.join(".git").join(".graphite_metadata.db");
+    sqlite(
+        &db,
+        "CREATE TABLE branch_metadata (\
+         branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
+         parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
+         children TEXT, branch_revision TEXT, validation_result TEXT, \
+         parent_head_revision TEXT);",
+    );
+    sqlite(
+        &db,
+        "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
+         ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL);",
+    );
+
+    let out = run_wt(&root, &["gc"]);
+    assert_success(&out, "gc");
+    assert!(
+        PathBuf::from(&tree_a_path).exists(),
+        "gc must not reap a tree whose branch has Graphite children"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Graphite children") && stderr.contains('b'),
+        "gc should say why it skipped 'tree a': {stderr}"
+    );
+    assert!(git_branch_exists(&base, "a"), "branch 'a' must survive");
+}
+
+#[test]
+fn rm_delete_branch_refuses_a_mid_stack_branch_and_force_still_bypasses_it() {
+    let tmp = unique_dir("rm-children");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
+        ),
+        "new tree a",
+    );
+    assert_success(&run_wt(&root, &["wait", "tree a"]), "wait");
+
+    let db = base.join(".git").join(".graphite_metadata.db");
+    sqlite(
+        &db,
+        "CREATE TABLE branch_metadata (\
+         branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
+         parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
+         children TEXT, branch_revision TEXT, validation_result TEXT, \
+         parent_head_revision TEXT);",
+    );
+    sqlite(
+        &db,
+        "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
+         ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL);",
+    );
+
+    let refused = run_wt(&root, &["rm", "tree a", "--delete-branch"]);
+    assert!(
+        !refused.status.success(),
+        "must refuse a mid-stack branch without --force or --reparent-children"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains('b') && stderr.contains("--reparent-children"),
+        "refusal should name the child and the escape hatch: {stderr}"
+    );
+    assert!(
+        git_branch_exists(&base, "a"),
+        "a refusal must delete nothing"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "tree a", "--force", "--delete-branch"]),
+        "rm --force --delete-branch",
+    );
+    assert!(
+        !git_branch_exists(&base, "a"),
+        "--force must still bypass the children check"
+    );
+}
+
+#[test]
 fn status_and_wait_track_background_provisioning_through_a_real_step() {
     let tmp = unique_dir("status-wait");
     let base = fixture_repo_with_submodule(&tmp);
@@ -2256,4 +2374,136 @@ fn launch_preview_prints_a_provisioned_trees_details() {
         "missing branch: {stdout}"
     );
     assert!(stdout.contains(&tree_path), "missing path: {stdout}");
+}
+
+fn sqlite(db: &Path, sql: &str) {
+    let out = Command::new("/usr/bin/sqlite3")
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "sqlite3 {sql} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Hand-builds a `.graphite_metadata.db` in `base`'s git dir tracking
+/// `master -> a -> b -> c`, with no row for `c` needing to resolve to a
+/// worktree — the same shape `stack.rs`'s own fixtures use.
+fn write_graphite_stack(base: &Path) {
+    let db = base.join(".git").join(".graphite_metadata.db");
+    sqlite(
+        &db,
+        "CREATE TABLE branch_metadata (\
+         branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
+         parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
+         children TEXT, branch_revision TEXT, validation_result TEXT, \
+         parent_head_revision TEXT);",
+    );
+    sqlite(
+        &db,
+        "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
+         ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL), ('c', 'b', NULL);",
+    );
+}
+
+#[test]
+fn session_context_reports_stack_position_in_a_mid_stack_tree() {
+    let tmp = unique_dir("ctx-stack");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
+        ),
+        "new tree a",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "tree b", "--branch", "b"],
+        ),
+        "new tree b",
+    );
+    assert_success(&run_wt(&root, &["wait", "tree a"]), "wait tree a");
+    assert_success(&run_wt(&root, &["wait", "tree b"]), "wait tree b");
+    write_graphite_stack(&base);
+
+    let path_out = run_wt(&root, &["path", "tree b"]);
+    assert_success(&path_out, "path tree b");
+    let tree_b_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
+
+    let out = run_wt(&root, &["__session-context", "--path", &tree_b_path]);
+    assert_success(&out, "__session-context");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("This directory is the wt tree \"tree b\" (branch b) of repo myrepo."),
+        "missing header: {stdout}"
+    );
+    assert!(
+        stdout.contains("Below this branch in the stack: 'a', held by tree \"tree a\"."),
+        "missing parent line: {stdout}"
+    );
+    assert!(
+        stdout.contains("This tree is mid-stack: 'a' belongs to tree \"tree a\", not this one."),
+        "missing mid-stack warning: {stdout}"
+    );
+    assert!(
+        stdout.contains("Stacked on top of this branch: 'c' (no worktree right now)."),
+        "missing children line: {stdout}"
+    );
+}
+
+#[test]
+fn session_context_stack_lines_are_absent_without_graphite() {
+    let tmp = unique_dir("ctx-no-graphite");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "plain tree"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "plain tree"]), "wait");
+    // No `.graphite_metadata.db` written — this repo never ran `gt`.
+
+    let path_out = run_wt(&root, &["path", "plain tree"]);
+    assert_success(&path_out, "path");
+    let tree_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
+
+    let out = run_wt(&root, &["__session-context", "--path", &tree_path]);
+    assert_success(&out, "__session-context");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("This directory is the wt tree \"plain tree\""),
+        "base context missing: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Below this branch"),
+        "must not show stack lines with no Graphite: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Stacked on top of"),
+        "must not show stack lines with no Graphite: {stdout}"
+    );
 }

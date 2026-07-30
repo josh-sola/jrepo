@@ -66,6 +66,10 @@ impl Stacks {
             .filter_map(|b| self.entries.get(&b))
             .collect()
     }
+
+    pub fn get(&self, branch: &str) -> Option<&Entry> {
+        self.entries.get(branch)
+    }
 }
 
 /// `None` means Graphite has no readable stack graph for this repo — every
@@ -125,6 +129,86 @@ fn entry_from(branch: &str, node: &graphite::Node, holder: Holder) -> Entry {
         pr_draft: node.pr_draft,
         holder,
     }
+}
+
+/// Where one branch lives, without the dirty flag `Holder::Tree` carries —
+/// `position` never spawns the extra `git status` per neighbor that would
+/// take to know it, so this leaves it out rather than guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeighborHolder {
+    Tree { name: String },
+    Base,
+    Unregistered,
+    None,
+}
+
+/// A branch's immediate Graphite neighbors — its parent and children — each
+/// paired with who holds it. `None` for either side when there is none.
+pub struct Position {
+    pub parent: Option<(String, NeighborHolder)>,
+    pub children: Vec<(String, NeighborHolder)>,
+}
+
+/// The minimal join a caller needs to place one branch in its stack: no
+/// pull-request read, no needs-restack computation (`graphite::graph_light`
+/// skips both), and the worktree scan only runs once there's a neighbor
+/// worth resolving. Built for `wt __session-context`, which pays this cost
+/// on every prompt and can't afford `load`'s whole-graph price.
+///
+/// `None` means Graphite has no readable stack graph for this repo, or
+/// doesn't track `branch` at all — both "nothing to show", never an error.
+pub fn position(
+    repo_name: &str,
+    repo: &Repo,
+    store: &Store,
+    branch: &str,
+) -> Result<Option<Position>> {
+    let common_dir = git::common_dir(&repo.base)?;
+    if !graphite::available(&common_dir) {
+        return Ok(None);
+    }
+    let graph = graphite::graph_light(&common_dir)?;
+    let Some(node) = graph.get(branch) else {
+        return Ok(None);
+    };
+    if node.parent.is_none() && node.children.is_empty() {
+        return Ok(Some(Position {
+            parent: None,
+            children: Vec::new(),
+        }));
+    }
+
+    let worktrees = git::worktree_branches(&repo.base)?;
+    let base = std::fs::canonicalize(&repo.base).unwrap_or_else(|_| repo.base.clone());
+    let path_for: HashMap<&str, &PathBuf> = worktrees
+        .iter()
+        .filter_map(|(path, b)| b.as_deref().map(|b| (b, path)))
+        .collect();
+    let holder_of = |b: &str| -> NeighborHolder {
+        match path_for.get(b) {
+            None => NeighborHolder::None,
+            Some(&path) if *path == base => NeighborHolder::Base,
+            Some(&path) => store
+                .trees
+                .iter()
+                .find(|t| t.repo == repo_name && &t.path == path)
+                .map(|t| NeighborHolder::Tree {
+                    name: t.name.clone(),
+                })
+                .unwrap_or(NeighborHolder::Unregistered),
+        }
+    };
+
+    let parent = node.parent.clone().map(|p| {
+        let holder = holder_of(&p);
+        (p, holder)
+    });
+    let children = node
+        .children
+        .iter()
+        .map(|c| (c.clone(), holder_of(c)))
+        .collect();
+    Ok(Some(Position { parent, children }))
 }
 
 #[cfg(test)]
@@ -322,6 +406,77 @@ mod tests {
         let store = store_with("r", &repo, Vec::new());
 
         assert!(load("r", &repo, &store).unwrap().is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn position_resolves_a_base_parent_and_an_unregistered_child() {
+        let (dir, repo, trees) = fixture();
+        let store = store_with("r", &repo, trees);
+
+        let pos = position("r", &repo, &store, "a").unwrap().unwrap();
+        assert_eq!(
+            pos.parent,
+            Some(("master".to_string(), NeighborHolder::Base))
+        );
+        assert_eq!(
+            pos.children,
+            vec![("b".to_string(), NeighborHolder::Unregistered)]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn position_resolves_a_tree_parent_and_an_unheld_child() {
+        let (dir, repo, trees) = fixture();
+        let store = store_with("r", &repo, trees);
+
+        let pos = position("r", &repo, &store, "b").unwrap().unwrap();
+        assert_eq!(
+            pos.parent,
+            Some((
+                "a".to_string(),
+                NeighborHolder::Tree {
+                    name: "tree-a".to_string()
+                }
+            ))
+        );
+        assert_eq!(pos.children, vec![("c".to_string(), NeighborHolder::None)]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn position_is_none_for_a_branch_graphite_never_tracked() {
+        let (dir, repo, trees) = fixture();
+        let store = store_with("r", &repo, trees);
+
+        assert!(
+            position("r", &repo, &store, "never-tracked")
+                .unwrap()
+                .is_none()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn position_returns_none_when_graphite_is_unavailable() {
+        let dir = std::env::temp_dir().join(format!("wt-stack-test-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        git(&["init", "-q", "-b", "master"], &base);
+        git(&["config", "user.email", "t@t"], &base);
+        git(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git(&["add", "-A"], &base);
+        git(&["commit", "-qm", "init"], &base);
+
+        let repo = sample_repo(base);
+        let store = store_with("r", &repo, Vec::new());
+
+        assert!(position("r", &repo, &store, "master").unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
     }
 }
