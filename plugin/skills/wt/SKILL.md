@@ -20,7 +20,7 @@ the same path they already expect.
 | `wt status [selector] [--json]` | Provisioning state, current step, elapsed time, log path. |
 | `wt wait [selector] [--timeout <secs>]` | Block until a tree is ready or failed. |
 | `wt claude [selector\|repo]` | Open a Claude session with cwd set to a tree, a repo's base, or the current tree. |
-| `wt launch <worktree> [repo]` | Find or create `<worktree>` (in `<repo>` if given), wait for provisioning, and open a colored Claude session in it; `@name` opens a scratch session in the repo's base instead, creating nothing. |
+| `wt launch [worktree] [repo]` | Find or create `<worktree>` (in `<repo>` if given), wait for provisioning, and open a colored Claude session in it; `@name` opens a scratch session in the repo's base instead, creating nothing. With no `<worktree>`, opens an fzf picker over the registered trees. |
 | `wt rm <selector> [--force] [--delete-branch]` | Remove a tree; refuses if dirty or unpushed. |
 | `wt gc [--repo <r>] [--dry-run]` | Reap trees with no commits ahead of trunk and no dirty files. |
 | `wt sync [<repo>]` | Fetch and fast-forward base's trunk; refuses if base is dirty. |

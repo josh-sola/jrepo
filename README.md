@@ -55,7 +55,7 @@ wt new <repo> --name "<short summary>" [--branch <b>] [--profile node,python]
     # Progress prints while it waits. A failed install refuses to open a
     # session and tells you to check `wt status`.
 
-wt launch <worktree> [repo] [--branch <b>] [--profile node,python] [-- <claude args>]
+wt launch [worktree] [repo] [--branch <b>] [--profile node,python] [-- <claude args>]
     # find <worktree>, creating it in <repo> (like `wt new`) if it doesn't
     # exist there, wait for provisioning, then open a claude session in it.
     # <repo> can be omitted if exactly one tree matches <worktree>, or the
@@ -65,6 +65,12 @@ wt launch <worktree> [repo] [--branch <b>] [--profile node,python] [-- <claude a
     #   wt launch "fix login" monorepo -- --model opus
     # If <claude args> already contains a bare prompt, claude receives two
     # positional prompts and the trailing /color one may be ignored.
+    #
+    # With no <worktree>, an fzf picker lists every registered tree (a
+    # preview pane shows its state, age, and commits) and opens whichever
+    # one you pick:
+    #   wt launch
+    #   wt launch -- --model opus
     #
     # A worktree starting with `@` is a scratch session: it opens in
     # <repo>'s base with the same naming and coloring, but creates no

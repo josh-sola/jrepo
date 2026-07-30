@@ -3,6 +3,7 @@ mod color;
 mod context;
 mod env_refresh;
 mod git;
+mod pick;
 mod planter;
 mod proc;
 mod provision;
@@ -71,10 +72,11 @@ enum Command {
     },
     /// Open a claude session in a worktree, creating it if needed. A
     /// worktree starting with `@` is a scratch session that opens in the
-    /// repo's base instead, with nothing created. Anything after `--` is
-    /// passed straight to `claude`.
+    /// repo's base instead, with nothing created. With no worktree given, an
+    /// fzf picker lists the registered trees to choose from. Anything after
+    /// `--` is passed straight to `claude`.
     Launch {
-        worktree: String,
+        worktree: Option<String>,
         repo: Option<String>,
         #[arg(long)]
         branch: Option<String>,
@@ -160,6 +162,9 @@ enum Command {
     /// caller's own window that are running Claude Code.
     #[command(name = "__tab-index", hide = true)]
     TabIndex,
+    /// Prints a tree's details for the `wt launch` fzf preview window.
+    #[command(name = "__launch-preview", hide = true)]
+    LaunchPreview { selector: String },
 }
 
 #[derive(Subcommand)]
@@ -265,6 +270,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
             println!("{}", tab::index()?);
             Ok(())
         }
+        Command::LaunchPreview { selector } => cmd_launch_preview(root, &selector),
     }
 }
 
@@ -427,7 +433,7 @@ fn wait_for_tree(root: &Path, id: Uuid) -> Result<store::Tree> {
 
 fn cmd_launch(
     root: &Path,
-    worktree: String,
+    worktree: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
     profile: Option<Vec<String>>,
@@ -438,13 +444,27 @@ fn cmd_launch(
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let cwd_repo = store::repo_for_cwd(&store, &cwd);
 
-    let plan = resolve_launch(
-        &store,
-        &worktree,
-        repo.as_deref(),
-        branch.is_some() || profile.is_some(),
-        cwd_repo,
-    )?;
+    let plan = match worktree.as_deref() {
+        Some(w) => resolve_launch(
+            &store,
+            w,
+            repo.as_deref(),
+            branch.is_some() || profile.is_some(),
+            cwd_repo,
+        )?,
+        None => {
+            if branch.is_some() || profile.is_some() {
+                bail!(
+                    "the picker only opens trees that already exist, so --branch and --profile \
+                     need a worktree name to create one: wt launch <worktree> [repo] --branch <b>"
+                );
+            }
+            match pick::pick_tree(&store, cwd_repo)? {
+                Some(id) => LaunchPlan::Existing { id },
+                None => return Ok(()),
+            }
+        }
+    };
 
     let (tree_path, color_repo, color_name, label) = match plan {
         LaunchPlan::Scratch { repo, label } => {
@@ -673,12 +693,84 @@ fn provisioning_is_stale(t: &store::Tree) -> bool {
         && t.provision_pid.is_some_and(|pid| !proc::pid_alive(pid))
 }
 
-fn status_state_str(t: &store::Tree) -> String {
+pub(crate) fn status_state_str(t: &store::Tree) -> String {
     if provisioning_is_stale(t) {
         format!("{} (stale)", state_str(t.state))
     } else {
         state_str(t.state).to_string()
     }
+}
+
+/// Each git-backed section degrades to `(unavailable)` on its own instead
+/// of failing the whole preview: a tree still provisioning may have no
+/// usable git dir yet.
+fn cmd_launch_preview(root: &Path, selector: &str) -> Result<()> {
+    let store = store::load(root)?;
+    let t = store::resolve(&store.trees, selector)?;
+
+    println!("\x1b[1m{}\x1b[0m\x1b[2m  ·  {}\x1b[0m", t.name, t.repo);
+    println!("\x1b[2m{}\x1b[0m", t.branch);
+    println!("{}", collapse_home(&t.path));
+    println!();
+
+    let mut state_line = status_state_str(t);
+    if t.state == store::TreeState::Provisioning {
+        state_line.push_str(&format!("  {}", step_str(t)));
+    }
+    println!("state    {state_line}");
+    let age = (Utc::now() - t.created).num_seconds();
+    println!("created  {} ago", format_duration(age));
+
+    let porcelain = git::status_porcelain(&t.path);
+    match &porcelain {
+        Ok(files) if files.is_empty() => println!("dirty    clean"),
+        Ok(files) if files.len() == 1 => println!("dirty    1 file"),
+        Ok(files) => println!("dirty    {} files", files.len()),
+        Err(_) => println!("dirty    (unavailable)"),
+    }
+    println!();
+
+    match store.repos.get(&t.repo).map(|r| r.trunk.clone()) {
+        Some(trunk) => {
+            println!("commits beyond origin/{trunk}");
+            match git::log_oneline(&t.path, &format!("origin/{trunk}..HEAD"), 10) {
+                Ok(lines) if lines.is_empty() => println!("  (none)"),
+                Ok(lines) => {
+                    for line in lines {
+                        println!("  {line}");
+                    }
+                }
+                Err(_) => println!("  (unavailable)"),
+            }
+        }
+        None => {
+            println!("commits beyond origin/trunk");
+            println!("  (unavailable)");
+        }
+    }
+
+    if let Ok(files) = &porcelain
+        && !files.is_empty()
+    {
+        println!();
+        for line in files.iter().take(12) {
+            println!("  {line}");
+        }
+        if files.len() > 12 {
+            println!("  … {} more", files.len() - 12);
+        }
+    }
+
+    Ok(())
+}
+
+fn collapse_home(path: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
 }
 
 fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {

@@ -2,6 +2,7 @@
 //! Nothing here touches a real clone — every fixture is created fresh and
 //! `WT_ROOT` is passed per-process so parallel tests never collide.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -2041,4 +2042,218 @@ fn env_refresh_recopies_and_overwrites_a_stale_env_file() {
         &run_wt(&root, &["rm", "env refresh target", "--delete-branch"]),
         "cleanup",
     );
+}
+
+/// `body` must stick to `/bin/sh` builtins. These tests point `PATH` at a
+/// nonexistent directory so the post-pick `claude` exec fails predictably,
+/// which would also break an external command inside the script.
+fn write_fake_fzf(dir: &Path, body: &str) -> PathBuf {
+    let path = dir.join("fake-fzf.sh");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn launch_with_no_worktree_and_no_trees_fails_before_spawning_the_picker() {
+    let tmp = unique_dir("launch-picker-empty");
+    let root = tmp.join("wt-root");
+    let marker = tmp.join("fzf-ran");
+
+    let fzf = write_fake_fzf(&tmp, &format!("touch '{}'", marker.display()));
+
+    let out = Command::new(wt_bin())
+        .args(["launch"])
+        .env("WT_ROOT", &root)
+        .env("WT_FZF", &fzf)
+        .output()
+        .expect("spawn wt");
+
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no worktrees registered"),
+        "expected a no-worktrees message, got: {stderr}"
+    );
+    assert!(
+        !marker.exists(),
+        "the picker must not run when there is nothing to pick from"
+    );
+}
+
+#[test]
+fn launch_with_no_worktree_offers_the_cwd_repo_first_then_newest_first() {
+    let tmp = unique_dir("launch-picker-order");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "older tree"]),
+        "new older",
+    );
+    assert_success(&run_wt(&root, &["wait", "older tree"]), "wait older");
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "newer tree"]),
+        "new newer",
+    );
+    assert_success(&run_wt(&root, &["wait", "newer tree"]), "wait newer");
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    let id_of = |name: &str| -> String {
+        entries
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("no entry named {name}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let older_id = id_of("older tree");
+    let newer_id = id_of("newer tree");
+
+    let capture = tmp.join("fzf-stdin.txt");
+    let script = format!(
+        "i=0\n\
+         while IFS= read -r line; do\n\
+         printf '%s\\n' \"$line\" >> '{}'\n\
+         i=$((i + 1))\n\
+         if [ \"$i\" -eq 1 ]; then first=\"$line\"; fi\n\
+         done\n\
+         printf '%s\\n' \"$first\"",
+        capture.display()
+    );
+    let fzf = write_fake_fzf(&tmp, &script);
+
+    let out = Command::new(wt_bin())
+        .args(["launch"])
+        .env("WT_ROOT", &root)
+        .env("WT_FZF", &fzf)
+        .env("PATH", "/nonexistent-bin-dir")
+        .output()
+        .expect("spawn wt");
+
+    assert!(
+        !out.status.success(),
+        "expected the launch past the picker to fail on the missing claude binary"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not on PATH"),
+        "expected the picked tree to reach the claude exec, got: {stderr}"
+    );
+
+    let captured = std::fs::read_to_string(&capture).unwrap();
+    let captured_lines: Vec<&str> = captured.lines().collect();
+    assert_eq!(
+        captured_lines.len(),
+        2,
+        "expected both trees on the picker's stdin: {captured}"
+    );
+    assert!(
+        captured_lines[0].starts_with(&format!("{newer_id}\t")),
+        "expected the newer tree first, got: {captured}"
+    );
+    assert!(
+        captured_lines[1].starts_with(&format!("{older_id}\t")),
+        "expected the older tree second, got: {captured}"
+    );
+}
+
+#[test]
+fn launch_with_no_worktree_and_a_cancelled_picker_exits_cleanly() {
+    let tmp = unique_dir("launch-picker-cancel");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "cancel target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "cancel target"]), "wait");
+
+    let fzf = write_fake_fzf(&tmp, "exit 130");
+
+    let out = Command::new(wt_bin())
+        .args(["launch"])
+        .env("WT_ROOT", &root)
+        .env("WT_FZF", &fzf)
+        .output()
+        .expect("spawn wt");
+
+    assert!(
+        out.status.success(),
+        "expected a cancelled pick to exit cleanly: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "expected no error output, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn launch_branch_with_no_worktree_errors_about_needing_a_name() {
+    let tmp = unique_dir("launch-picker-branch");
+    let root = tmp.join("wt-root");
+
+    let out = run_wt(&root, &["launch", "--branch", "foo"]);
+    assert!(!out.status.success(), "expected launch to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--branch") && stderr.contains("worktree name"),
+        "expected a message about needing a worktree name, got: {stderr}"
+    );
+}
+
+#[test]
+fn launch_preview_prints_a_provisioned_trees_details() {
+    let tmp = unique_dir("launch-preview");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
+        ),
+        "init",
+    );
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "preview target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "preview target"]), "wait");
+
+    let path_out = run_wt(&root, &["path", "preview target"]);
+    assert_success(&path_out, "path");
+    let tree_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
+
+    let out = run_wt(&root, &["__launch-preview", "preview target"]);
+    assert_success(&out, "__launch-preview");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("preview target"), "missing name: {stdout}");
+    assert!(stdout.contains("myrepo"), "missing repo: {stdout}");
+    assert!(
+        stdout.contains("josh/preview-target"),
+        "missing branch: {stdout}"
+    );
+    assert!(stdout.contains(&tree_path), "missing path: {stdout}");
 }

@@ -359,6 +359,20 @@ pub fn commits_ahead(path: &Path, range: &str) -> Result<bool> {
     Ok(!out.stdout.is_empty())
 }
 
+pub fn log_oneline(path: &Path, range: &str, limit: usize) -> Result<Vec<String>> {
+    let out = run(&["log", "--oneline", "-n", &limit.to_string(), range], path)?;
+    if !out.status.success() {
+        bail!(
+            "git log {range} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
