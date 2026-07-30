@@ -260,6 +260,7 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
+            parent_branch: None,
         }
     }
 

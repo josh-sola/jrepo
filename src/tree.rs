@@ -17,6 +17,10 @@ pub struct NewOptions {
     pub repo: String,
     pub name: String,
     pub branch: Option<String>,
+    /// Branch the new tree from here instead of `origin/<trunk>`, joining
+    /// whatever Graphite stack this ref belongs to. Resolved by
+    /// `resolve_onto`.
+    pub onto: Option<String>,
     pub profiles: Option<Vec<String>>,
 }
 
@@ -50,6 +54,14 @@ pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
 /// tree first, before a background install could touch any of the same
 /// files. `wt new` runs this immediately followed by `start_provisioning`.
 fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf)> {
+    create_tree_with(root, opts, "gt")
+}
+
+fn create_tree_with(
+    root: &Path,
+    opts: &NewOptions,
+    gt_bin: &str,
+) -> Result<(Uuid, PathBuf, PathBuf)> {
     let store = store::load(root)?;
     let repo = store.repos.get(&opts.repo).cloned().with_context(|| {
         format!(
@@ -59,19 +71,29 @@ fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf
         )
     })?;
 
-    let needs_fetch = match repo.last_fetch {
-        None => true,
-        Some(t) => Utc::now() - t > FETCH_STALE_AFTER,
-    };
-    if needs_fetch {
-        eprintln!("fetching {}...", opts.repo);
-        git::fetch_prune(&repo.base)?;
-        store::with_store_lock(root, |s| {
-            if let Some(r) = s.repos.get_mut(&opts.repo) {
-                r.last_fetch = Some(Utc::now());
-            }
-            Ok(())
-        })?;
+    let parent_branch = opts
+        .onto
+        .as_deref()
+        .map(|sel| resolve_onto(&store, &opts.repo, &repo.base, sel))
+        .transpose()?;
+
+    // A branch resolved by `--onto` already exists locally; only the
+    // trunk-based path needs a fresh `origin/<trunk>` to branch from.
+    if parent_branch.is_none() {
+        let needs_fetch = match repo.last_fetch {
+            None => true,
+            Some(t) => Utc::now() - t > FETCH_STALE_AFTER,
+        };
+        if needs_fetch {
+            eprintln!("fetching {}...", opts.repo);
+            git::fetch_prune(&repo.base)?;
+            store::with_store_lock(root, |s| {
+                if let Some(r) = s.repos.get_mut(&opts.repo) {
+                    r.last_fetch = Some(Utc::now());
+                }
+                Ok(())
+            })?;
+        }
     }
 
     let branch = match opts.branch.clone() {
@@ -97,12 +119,17 @@ fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf
     let id = Uuid::now_v7();
     let repo_dir = root.join(&opts.repo);
     let tree_path = repo_dir.join("trees").join(id.to_string());
-    let start_point = format!("origin/{}", repo.trunk);
+    let start_point = parent_branch
+        .clone()
+        .unwrap_or_else(|| format!("origin/{}", repo.trunk));
     git::worktree_add(&repo.base, &tree_path, &branch, &start_point)?;
     if let Err(e) = git::clear_worktree_hooks_path(&tree_path) {
         eprintln!("warning: could not clear inherited worktree hooksPath: {e:#}");
     }
     let tree_path = fs::canonicalize(&tree_path)?;
+    if let Some(parent) = &parent_branch {
+        track_with_graphite(&tree_path, parent, gt_bin);
+    }
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
 
     // Registered while still `Provisioning` so a failure in wiring or a
@@ -123,6 +150,7 @@ fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf
             step_total: None,
             log_path: Some(log_path.clone()),
             provision_pid: None,
+            parent_branch: parent_branch.clone(),
         });
         Ok(())
     })?;
@@ -141,6 +169,87 @@ fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf
     }
 
     Ok((id, tree_path, log_path))
+}
+
+/// Resolves `--onto`'s selector into the branch `wt new` should create its
+/// worktree from, checked in the same tiered, ambiguity-errors order as
+/// `store::resolve_index`: a `wt` tree in this repo — by the branch it
+/// actually has checked out right now, never `Tree.branch`, which only
+/// records what a tree started on — then a local branch name, then any
+/// other commit-ish. Ambiguity inside a tier is an error, not a fallthrough
+/// to the next tier.
+fn resolve_onto(store: &store::Store, repo_name: &str, base: &Path, sel: &str) -> Result<String> {
+    let trees: Vec<&Tree> = store.trees.iter().filter(|t| t.repo == repo_name).collect();
+    if let Some(branch) = resolve_onto_tree(&trees, sel)? {
+        return Ok(branch);
+    }
+    if git::branch_exists_local(base, sel)? {
+        return Ok(sel.to_string());
+    }
+    if git::rev_parse(base, sel).is_ok() {
+        return Ok(sel.to_string());
+    }
+    bail!("--onto '{sel}' matches no tree, branch, or commit in '{repo_name}'");
+}
+
+fn resolve_onto_tree(trees: &[&Tree], sel: &str) -> Result<Option<String>> {
+    let needle = sel.to_lowercase();
+    let tiers: [fn(&&Tree, &str, &str) -> bool; 4] = [
+        |t, s, _| t.id.to_string() == s,
+        |t, _, needle| t.id.to_string().starts_with(needle),
+        |t, s, _| t.name == s,
+        |t, _, needle| t.name.to_lowercase().contains(needle),
+    ];
+    for tier in tiers {
+        let matches: Vec<&&Tree> = trees.iter().filter(|t| tier(t, sel, &needle)).collect();
+        match matches.len() {
+            0 => continue,
+            1 => {
+                let t = matches[0];
+                let branch = git::current_branch(&t.path).with_context(|| {
+                    format!(
+                        "reading the branch checked out in '{}' ({})",
+                        t.name,
+                        t.path.display()
+                    )
+                })?;
+                return Ok(Some(branch));
+            }
+            _ => {
+                let candidates = matches
+                    .iter()
+                    .map(|t| format!("{} ({})", t.name, t.id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!("--onto '{sel}' is ambiguous: {candidates}");
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Tracks the new tree's branch with Graphite, recording `parent` as its
+/// parent. A failure here only warns: the tree already exists and is fully
+/// usable, just outside Graphite's stack until `gt track` is run by hand —
+/// far better than discarding a freshly created tree over a `gt` hiccup.
+fn track_with_graphite(tree_path: &Path, parent: &str, gt_bin: &str) {
+    let result = Command::new(gt_bin)
+        .args(["track", "--parent", parent, "--no-interactive"])
+        .current_dir(tree_path)
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "warning: `gt track --parent {parent}` failed; the tree exists but Graphite doesn't \
+             know its parent yet — fix it by hand with `gt track --parent {parent}` in {}:\n{}",
+            tree_path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!(
+            "warning: could not run `gt track --parent {parent}` in {}: {e:#}",
+            tree_path.display()
+        ),
+    }
 }
 
 fn start_provisioning(
@@ -172,6 +281,11 @@ pub struct AdoptOptions {
 /// every worktree of the same clone; that's what lets a stash taken in base
 /// be popped straight into the tree `wt new` just created from it, no patch
 /// file needed.
+///
+/// No `--onto` here: the stash was taken against whatever base's `HEAD`
+/// already was, so replaying it onto a different branch's tip is a rebase
+/// this function doesn't do, and popping it there would surface as merge
+/// conflicts with no indication that the mismatch is the real cause.
 pub fn adopt(root: &Path, opts: AdoptOptions) -> Result<PathBuf> {
     let store = store::load(root)?;
     let (repo_name, repo) = resolve_adopt_repo(&store, opts.repo)?;
@@ -190,6 +304,7 @@ pub fn adopt(root: &Path, opts: AdoptOptions) -> Result<PathBuf> {
         repo: repo_name.clone(),
         name: opts.name.clone(),
         branch: opts.branch.clone(),
+        onto: None,
         profiles: opts.profiles.clone(),
     };
     let (id, tree_path, log_path) = create_tree(root, &new_opts).map_err(|e| {
@@ -706,6 +821,7 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
+            parent_branch: None,
         };
 
         let reason = gc_skip_reason(&repo, &tree).unwrap().unwrap();
@@ -806,5 +922,459 @@ mod tests {
 
         assert!(tree_path.join(".env").exists());
         assert!(!tree_path.join("plans").exists());
+    }
+
+    mod onto {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn git_cmd(args: &[&str], cwd: &Path) {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn head(path: &Path) -> String {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(path)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        }
+
+        fn head_of(base: &Path, rev: &str) -> String {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", rev])
+                    .current_dir(base)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        }
+
+        /// `master`, with a fake `origin/master` pointing at the same
+        /// commit — enough for `git worktree add ... origin/master` to
+        /// resolve without a real remote, since these tests only exercise
+        /// `--onto` paths where `create_tree_with` never fetches.
+        fn fixture() -> (PathBuf, Repo) {
+            let dir = std::env::temp_dir().join(format!("wt-tree-onto-test-{}", Uuid::now_v7()));
+            let base = dir.join("base");
+            fs::create_dir_all(&base).unwrap();
+            git_cmd(&["init", "-q", "-b", "master"], &base);
+            git_cmd(&["config", "user.email", "t@t"], &base);
+            git_cmd(&["config", "user.name", "t"], &base);
+            fs::write(base.join("f.txt"), "0\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "init"], &base);
+            let sha = head(&base);
+            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
+            git_cmd(&["branch", "stacked"], &base);
+
+            let repo = Repo {
+                base,
+                trunk: "master".into(),
+                branch_prefix: "josh/".into(),
+                last_fetch: Some(Utc::now()),
+                shared: Vec::new(),
+                copy: Vec::new(),
+                env: Default::default(),
+                steps: Vec::new(),
+            };
+            (dir, repo)
+        }
+
+        fn fake_gt(dir: &Path, log: &Path) -> PathBuf {
+            let script = dir.join("gt");
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\nexit 0\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+            script
+        }
+
+        fn fake_gt_failing(dir: &Path, log: &Path) -> PathBuf {
+            let script = dir.join("gt");
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\necho 'gt: not authenticated' >&2\nexit 1\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+            script
+        }
+
+        fn sample_tree(id: Uuid, repo: &str, name: &str, branch: &str, path: PathBuf) -> Tree {
+            Tree {
+                id,
+                repo: repo.into(),
+                name: name.into(),
+                branch: branch.into(),
+                path,
+                created: Utc::now(),
+                state: TreeState::Ready,
+                step_label: None,
+                step_index: None,
+                step_total: None,
+                log_path: None,
+                provision_pid: None,
+                parent_branch: None,
+            }
+        }
+
+        #[test]
+        fn create_tree_with_onto_a_branch_name_sets_parent_and_tracks_with_graphite() {
+            let (dir, repo) = fixture();
+            let root = dir.join("wtroot");
+            store::with_store_lock(&root, |s| {
+                s.repos.insert("r".to_string(), repo.clone());
+                Ok(())
+            })
+            .unwrap();
+
+            let log = dir.join("gt-log.txt");
+            let gt = fake_gt(&dir, &log);
+            let opts = NewOptions {
+                repo: "r".into(),
+                name: "next pr".into(),
+                branch: None,
+                onto: Some("stacked".into()),
+                profiles: None,
+            };
+            let (id, tree_path, _) = create_tree_with(&root, &opts, gt.to_str().unwrap()).unwrap();
+
+            assert_eq!(head(&tree_path), head_of(&repo.base, "stacked"));
+
+            let log_contents = fs::read_to_string(&log).unwrap();
+            assert!(
+                log_contents.contains("track --parent stacked --no-interactive"),
+                "log was: {log_contents}"
+            );
+            assert!(
+                log_contents.contains(&tree_path.display().to_string()),
+                "gt must run with cwd in the new tree; log was: {log_contents}"
+            );
+
+            let store = store::load(&root).unwrap();
+            let t = store.trees.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(t.parent_branch.as_deref(), Some("stacked"));
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn create_tree_with_onto_a_tree_selector_uses_its_live_branch_not_the_recorded_one() {
+            let (dir, repo) = fixture();
+            let root = dir.join("wtroot");
+
+            // A tree registered under a branch it no longer has checked
+            // out — the drift `Tree.branch` is known to accumulate once
+            // `gt` moves a tree along its stack.
+            git_cmd(&["branch", "live-branch"], &repo.base);
+            let other_path = dir.join("other-tree");
+            git_cmd(
+                &[
+                    "worktree",
+                    "add",
+                    other_path.to_str().unwrap(),
+                    "live-branch",
+                ],
+                &repo.base,
+            );
+            let other_path = fs::canonicalize(&other_path).unwrap();
+            let other_id = Uuid::now_v7();
+
+            store::with_store_lock(&root, |s| {
+                s.repos.insert("r".to_string(), repo.clone());
+                s.trees.push(sample_tree(
+                    other_id,
+                    "r",
+                    "other",
+                    "recorded-branch",
+                    other_path,
+                ));
+                Ok(())
+            })
+            .unwrap();
+
+            let log = dir.join("gt-log.txt");
+            let gt = fake_gt(&dir, &log);
+            let opts = NewOptions {
+                repo: "r".into(),
+                name: "on top of other".into(),
+                branch: None,
+                onto: Some("other".into()),
+                profiles: None,
+            };
+            let (_, tree_path, _) = create_tree_with(&root, &opts, gt.to_str().unwrap()).unwrap();
+
+            assert_eq!(head(&tree_path), head_of(&repo.base, "live-branch"));
+            let log_contents = fs::read_to_string(&log).unwrap();
+            assert!(
+                log_contents.contains("--parent live-branch"),
+                "log was: {log_contents}"
+            );
+            assert!(
+                !log_contents.contains("recorded-branch"),
+                "must use the live branch, not the recorded one; log was: {log_contents}"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn create_tree_with_onto_and_branch_both_apply() {
+            let (dir, repo) = fixture();
+            let root = dir.join("wtroot");
+            store::with_store_lock(&root, |s| {
+                s.repos.insert("r".to_string(), repo.clone());
+                Ok(())
+            })
+            .unwrap();
+
+            let log = dir.join("gt-log.txt");
+            let gt = fake_gt(&dir, &log);
+            let opts = NewOptions {
+                repo: "r".into(),
+                name: "ignored when branch is set".into(),
+                branch: Some("josh/explicit-branch".into()),
+                onto: Some("stacked".into()),
+                profiles: None,
+            };
+            let (id, tree_path, _) = create_tree_with(&root, &opts, gt.to_str().unwrap()).unwrap();
+
+            assert_eq!(head(&tree_path), head_of(&repo.base, "stacked"));
+            let store = store::load(&root).unwrap();
+            let t = store.trees.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(t.branch, "josh/explicit-branch");
+            assert_eq!(t.parent_branch.as_deref(), Some("stacked"));
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn create_tree_with_keeps_the_tree_and_warns_when_gt_track_fails() {
+            let (dir, repo) = fixture();
+            let root = dir.join("wtroot");
+            store::with_store_lock(&root, |s| {
+                s.repos.insert("r".to_string(), repo.clone());
+                Ok(())
+            })
+            .unwrap();
+
+            let log = dir.join("gt-log.txt");
+            let gt = fake_gt_failing(&dir, &log);
+            let opts = NewOptions {
+                repo: "r".into(),
+                name: "flaky".into(),
+                branch: None,
+                onto: Some("stacked".into()),
+                profiles: None,
+            };
+            let (id, tree_path, _) = create_tree_with(&root, &opts, gt.to_str().unwrap())
+                .expect("a failed `gt track` must not fail tree creation");
+
+            assert!(tree_path.exists());
+            assert!(
+                fs::read_to_string(&log).unwrap().contains("track"),
+                "gt track must still have been attempted"
+            );
+
+            let store = store::load(&root).unwrap();
+            let t = store.trees.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(
+                t.parent_branch.as_deref(),
+                Some("stacked"),
+                "the parent is recorded even when gt couldn't track it"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn create_tree_with_no_onto_never_calls_gt() {
+            let (dir, repo) = fixture();
+            let root = dir.join("wtroot");
+            store::with_store_lock(&root, |s| {
+                s.repos.insert("r".to_string(), repo.clone());
+                Ok(())
+            })
+            .unwrap();
+
+            let log = dir.join("gt-log.txt");
+            let gt = fake_gt(&dir, &log);
+            let opts = NewOptions {
+                repo: "r".into(),
+                name: "plain".into(),
+                branch: None,
+                onto: None,
+                profiles: None,
+            };
+            let (id, tree_path, _) = create_tree_with(&root, &opts, gt.to_str().unwrap()).unwrap();
+
+            assert!(!log.exists(), "gt must never run without --onto");
+            assert_eq!(head(&tree_path), head(&repo.base));
+
+            let store = store::load(&root).unwrap();
+            let t = store.trees.iter().find(|t| t.id == id).unwrap();
+            assert!(t.parent_branch.is_none());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_prefers_a_tree_selector_over_a_branch_of_the_same_name() {
+            let (dir, repo) = fixture();
+            git_cmd(&["branch", "shared-name"], &repo.base);
+            git_cmd(&["branch", "actual-branch"], &repo.base);
+            let other_path = dir.join("other-tree");
+            git_cmd(
+                &[
+                    "worktree",
+                    "add",
+                    other_path.to_str().unwrap(),
+                    "actual-branch",
+                ],
+                &repo.base,
+            );
+            let other_path = fs::canonicalize(&other_path).unwrap();
+            let tree = sample_tree(
+                Uuid::now_v7(),
+                "r",
+                "shared-name",
+                "shared-name",
+                other_path,
+            );
+
+            let mut store = store::Store::default();
+            store.repos.insert("r".into(), repo.clone());
+            store.trees = vec![tree];
+
+            let resolved = resolve_onto(&store, "r", &repo.base, "shared-name").unwrap();
+            assert_eq!(resolved, "actual-branch");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_ambiguous_tree_name_lists_candidates() {
+            let (dir, repo) = fixture();
+            let tree_a = sample_tree(
+                Uuid::now_v7(),
+                "r",
+                "foo bar",
+                "b1",
+                PathBuf::from("/nonexistent-a"),
+            );
+            let tree_b = sample_tree(
+                Uuid::now_v7(),
+                "r",
+                "foo baz",
+                "b2",
+                PathBuf::from("/nonexistent-b"),
+            );
+            let mut store = store::Store::default();
+            store.repos.insert("r".into(), repo.clone());
+            store.trees = vec![tree_a, tree_b];
+
+            let err = resolve_onto(&store, "r", &repo.base, "foo").unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("ambiguous"), "message was: {msg}");
+            assert!(msg.contains("foo bar"));
+            assert!(msg.contains("foo baz"));
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_falls_back_to_a_branch_name_when_no_tree_matches() {
+            let (dir, repo) = fixture();
+            let store = store::Store::default();
+
+            let resolved = resolve_onto(&store, "r", &repo.base, "stacked").unwrap();
+            assert_eq!(resolved, "stacked");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_falls_back_to_a_commit_ish_when_nothing_named_it_matches() {
+            let (dir, repo) = fixture();
+            let sha = head(&repo.base);
+            let store = store::Store::default();
+
+            let resolved = resolve_onto(&store, "r", &repo.base, &sha).unwrap();
+            assert_eq!(resolved, sha);
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_errors_when_nothing_matches() {
+            let (dir, repo) = fixture();
+            let store = store::Store::default();
+
+            let err = resolve_onto(&store, "r", &repo.base, "does-not-exist-anywhere").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("matches no tree, branch, or commit")
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_only_considers_trees_in_the_same_repo() {
+            let (dir, repo) = fixture();
+            // A tree of the same name lives in a different repo; it must
+            // not satisfy `--onto` here, since its branch may not even
+            // exist in this repo's history.
+            let tree = sample_tree(
+                Uuid::now_v7(),
+                "other-repo",
+                "stacked",
+                "stacked",
+                PathBuf::from("/nonexistent"),
+            );
+            let mut store = store::Store::default();
+            store.repos.insert("r".into(), repo.clone());
+            store.trees = vec![tree];
+
+            // Falls through the (empty, in-repo) tree tier straight to the
+            // branch-name tier, resolving the local branch `stacked`
+            // instead of erroring or reading the other repo's tree.
+            let resolved = resolve_onto(&store, "r", &repo.base, "stacked").unwrap();
+            assert_eq!(resolved, "stacked");
+
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 }

@@ -83,6 +83,15 @@ pub struct Tree {
         skip_serializing_if = "Option::is_none"
     )]
     pub provision_pid: Option<u32>,
+    /// The branch this tree was created onto with `--onto`, kept apart from
+    /// Graphite's own record of parentage so a teardown check still knows a
+    /// tree's stack position when Graphite's database is missing or stale.
+    #[serde(
+        rename = "parentBranch",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +268,7 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
+            parent_branch: None,
         }
     }
 

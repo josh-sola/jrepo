@@ -50,6 +50,10 @@ enum Command {
         name: String,
         #[arg(long)]
         branch: Option<String>,
+        /// Branch the new tree from here instead of `origin/<trunk>`: a `wt`
+        /// tree selector (its live branch), a branch name, or a commit-ish.
+        #[arg(long)]
+        onto: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
         /// Open a `claude` session in the new tree once it exists.
@@ -83,6 +87,12 @@ enum Command {
         repo: Option<String>,
         #[arg(long)]
         branch: Option<String>,
+        /// Branch a newly created tree from here instead of
+        /// `origin/<trunk>`: a `wt` tree selector (its live branch), a
+        /// branch name, or a commit-ish. Only applies when `worktree` names
+        /// a tree that doesn't exist yet.
+        #[arg(long)]
+        onto: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
         #[arg(last = true)]
@@ -241,6 +251,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
             repo,
             name,
             branch,
+            onto,
             profile,
             claude,
             args,
@@ -251,6 +262,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
                     repo,
                     name,
                     branch,
+                    onto,
                     profiles: profile,
                 },
             )?;
@@ -279,9 +291,10 @@ fn run(root: &Path, command: Command) -> Result<()> {
             worktree,
             repo,
             branch,
+            onto,
             profile,
             args,
-        } => cmd_launch(root, worktree, repo, branch, profile, &args),
+        } => cmd_launch(root, worktree, repo, branch, onto, profile, &args),
         Command::Ls { repo, json } => cmd_ls(root, repo, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -372,8 +385,8 @@ fn resolve_launch(
         }
         if has_branch_or_profile {
             bail!(
-                "a scratch session opens in the repo's base and creates nothing, so --branch and \
-                 --profile don't apply; drop them or drop the leading '@'"
+                "a scratch session opens in the repo's base and creates nothing, so --branch, \
+                 --onto, and --profile don't apply; drop them or drop the leading '@'"
             );
         }
         let repo = match repo_arg {
@@ -478,6 +491,7 @@ fn cmd_launch(
     worktree: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
+    onto: Option<String>,
     profile: Option<Vec<String>>,
     args: &[String],
 ) -> Result<()> {
@@ -491,14 +505,15 @@ fn cmd_launch(
             &store,
             w,
             repo.as_deref(),
-            branch.is_some() || profile.is_some(),
+            branch.is_some() || onto.is_some() || profile.is_some(),
             cwd_repo,
         )?,
         None => {
-            if branch.is_some() || profile.is_some() {
+            if branch.is_some() || onto.is_some() || profile.is_some() {
                 bail!(
-                    "the picker only opens trees that already exist, so --branch and --profile \
-                     need a worktree name to create one: wt launch <worktree> [repo] --branch <b>"
+                    "the picker only opens trees that already exist, so --branch, --onto, and \
+                     --profile need a worktree name to create one: wt launch <worktree> [repo] \
+                     --branch <b>"
                 );
             }
             match pick::pick_tree(&store, cwd_repo)? {
@@ -531,6 +546,7 @@ fn cmd_launch(
                     repo: repo.clone(),
                     name,
                     branch,
+                    onto,
                     profiles: profile,
                 },
             )?;
@@ -1324,6 +1340,7 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
+            parent_branch: None,
         }
     }
 
@@ -1393,6 +1410,7 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
+            parent_branch: None,
         }
     }
 
