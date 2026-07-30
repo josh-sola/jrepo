@@ -363,6 +363,18 @@ pub fn stash_pop(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// True when `path`'s worktree is mid-rebase or mid-merge — state that
+/// would block starting another rebase there. Read from the worktree's own
+/// git dir (`--git-dir`, not `--git-common-dir`): rebase and merge state is
+/// per worktree, not shared across a clone's linked worktrees.
+pub fn rebase_or_merge_in_progress(path: &Path) -> Result<bool> {
+    let git_dir = stdout_trimmed(&["rev-parse", "--path-format=absolute", "--git-dir"], path)?;
+    let git_dir = Path::new(&git_dir);
+    Ok(git_dir.join("rebase-merge").exists()
+        || git_dir.join("rebase-apply").exists()
+        || git_dir.join("MERGE_HEAD").exists())
+}
+
 pub fn commits_ahead(path: &Path, range: &str) -> Result<bool> {
     let out = run(&["log", "--oneline", range], path)?;
     if !out.status.success() {
@@ -409,6 +421,30 @@ mod tests {
         run(&["add", "-A"], &dir).unwrap();
         run(&["commit", "-qm", "init"], &dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn rebase_or_merge_in_progress_is_false_on_a_clean_repo() {
+        let repo = fixture_repo();
+        assert!(!rebase_or_merge_in_progress(&repo).unwrap());
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn rebase_or_merge_in_progress_detects_a_conflicted_merge() {
+        let repo = fixture_repo();
+        let base_branch = current_branch(&repo).unwrap();
+        run(&["checkout", "-qb", "feature"], &repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "feature\n").unwrap();
+        run(&["commit", "-aqm", "feature edit"], &repo).unwrap();
+        run(&["checkout", "-q", &base_branch], &repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        run(&["commit", "-aqm", "base edit"], &repo).unwrap();
+
+        run(&["merge", "feature"], &repo).unwrap(); // conflicts; leaves MERGE_HEAD
+        assert!(rebase_or_merge_in_progress(&repo).unwrap());
+
+        fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

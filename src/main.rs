@@ -9,6 +9,7 @@ mod planter;
 mod proc;
 mod provision;
 mod repo;
+mod restack;
 mod stack;
 mod store;
 mod sync;
@@ -134,7 +135,24 @@ enum Command {
         fix: bool,
     },
     /// Fetch and fast-forward base's trunk; refuses if base is dirty.
-    Sync { repo: Option<String> },
+    Sync {
+        repo: Option<String>,
+        /// Also restack every stack in the repo that has branches in more
+        /// than one worktree, walking bottom-up from wherever each branch
+        /// lives. Never deletes a branch — that's `gt sync`'s job.
+        #[arg(long)]
+        stack: bool,
+    },
+    /// Restack a Graphite stack across every worktree that holds one of its
+    /// branches, bottom-up. A selector resolves like `wt stack`'s: a
+    /// worktree name/uuid first, then a branch name; with none, the stack
+    /// containing the current tree's (or base's) checked-out branch.
+    Restack {
+        selector: Option<String>,
+        /// Print the ordered plan and run nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the Graphite stack containing a branch, with `wt` identity —
     /// tree names instead of raw worktree paths. A selector is a worktree
     /// name/uuid first, then a branch name; with none, the stack containing
@@ -276,7 +294,8 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
-        Command::Sync { repo } => sync::sync(root, repo),
+        Command::Sync { repo, stack } => sync::sync(root, repo, stack),
+        Command::Restack { selector, dry_run } => cmd_restack(root, selector, dry_run),
         Command::Stack {
             selector,
             json,
@@ -673,6 +692,78 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn cmd_restack(root: &Path, selector: Option<String>, dry_run: bool) -> Result<()> {
+    let store = store::load(root)?;
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+
+    let (repo_name, current_branch) = stack_context(&store, selector.as_deref(), cwd.as_deref())?;
+    let repo = store
+        .repos
+        .get(&repo_name)
+        .with_context(|| format!("repo '{repo_name}' is not registered"))?;
+
+    let Some(stacks) = stack::load(&repo_name, repo, &store)? else {
+        return print_stack_unavailable(&repo_name, false);
+    };
+
+    let branch = current_branch.with_context(|| {
+        "pass a worktree selector or a branch name, or run this from inside a registered tree or \
+         repo"
+    })?;
+    if !stacks.graph.contains(&branch) {
+        return print_branch_untracked(&repo_name, &branch, false);
+    }
+
+    let branches = stacks.graph.stack(&branch);
+    let steps = restack::plan(&stacks, &branches, &store, repo);
+
+    if steps.is_empty() {
+        println!("nothing to restack");
+        return Ok(());
+    }
+
+    if dry_run {
+        print_restack_plan(&steps);
+        return Ok(());
+    }
+
+    let offenders = restack::preflight(&steps);
+    if !offenders.is_empty() {
+        for o in &offenders {
+            println!(
+                "{} ({}): {}",
+                o.label,
+                o.dir.display(),
+                o.reasons.join(", ")
+            );
+        }
+        bail!(
+            "refusing to restack: {} tree{} not ready",
+            offenders.len(),
+            if offenders.len() == 1 { " is" } else { "s are" }
+        );
+    }
+
+    restack::execute(&steps)
+}
+
+fn print_restack_plan(steps: &[restack::Step]) {
+    for step in steps {
+        let parent = step
+            .parent
+            .as_deref()
+            .map_or("none".to_string(), |p| format!("'{p}'"));
+        println!(
+            "would restack '{}' (parent {parent}) in {} ({})",
+            step.branch,
+            step.location.label(),
+            step.dir.display(),
+        );
+    }
+}
+
 fn cmd_stack(
     root: &Path,
     selector: Option<String>,
@@ -843,10 +934,6 @@ fn pr_str(e: &stack::Entry) -> String {
     format!(" #{n} ({status})")
 }
 
-fn is_merged_or_closed(e: &stack::Entry) -> bool {
-    matches!(e.pr_state.as_deref(), Some("MERGED") | Some("CLOSED"))
-}
-
 fn print_stack_text(
     stacks: &stack::Stacks,
     branch_lists: &[Vec<String>],
@@ -859,7 +946,7 @@ fn print_stack_text(
             println!();
         }
         for entry in stacks.ordered(branches) {
-            if !all_branches && is_merged_or_closed(entry) {
+            if !all_branches && entry.is_merged_or_closed() {
                 hidden += 1;
                 continue;
             }
@@ -902,7 +989,7 @@ fn print_stack_json(
     for branches in branch_lists {
         let mut entries = Vec::new();
         for entry in stacks.ordered(branches) {
-            if !all_branches && is_merged_or_closed(entry) {
+            if !all_branches && entry.is_merged_or_closed() {
                 hidden += 1;
                 continue;
             }
@@ -1423,28 +1510,5 @@ mod tests {
         let store = store_with(&[("monorepo", "/base")], vec![]);
         let err = resolve_launch(&store, "@poking-around", None, false, None).unwrap_err();
         assert!(err.to_string().contains("repo"), "message was: {err}");
-    }
-
-    fn entry_with_pr_state(state: Option<&str>) -> stack::Entry {
-        stack::Entry {
-            branch: "josh/b".into(),
-            parent: Some("master".into()),
-            needs_restack: None,
-            pr_number: None,
-            pr_state: state.map(str::to_string),
-            pr_review_decision: None,
-            pr_draft: None,
-            holder: stack::Holder::None,
-        }
-    }
-
-    #[test]
-    fn only_a_known_merged_or_closed_pr_hides_a_branch() {
-        assert!(is_merged_or_closed(&entry_with_pr_state(Some("MERGED"))));
-        assert!(is_merged_or_closed(&entry_with_pr_state(Some("CLOSED"))));
-        assert!(!is_merged_or_closed(&entry_with_pr_state(Some("OPEN"))));
-        // An unreadable `.graphite_pr_info` leaves every state `None`; hiding on
-        // that would empty the default view of branches that are still live.
-        assert!(!is_merged_or_closed(&entry_with_pr_state(None)));
     }
 }

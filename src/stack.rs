@@ -40,6 +40,16 @@ pub struct Entry {
     pub holder: Holder,
 }
 
+impl Entry {
+    /// Graphite has one annotation slot per branch, and `(merged)` masks
+    /// `(needs restack)` — so a branch whose pull request is already merged
+    /// or closed is done, whatever its actual git shape says: `wt stack`
+    /// hides it by default and the restack planner skips it outright.
+    pub fn is_merged_or_closed(&self) -> bool {
+        matches!(self.pr_state.as_deref(), Some("MERGED") | Some("CLOSED"))
+    }
+}
+
 pub struct Stacks {
     pub graph: Graph,
     entries: HashMap<String, Entry>,
@@ -269,6 +279,29 @@ mod tests {
         }
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn entry_with_pr_state(state: Option<&str>) -> Entry {
+        Entry {
+            branch: "josh/b".into(),
+            parent: Some("master".into()),
+            needs_restack: None,
+            pr_number: None,
+            pr_state: state.map(str::to_string),
+            pr_review_decision: None,
+            pr_draft: None,
+            holder: Holder::None,
+        }
+    }
+
+    #[test]
+    fn only_a_known_merged_or_closed_pr_hides_a_branch() {
+        assert!(entry_with_pr_state(Some("MERGED")).is_merged_or_closed());
+        assert!(entry_with_pr_state(Some("CLOSED")).is_merged_or_closed());
+        assert!(!entry_with_pr_state(Some("OPEN")).is_merged_or_closed());
+        // An unreadable `.graphite_pr_info` leaves every state `None`; hiding on
+        // that would empty the default view of branches that are still live.
+        assert!(!entry_with_pr_state(None).is_merged_or_closed());
     }
 
     #[test]
