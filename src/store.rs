@@ -10,6 +10,8 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::git;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Store {
     pub version: u32,
@@ -171,12 +173,17 @@ pub fn resolve<'a>(trees: &'a [Tree], selector: &str) -> Result<&'a Tree> {
 
 pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
     let needle = selector.to_lowercase();
-    let tiers: [fn(&Tree, &str, &str) -> bool; 5] = [
+    let tiers: [fn(&Tree, &str, &str) -> bool; 6] = [
         |t, s, _| t.id.to_string() == s,
         |t, _, needle| t.id.to_string().starts_with(needle),
         |t, s, _| t.name == s,
         |t, _, needle| t.name.to_lowercase().contains(needle),
         |t, s, _| t.branch == s,
+        // `gt create` moves a tree onto a new branch without updating the
+        // registry, so the branch it started on and the branch it's
+        // actually on can differ; this tier is what lets a selector still
+        // find the tree once that's happened.
+        |t, s, _| live_branch(t).as_deref() == Some(s),
     ];
     for tier in tiers {
         let matches: Vec<usize> = trees
@@ -199,6 +206,14 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
         }
     }
     bail!("no tree matches selector '{selector}'");
+}
+
+/// `None` on any git failure (path missing, still provisioning, not a
+/// worktree yet) rather than falling back to the recorded branch — a
+/// silent fallback here would make this tier indistinguishable from the
+/// recorded-branch tier above it.
+fn live_branch(t: &Tree) -> Option<String> {
+    git::current_branch(&t.path).ok()
 }
 
 /// The longest matching tree path wins, so a tree nested under another
@@ -333,6 +348,43 @@ mod tests {
         let trees = vec![sample_tree("foo", "b1")];
         let err = resolve(&trees, "nope").unwrap_err();
         assert!(err.to_string().contains("no tree matches"));
+    }
+
+    fn fixture_repo_on_branch(branch: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wt-store-git-test-{}", Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "."]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        fs::write(dir.join("f.txt"), "one\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        run(&["checkout", "-qb", branch]);
+        dir
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_tree_s_live_branch_once_it_has_moved() {
+        let path = fixture_repo_on_branch("josh/moved-on");
+        let mut t = sample_tree("drifted", "josh/started-here");
+        t.path = path.clone();
+        let trees = vec![t];
+
+        assert_eq!(resolve(&trees, "josh/moved-on").unwrap().name, "drifted");
+        // The recorded-branch tier still wins for the branch it started on.
+        assert_eq!(
+            resolve(&trees, "josh/started-here").unwrap().name,
+            "drifted"
+        );
+
+        fs::remove_dir_all(&path).ok();
     }
 
     fn sample_repo(base: &str) -> Repo {

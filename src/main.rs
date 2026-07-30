@@ -3,11 +3,13 @@ mod color;
 mod context;
 mod env_refresh;
 mod git;
+mod graphite;
 mod pick;
 mod planter;
 mod proc;
 mod provision;
 mod repo;
+mod stack;
 mod store;
 mod sync;
 mod tab;
@@ -133,6 +135,21 @@ enum Command {
     },
     /// Fetch and fast-forward base's trunk; refuses if base is dirty.
     Sync { repo: Option<String> },
+    /// Show the Graphite stack containing a branch, with `wt` identity —
+    /// tree names instead of raw worktree paths. A selector is a worktree
+    /// name/uuid first, then a branch name; with none, the stack containing
+    /// the current tree's (or base's) checked-out branch.
+    Stack {
+        selector: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Every stack in the repo, not just the one containing `selector`.
+        #[arg(long)]
+        all: bool,
+        /// Show merged and closed branches too; hidden by default.
+        #[arg(long)]
+        all_branches: bool,
+    },
     /// Env-file maintenance for a tree.
     Env {
         #[command(subcommand)]
@@ -260,6 +277,12 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
         Command::Sync { repo } => sync::sync(root, repo),
+        Command::Stack {
+            selector,
+            json,
+            all,
+            all_branches,
+        } => cmd_stack(root, selector, json, all, all_branches),
         Command::Env { action } => match action {
             EnvCommand::Refresh { selector } => env_refresh::refresh(root, &selector),
         },
@@ -564,6 +587,14 @@ fn cmd_name(root: &Path, path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// `gt create` moves a tree onto a new branch without updating the
+/// registry, so `Tree.branch` — the branch a tree started on — drifts from
+/// what's actually checked out. Falls back to the recorded branch on any
+/// git failure (still provisioning, path gone) rather than showing nothing.
+fn live_branch(t: &store::Tree) -> String {
+    git::current_branch(&t.path).unwrap_or_else(|_| t.branch.clone())
+}
+
 fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
     let store = store::load(root)?;
     let mut rows = Vec::new();
@@ -574,18 +605,20 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
             continue;
         }
         let dirty = git::is_dirty(&t.path).unwrap_or(false);
-        rows.push((t, dirty));
+        let branch = live_branch(t);
+        rows.push((t, dirty, branch));
     }
 
     if json {
         let entries: Vec<_> = rows
             .iter()
-            .map(|(t, dirty)| {
+            .map(|(t, dirty, branch)| {
                 serde_json::json!({
                     "id": t.id,
                     "repo": t.repo,
                     "name": t.name,
-                    "branch": t.branch,
+                    "branch": branch,
+                    "startingBranch": t.branch,
                     "path": t.path,
                     "created": t.created,
                     "state": t.state,
@@ -599,26 +632,26 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
 
     let ids: Vec<String> = rows
         .iter()
-        .map(|(t, _)| unique_id_prefix(&t.id, &store.trees))
+        .map(|(t, _, _)| unique_id_prefix(&t.id, &store.trees))
         .collect();
     let w = |header: &str, vals: &mut dyn Iterator<Item = usize>| {
         vals.chain(std::iter::once(header.len())).max().unwrap_or(0)
     };
     let name_w = w(
         "NAME",
-        &mut rows.iter().map(|(t, _)| t.name.chars().count()),
+        &mut rows.iter().map(|(t, _, _)| t.name.chars().count()),
     );
     let repo_w = w(
         "REPO",
-        &mut rows.iter().map(|(t, _)| t.repo.chars().count()),
+        &mut rows.iter().map(|(t, _, _)| t.repo.chars().count()),
     );
     let branch_w = w(
         "BRANCH",
-        &mut rows.iter().map(|(t, _)| t.branch.chars().count()),
+        &mut rows.iter().map(|(_, _, branch)| branch.chars().count()),
     );
     let state_w = w(
         "STATE",
-        &mut rows.iter().map(|(t, _)| state_str(t.state).len()),
+        &mut rows.iter().map(|(t, _, _)| state_str(t.state).len()),
     );
     let id_w = w("UUID", &mut ids.iter().map(String::len));
 
@@ -626,18 +659,293 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
         "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} DIRTY",
         "NAME", "REPO", "BRANCH", "STATE", "UUID"
     );
-    for ((t, dirty), id) in rows.iter().zip(&ids) {
+    for ((t, dirty, branch), id) in rows.iter().zip(&ids) {
         println!(
             "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} {}",
             t.name,
             t.repo,
-            t.branch,
+            branch,
             state_str(t.state),
             id,
             if *dirty { "dirty" } else { "" }
         );
     }
     Ok(())
+}
+
+fn cmd_stack(
+    root: &Path,
+    selector: Option<String>,
+    json: bool,
+    all: bool,
+    all_branches: bool,
+) -> Result<()> {
+    let store = store::load(root)?;
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+
+    let (repo_name, current_branch) = stack_context(&store, selector.as_deref(), cwd.as_deref())?;
+    let repo = store
+        .repos
+        .get(&repo_name)
+        .with_context(|| format!("repo '{repo_name}' is not registered"))?;
+
+    let Some(stacks) = stack::load(&repo_name, repo, &store)? else {
+        return print_stack_unavailable(&repo_name, json);
+    };
+
+    let branch_lists: Vec<Vec<String>> = if all {
+        let mut roots = stacks.graph.roots();
+        roots.sort();
+        roots.iter().map(|r| stacks.graph.upstack(r)).collect()
+    } else {
+        let branch = current_branch.clone().with_context(|| {
+            "pass a worktree selector or a branch name, or run this from inside a registered \
+             tree or repo"
+        })?;
+        if !stacks.graph.contains(&branch) {
+            return print_branch_untracked(&repo_name, &branch, json);
+        }
+        vec![stacks.graph.stack(&branch)]
+    };
+
+    if json {
+        print_stack_json(
+            &stacks,
+            &branch_lists,
+            current_branch.as_deref(),
+            all_branches,
+        )
+    } else {
+        print_stack_text(
+            &stacks,
+            &branch_lists,
+            current_branch.as_deref(),
+            all_branches,
+        );
+        Ok(())
+    }
+}
+
+/// Resolves which repo `wt stack` looks at, and — for the default,
+/// non-`--all` view — which branch counts as "current" for the `*` marker
+/// and the stack it shows.
+fn stack_context(
+    store: &store::Store,
+    selector: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<(String, Option<String>)> {
+    if let Some(sel) = selector {
+        if let Ok(t) = store::resolve(&store.trees, sel) {
+            return Ok((t.repo.clone(), Some(live_branch(t))));
+        }
+        let repo = cwd
+            .and_then(|c| store::repo_for_cwd(store, c))
+            .map(str::to_string)
+            .with_context(|| {
+                format!(
+                    "'{sel}' doesn't match a registered tree, and the current directory isn't \
+                     inside a registered repo; run from inside one, or pass a tree selector \
+                     instead of a branch name"
+                )
+            })?;
+        return Ok((repo, Some(sel.to_string())));
+    }
+
+    let cwd = cwd.context("reading current directory")?;
+    if let Some(tree) = store
+        .trees
+        .iter()
+        .filter(|t| cwd.starts_with(&t.path))
+        .max_by_key(|t| t.path.components().count())
+    {
+        return Ok((tree.repo.clone(), Some(live_branch(tree))));
+    }
+    if let Some((name, repo)) = store.repos.iter().find(|(_, r)| cwd.starts_with(&r.base)) {
+        return Ok((name.clone(), git::current_branch(&repo.base).ok()));
+    }
+    bail!(
+        "not inside a registered tree or repo; pass a selector, e.g. `wt stack <tree>` or \
+         `wt stack --all`"
+    );
+}
+
+fn print_stack_unavailable(repo_name: &str, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "available": false,
+                "stacks": [],
+            }))?
+        );
+    } else {
+        println!(
+            "no Graphite stack info for '{repo_name}': no readable .graphite_metadata.db in its \
+             git dir (missing sqlite3, missing database, or an unexpected schema)"
+        );
+    }
+    Ok(())
+}
+
+fn print_branch_untracked(repo_name: &str, branch: &str, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "available": true,
+                "branchTracked": false,
+                "stacks": [],
+            }))?
+        );
+    } else {
+        println!(
+            "'{branch}' in '{repo_name}' isn't tracked by Graphite; run `gt track` if you want \
+             it in a stack"
+        );
+    }
+    Ok(())
+}
+
+fn holder_str(h: &stack::Holder) -> String {
+    match h {
+        stack::Holder::Tree { name, dirty, .. } => {
+            if *dirty {
+                format!("[{name}, dirty]")
+            } else {
+                format!("[{name}]")
+            }
+        }
+        stack::Holder::Base => "[base]".to_string(),
+        stack::Holder::Unregistered { path } => format!("[unregistered: {}]", path.display()),
+        stack::Holder::None => String::new(),
+    }
+}
+
+/// A short human label for a branch's pull request, e.g. `#14617 (ready to
+/// merge)`. Empty when there's no PR to report.
+fn pr_str(e: &stack::Entry) -> String {
+    let Some(n) = e.pr_number else {
+        return String::new();
+    };
+    let status = if e.pr_draft == Some(true) {
+        "draft".to_string()
+    } else {
+        match (e.pr_state.as_deref(), e.pr_review_decision.as_deref()) {
+            (Some("MERGED"), _) => "merged".to_string(),
+            (Some("CLOSED"), _) => "closed".to_string(),
+            (Some("OPEN"), Some("APPROVED")) => "ready to merge".to_string(),
+            (Some("OPEN"), Some(decision)) => decision.to_lowercase().replace('_', " "),
+            _ => "open".to_string(),
+        }
+    };
+    format!(" #{n} ({status})")
+}
+
+fn is_merged_or_closed(e: &stack::Entry) -> bool {
+    matches!(e.pr_state.as_deref(), Some("MERGED") | Some("CLOSED"))
+}
+
+fn print_stack_text(
+    stacks: &stack::Stacks,
+    branch_lists: &[Vec<String>],
+    current: Option<&str>,
+    all_branches: bool,
+) {
+    let mut hidden = 0usize;
+    for (i, branches) in branch_lists.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        for entry in stacks.ordered(branches) {
+            if !all_branches && is_merged_or_closed(entry) {
+                hidden += 1;
+                continue;
+            }
+            let depth = stacks.graph.downstack(&entry.branch).len();
+            let marker = if Some(entry.branch.as_str()) == current {
+                "*"
+            } else {
+                " "
+            };
+            let restack = match entry.needs_restack {
+                Some(true) => " (needs restack)",
+                _ => "",
+            };
+            let line = format!(
+                "{marker} {}{}{restack}{}  {}",
+                "  ".repeat(depth),
+                entry.branch,
+                pr_str(entry),
+                holder_str(&entry.holder),
+            );
+            println!("{}", line.trim_end());
+        }
+    }
+    if hidden > 0 {
+        println!(
+            "{hidden} merged or closed branch{} hidden; pass --all-branches to show them",
+            if hidden == 1 { "" } else { "es" }
+        );
+    }
+}
+
+fn print_stack_json(
+    stacks: &stack::Stacks,
+    branch_lists: &[Vec<String>],
+    current: Option<&str>,
+    all_branches: bool,
+) -> Result<()> {
+    let mut hidden = 0usize;
+    let mut stacks_json = Vec::with_capacity(branch_lists.len());
+    for branches in branch_lists {
+        let mut entries = Vec::new();
+        for entry in stacks.ordered(branches) {
+            if !all_branches && is_merged_or_closed(entry) {
+                hidden += 1;
+                continue;
+            }
+            entries.push(stack_entry_json(entry, current));
+        }
+        stacks_json.push(serde_json::json!({ "entries": entries }));
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "available": true,
+            "stacks": stacks_json,
+            "hiddenMergedOrClosed": hidden,
+        }))?
+    );
+    Ok(())
+}
+
+fn stack_entry_json(e: &stack::Entry, current: Option<&str>) -> serde_json::Value {
+    let holder = match &e.holder {
+        stack::Holder::Tree { id, name, dirty } => serde_json::json!({
+            "type": "tree",
+            "id": id,
+            "name": name,
+            "dirty": dirty,
+        }),
+        stack::Holder::Base => serde_json::json!({ "type": "base" }),
+        stack::Holder::Unregistered { path } => {
+            serde_json::json!({ "type": "unregistered", "path": path })
+        }
+        stack::Holder::None => serde_json::json!({ "type": "none" }),
+    };
+    serde_json::json!({
+        "branch": e.branch,
+        "parent": e.parent,
+        "needsRestack": e.needs_restack,
+        "prNumber": e.pr_number,
+        "prState": e.pr_state,
+        "prReviewDecision": e.pr_review_decision,
+        "prDraft": e.pr_draft,
+        "current": current == Some(e.branch.as_str()),
+        "holder": holder,
+    })
 }
 
 /// A uuidv7 leads with a millisecond timestamp, so trees created minutes
@@ -1115,5 +1423,28 @@ mod tests {
         let store = store_with(&[("monorepo", "/base")], vec![]);
         let err = resolve_launch(&store, "@poking-around", None, false, None).unwrap_err();
         assert!(err.to_string().contains("repo"), "message was: {err}");
+    }
+
+    fn entry_with_pr_state(state: Option<&str>) -> stack::Entry {
+        stack::Entry {
+            branch: "josh/b".into(),
+            parent: Some("master".into()),
+            needs_restack: None,
+            pr_number: None,
+            pr_state: state.map(str::to_string),
+            pr_review_decision: None,
+            pr_draft: None,
+            holder: stack::Holder::None,
+        }
+    }
+
+    #[test]
+    fn only_a_known_merged_or_closed_pr_hides_a_branch() {
+        assert!(is_merged_or_closed(&entry_with_pr_state(Some("MERGED"))));
+        assert!(is_merged_or_closed(&entry_with_pr_state(Some("CLOSED"))));
+        assert!(!is_merged_or_closed(&entry_with_pr_state(Some("OPEN"))));
+        // An unreadable `.graphite_pr_info` leaves every state `None`; hiding on
+        // that would empty the default view of branches that are still live.
+        assert!(!is_merged_or_closed(&entry_with_pr_state(None)));
     }
 }

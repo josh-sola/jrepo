@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -259,6 +260,20 @@ pub fn worktree_list(base: &Path) -> Result<Vec<WorktreeEntry>> {
         entries.push(WorktreeEntry { path, branch });
     }
     Ok(entries)
+}
+
+/// Canonicalized so a caller can join the result against `Tree.path`, which
+/// `tree.rs` canonicalizes at creation — otherwise a symlinked component
+/// (`/tmp` vs `/private/tmp`) would make an exact-path match miss even
+/// though both sides name the same worktree.
+pub fn worktree_branches(cwd: &Path) -> Result<Vec<(std::path::PathBuf, Option<String>)>> {
+    Ok(worktree_list(cwd)?
+        .into_iter()
+        .map(|w| {
+            let path = fs::canonicalize(&w.path).unwrap_or(w.path);
+            (path, w.branch)
+        })
+        .collect())
 }
 
 /// `--directory` folds a wholly-ignored directory (`node_modules/`,
