@@ -386,6 +386,23 @@ pub fn commits_ahead(path: &Path, range: &str) -> Result<bool> {
     Ok(!out.stdout.is_empty())
 }
 
+/// Compares patch-ids rather than SHAs, so a commit a squash merge landed
+/// under a different SHA on `upstream` still counts as landed.
+pub fn unlanded_commits(path: &Path, upstream: &str, head: &str) -> Result<Vec<String>> {
+    let out = run(&["cherry", upstream, head], path)?;
+    if !out.status.success() {
+        bail!(
+            "git cherry {upstream} {head} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(str::to_string)
+        .collect())
+}
+
 pub fn log_oneline(path: &Path, range: &str, limit: usize) -> Result<Vec<String>> {
     let out = run(&["log", "--oneline", "-n", &limit.to_string(), range], path)?;
     if !out.status.success() {

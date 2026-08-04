@@ -947,8 +947,19 @@ fn gc_skip_reason(store: &store::Store, repo: &Repo, tree: &Tree) -> Result<Opti
     // registry; checking `tree.branch` instead of what's actually checked
     // out could pronounce a tree clean by looking at a branch it abandoned.
     let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
+    // Most trees sit exactly at trunk, so gate the patch-id walk behind the
+    // cheap count.
     if git::commits_ahead(&repo.base, &format!("origin/{}..{branch}", repo.trunk))? {
-        return Ok(Some(format!("commits ahead of origin/{}", repo.trunk)));
+        let unlanded =
+            git::unlanded_commits(&repo.base, &format!("origin/{}", repo.trunk), &branch)?;
+        if !unlanded.is_empty() {
+            let n = unlanded.len();
+            return Ok(Some(format!(
+                "{n} commit{} not yet in origin/{}",
+                if n == 1 { "" } else { "s" },
+                repo.trunk
+            )));
+        }
     }
     if let Some((_, children)) = stacked_children(store, &tree.repo, repo, &branch)?
         && !children.is_empty()
@@ -1184,6 +1195,185 @@ mod tests {
         let reason = gc_skip_reason(&store, &repo, &tree).unwrap().unwrap();
         assert!(
             reason.contains('b') && reason.contains("Graphite children"),
+            "unexpected reason: {reason}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gc_reaps_a_tree_whose_commits_already_landed() {
+        let dir = std::env::temp_dir().join(format!("wt-tree-gc-landed-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        let git_cmd = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        let head_sha = |cwd: &Path| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        git_cmd(&["init", "-q", "-b", "master"], &base);
+        git_cmd(&["config", "user.email", "t@t"], &base);
+        git_cmd(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git_cmd(&["add", "-A"], &base);
+        git_cmd(&["commit", "-qm", "init"], &base);
+        let init_sha = head_sha(&base);
+        git_cmd(
+            &["update-ref", "refs/remotes/origin/master", &init_sha],
+            &base,
+        );
+        git_cmd(&["branch", "a"], &base);
+        let tree_path = dir.join("tree-a");
+        git_cmd(
+            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
+            &base,
+        );
+        let tree_path = fs::canonicalize(&tree_path).unwrap();
+
+        // Same patch, different SHA — what a squash merge looks like from
+        // the tree's side.
+        fs::write(tree_path.join("f.txt"), "1\n").unwrap();
+        git_cmd(&["add", "-A"], &tree_path);
+        git_cmd(&["commit", "-qm", "change"], &tree_path);
+
+        fs::write(base.join("f.txt"), "1\n").unwrap();
+        git_cmd(&["add", "-A"], &base);
+        git_cmd(&["commit", "-qm", "same change, landed on master"], &base);
+        let landed_sha = head_sha(&base);
+        git_cmd(
+            &["update-ref", "refs/remotes/origin/master", &landed_sha],
+            &base,
+        );
+
+        let repo = Repo {
+            base: base.clone(),
+            trunk: "master".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: Some(Utc::now()),
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: Default::default(),
+            steps: Vec::new(),
+        };
+        let tree = Tree {
+            id: Uuid::now_v7(),
+            repo: "r".into(),
+            name: "tree-a".into(),
+            branch: "a".into(),
+            path: tree_path,
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+            parent_branch: None,
+        };
+        let mut store = store::Store::default();
+        store.repos.insert("r".to_string(), repo.clone());
+        store.trees = vec![tree.clone()];
+
+        let reason = gc_skip_reason(&store, &repo, &tree).unwrap();
+        assert!(reason.is_none(), "unexpected reason: {reason:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gc_skips_a_tree_with_an_unlanded_commit() {
+        let dir = std::env::temp_dir().join(format!("wt-tree-gc-unlanded-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        let git_cmd = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git_cmd(&["init", "-q", "-b", "master"], &base);
+        git_cmd(&["config", "user.email", "t@t"], &base);
+        git_cmd(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git_cmd(&["add", "-A"], &base);
+        git_cmd(&["commit", "-qm", "init"], &base);
+        let init_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&base)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git_cmd(
+            &["update-ref", "refs/remotes/origin/master", &init_sha],
+            &base,
+        );
+        git_cmd(&["branch", "a"], &base);
+        let tree_path = dir.join("tree-a");
+        git_cmd(
+            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
+            &base,
+        );
+        let tree_path = fs::canonicalize(&tree_path).unwrap();
+
+        fs::write(tree_path.join("f.txt"), "unlanded\n").unwrap();
+        git_cmd(&["add", "-A"], &tree_path);
+        git_cmd(&["commit", "-qm", "still open"], &tree_path);
+
+        let repo = Repo {
+            base: base.clone(),
+            trunk: "master".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: Some(Utc::now()),
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: Default::default(),
+            steps: Vec::new(),
+        };
+        let tree = Tree {
+            id: Uuid::now_v7(),
+            repo: "r".into(),
+            name: "tree-a".into(),
+            branch: "a".into(),
+            path: tree_path,
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+            parent_branch: None,
+        };
+        let mut store = store::Store::default();
+        store.repos.insert("r".to_string(), repo.clone());
+        store.trees = vec![tree.clone()];
+
+        let reason = gc_skip_reason(&store, &repo, &tree).unwrap().unwrap();
+        assert!(
+            reason.contains("not yet in origin/master"),
             "unexpected reason: {reason}"
         );
 
