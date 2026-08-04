@@ -665,7 +665,7 @@ fn rm_tree_with(
         )?;
     }
 
-    let unpushed = branch_has_unpushed_commits(&repo.base, &branch, &repo.trunk)?;
+    let unsaved = branch_has_unsaved_commits(&repo.base, &branch, &repo.trunk)?;
 
     // A path that's already gone is drift, not a removal to perform: there
     // is nothing left to protect by refusing, so it skips the dirty/unpushed
@@ -675,8 +675,12 @@ fn rm_tree_with(
             if git::is_dirty(&tree_path)? {
                 bail!("tree '{name}' has uncommitted changes; use --force to remove anyway");
             }
-            if unpushed {
-                bail!("tree '{name}' has commits not on the remote; use --force to remove anyway");
+            if unsaved {
+                bail!(
+                    "tree '{name}' has commits that are neither pushed nor landed on \
+                     origin/{}; use --force to remove anyway",
+                    repo.trunk
+                );
             }
         }
 
@@ -724,8 +728,12 @@ fn rm_tree_with(
     })?;
 
     if delete_branch {
-        if unpushed {
-            eprintln!("keeping branch '{branch}': it has commits not on the remote");
+        if unsaved {
+            eprintln!(
+                "keeping branch '{branch}': it has commits that are neither pushed nor landed \
+                 on origin/{}",
+                repo.trunk
+            );
         } else if let Err(e) = git::delete_branch(&repo.base, &branch) {
             eprintln!("warning: could not delete branch '{branch}': {e}");
         }
@@ -871,10 +879,20 @@ fn remove_tree_dir(tree_path: &Path) -> Result<()> {
     Err(last_err.unwrap()).with_context(|| format!("removing {}", tree_path.display()))
 }
 
-fn branch_has_unpushed_commits(base: &Path, branch: &str, trunk: &str) -> Result<bool> {
+fn branch_has_unsaved_commits(base: &Path, branch: &str, trunk: &str) -> Result<bool> {
+    // Nothing ahead of trunk at all: the common case, and cheaper than the
+    // patch-id walk below.
+    if !git::commits_ahead(base, &format!("origin/{trunk}..{branch}"))? {
+        return Ok(false);
+    }
+    // A squash merge lands the work under a new SHA, so compare patch-ids:
+    // commits already on trunk are not at risk however far ahead they look.
+    if git::unlanded_commits(base, &format!("origin/{trunk}"), branch)?.is_empty() {
+        return Ok(false);
+    }
     match git::branch_upstream(base, branch) {
-        Some(upstream) => git::commits_ahead(base, &format!("{upstream}..{branch}")),
-        None => git::commits_ahead(base, &format!("origin/{trunk}..{branch}")),
+        Some(upstream) => Ok(!git::unlanded_commits(base, &upstream, branch)?.is_empty()),
+        None => Ok(true),
     }
 }
 
@@ -897,8 +915,8 @@ pub fn gc(root: &Path, opts: GcOptions) -> Result<()> {
             eprintln!("skipping '{}': repo '{}' is not registered", t.name, t.repo);
             continue;
         };
-        match gc_skip_reason(&store, repo, t) {
-            Ok(Some(reason)) => {
+        let delete_branch = match gc_verdict(&store, repo, t) {
+            Ok(GcVerdict::Skip(reason)) => {
                 eprintln!("skipping '{}': {reason}", t.name);
                 continue;
             }
@@ -906,16 +924,24 @@ pub fn gc(root: &Path, opts: GcOptions) -> Result<()> {
                 eprintln!("skipping '{}': {e:#}", t.name);
                 continue;
             }
-            Ok(None) => {}
-        }
+            Ok(GcVerdict::Reap { delete_branch }) => delete_branch,
+        };
 
         candidates += 1;
+        let keeping = if delete_branch {
+            String::new()
+        } else {
+            format!(
+                " — keeping branch '{}': Graphite children are stacked on it",
+                store::live_branch(t).unwrap_or_else(|| t.branch.clone())
+            )
+        };
         if opts.dry_run {
-            println!("would reap '{}' ({})", t.name, t.path.display());
+            println!("would reap '{}' ({}){keeping}", t.name, t.path.display());
             continue;
         }
-        println!("reaping '{}' ({})", t.name, t.path.display());
-        if let Err(e) = rm_tree(root, &t.id.to_string(), false, true, false) {
+        println!("reaping '{}' ({}){keeping}", t.name, t.path.display());
+        if let Err(e) = rm_tree(root, &t.id.to_string(), false, delete_branch, false) {
             eprintln!("failed to reap '{}': {e:#}", t.name);
         }
     }
@@ -926,22 +952,33 @@ pub fn gc(root: &Path, opts: GcOptions) -> Result<()> {
     Ok(())
 }
 
-/// The trunk-relative check, not the upstream-relative one `rm` uses: a
-/// branch pushed to its own remote counterpart has no *unpushed* commits
-/// but can still carry real work ahead of trunk, which gc must leave alone.
-fn gc_skip_reason(store: &store::Store, repo: &Repo, tree: &Tree) -> Result<Option<String>> {
+enum GcVerdict {
+    Skip(String),
+    /// `delete_branch` is false when Graphite children are stacked on the
+    /// branch: the worktree is still free to go, but the branch has to stay
+    /// or the children lose their parent.
+    Reap {
+        delete_branch: bool,
+    },
+}
+
+/// gc reaps the worktree, not necessarily the branch. The landed check here
+/// has to stay in step with `rm_tree`'s `branch_has_unsaved_commits`: gc
+/// hands every tree it picks to `rm_tree`, so a guard that is stricter than
+/// this one refuses each one in turn and gc reaps nothing at all.
+fn gc_verdict(store: &store::Store, repo: &Repo, tree: &Tree) -> Result<GcVerdict> {
     if tree.state == TreeState::Provisioning {
-        return Ok(Some("still provisioning".to_string()));
+        return Ok(GcVerdict::Skip("still provisioning".to_string()));
     }
     // A failed tree is clean and sits at trunk, so every check below would
     // wave it through and take its provisioning log with it.
     if tree.state == TreeState::Failed {
-        return Ok(Some(
+        return Ok(GcVerdict::Skip(
             "provisioning failed; read its log, then remove it with `wt rm`".to_string(),
         ));
     }
     if git::is_dirty(&tree.path)? {
-        return Ok(Some("uncommitted changes".to_string()));
+        return Ok(GcVerdict::Skip("uncommitted changes".to_string()));
     }
     // `gt create` can move a tree onto a new branch without updating the
     // registry; checking `tree.branch` instead of what's actually checked
@@ -954,27 +991,25 @@ fn gc_skip_reason(store: &store::Store, repo: &Repo, tree: &Tree) -> Result<Opti
             git::unlanded_commits(&repo.base, &format!("origin/{}", repo.trunk), &branch)?;
         if !unlanded.is_empty() {
             let n = unlanded.len();
-            return Ok(Some(format!(
+            return Ok(GcVerdict::Skip(format!(
                 "{n} commit{} not yet in origin/{}",
                 if n == 1 { "" } else { "s" },
                 repo.trunk
             )));
         }
     }
+    // Children only block deleting the branch, not reclaiming the worktree —
+    // gc's actual job — so the tree goes and the branch stays as their parent.
     if let Some((_, children)) = stacked_children(store, &tree.repo, repo, &branch)?
         && !children.is_empty()
     {
-        let names = children
-            .iter()
-            .map(|s| format!("'{}' ({})", s.branch, s.location.label()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Ok(Some(format!(
-            "branch '{branch}' has Graphite children stacked on it: {names}; re-parent them \
-             with `wt rm --delete-branch --reparent-children` or remove them first"
-        )));
+        return Ok(GcVerdict::Reap {
+            delete_branch: false,
+        });
     }
-    Ok(None)
+    Ok(GcVerdict::Reap {
+        delete_branch: true,
+    })
 }
 
 pub struct DoctorOptions {
@@ -1093,17 +1128,17 @@ mod tests {
             parent_branch: None,
         };
 
-        let reason = gc_skip_reason(&store::Store::default(), &repo, &tree)
-            .unwrap()
-            .unwrap();
-        assert!(
-            reason.contains("provisioning failed"),
-            "unexpected reason: {reason}"
-        );
+        match gc_verdict(&store::Store::default(), &repo, &tree).unwrap() {
+            GcVerdict::Skip(reason) => assert!(
+                reason.contains("provisioning failed"),
+                "unexpected reason: {reason}"
+            ),
+            GcVerdict::Reap { .. } => panic!("a failed tree must not be reaped"),
+        }
     }
 
     #[test]
-    fn gc_skips_a_tree_whose_live_branch_has_graphite_children() {
+    fn gc_reaps_a_tree_with_graphite_children_but_keeps_the_branch() {
         let dir = std::env::temp_dir().join(format!("wt-tree-gc-children-{}", Uuid::now_v7()));
         let base = dir.join("base");
         fs::create_dir_all(&base).unwrap();
@@ -1192,11 +1227,15 @@ mod tests {
         store.repos.insert("r".to_string(), repo.clone());
         store.trees = vec![tree.clone()];
 
-        let reason = gc_skip_reason(&store, &repo, &tree).unwrap().unwrap();
-        assert!(
-            reason.contains('b') && reason.contains("Graphite children"),
-            "unexpected reason: {reason}"
-        );
+        match gc_verdict(&store, &repo, &tree).unwrap() {
+            GcVerdict::Reap { delete_branch } => assert!(
+                !delete_branch,
+                "a branch with Graphite children stacked on it must survive gc"
+            ),
+            GcVerdict::Skip(reason) => {
+                panic!("a tree with Graphite children must still be reaped: {reason}")
+            }
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1290,8 +1329,12 @@ mod tests {
         store.repos.insert("r".to_string(), repo.clone());
         store.trees = vec![tree.clone()];
 
-        let reason = gc_skip_reason(&store, &repo, &tree).unwrap();
-        assert!(reason.is_none(), "unexpected reason: {reason:?}");
+        match gc_verdict(&store, &repo, &tree).unwrap() {
+            GcVerdict::Reap { delete_branch } => {
+                assert!(delete_branch, "no Graphite children here to keep it for")
+            }
+            GcVerdict::Skip(reason) => panic!("unexpected skip: {reason}"),
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1371,13 +1414,136 @@ mod tests {
         store.repos.insert("r".to_string(), repo.clone());
         store.trees = vec![tree.clone()];
 
-        let reason = gc_skip_reason(&store, &repo, &tree).unwrap().unwrap();
-        assert!(
-            reason.contains("not yet in origin/master"),
-            "unexpected reason: {reason}"
-        );
+        match gc_verdict(&store, &repo, &tree).unwrap() {
+            GcVerdict::Skip(reason) => assert!(
+                reason.contains("not yet in origin/master"),
+                "unexpected reason: {reason}"
+            ),
+            GcVerdict::Reap { .. } => panic!("an unlanded commit must not be reaped"),
+        }
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    mod unsaved_commits {
+        use super::*;
+
+        fn git_cmd(args: &[&str], cwd: &Path) {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn head_sha(cwd: &Path) -> String {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        }
+
+        fn fixture(label: &str) -> PathBuf {
+            let base =
+                std::env::temp_dir().join(format!("wt-tree-unsaved-{label}-{}", Uuid::now_v7()));
+            fs::create_dir_all(&base).unwrap();
+            git_cmd(&["init", "-q", "-b", "master"], &base);
+            git_cmd(&["config", "user.email", "t@t"], &base);
+            git_cmd(&["config", "user.name", "t"], &base);
+            fs::write(base.join("f.txt"), "0\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "init"], &base);
+            let sha = head_sha(&base);
+            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
+            base
+        }
+
+        /// A squash merge lands `feature`'s work on `origin/master` under a
+        /// brand new SHA, leaving the branch ahead of trunk by SHA but not by
+        /// patch — so nothing here is at risk of being lost.
+        #[test]
+        fn false_when_the_same_patch_already_landed_on_trunk_under_a_different_sha() {
+            let base = fixture("landed");
+            git_cmd(&["checkout", "-qb", "feature"], &base);
+            fs::write(base.join("f.txt"), "1\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "change"], &base);
+
+            git_cmd(&["checkout", "-q", "master"], &base);
+            fs::write(base.join("f.txt"), "1\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "same change, landed on master"], &base);
+            let landed_sha = head_sha(&base);
+            git_cmd(
+                &["update-ref", "refs/remotes/origin/master", &landed_sha],
+                &base,
+            );
+
+            assert!(
+                !branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
+                "a commit already landed under another SHA is not at risk"
+            );
+
+            fs::remove_dir_all(&base).ok();
+        }
+
+        #[test]
+        fn true_when_unlanded_and_unpushed() {
+            let base = fixture("unpushed");
+            git_cmd(&["checkout", "-qb", "feature"], &base);
+            fs::write(base.join("f.txt"), "unlanded\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "still open"], &base);
+
+            assert!(
+                branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
+                "unlanded work with no upstream to fall back on is at risk"
+            );
+
+            fs::remove_dir_all(&base).ok();
+        }
+
+        #[test]
+        fn false_when_unlanded_on_trunk_but_pushed_to_its_own_upstream() {
+            let base = fixture("pushed");
+            // `@{upstream}` only resolves once "origin" is a configured
+            // remote — the ref under refs/remotes/ is not enough on its own.
+            git_cmd(&["remote", "add", "origin", "/nonexistent"], &base);
+            git_cmd(&["checkout", "-qb", "feature"], &base);
+            fs::write(base.join("f.txt"), "unlanded\n").unwrap();
+            git_cmd(&["add", "-A"], &base);
+            git_cmd(&["commit", "-qm", "still open"], &base);
+            let feature_sha = head_sha(&base);
+            git_cmd(
+                &["update-ref", "refs/remotes/origin/feature", &feature_sha],
+                &base,
+            );
+            git_cmd(&["config", "branch.feature.remote", "origin"], &base);
+            git_cmd(
+                &["config", "branch.feature.merge", "refs/heads/feature"],
+                &base,
+            );
+
+            assert!(
+                !branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
+                "work pushed to the branch's own upstream is not at risk, even if trunk \
+                 hasn't merged it yet"
+            );
+
+            fs::remove_dir_all(&base).ok();
+        }
     }
 
     mod delete_branch_guard {
@@ -1481,9 +1647,9 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
-            // `branch_has_unpushed_commits` falls back to `origin/<trunk>`
-            // with no upstream configured; a fake ref stands in for a real
-            // remote so that check has something to diff against.
+            // `branch_has_unsaved_commits` diffs against `origin/<trunk>`
+            // first; a fake ref stands in for a real remote so that check
+            // has something to diff against.
             git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
             git_cmd(&["branch", "a"], &base);
             git_cmd(&["branch", "b"], &base);

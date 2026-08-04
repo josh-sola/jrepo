@@ -1011,7 +1011,7 @@ fn gc_dry_run_reports_then_real_run_reaps_clean_tree_and_deletes_branch() {
 }
 
 #[test]
-fn gc_skips_a_tree_whose_branch_has_graphite_children() {
+fn gc_reaps_a_tree_whose_branch_has_graphite_children_but_keeps_the_branch() {
     let tmp = unique_dir("gc-children");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
@@ -1055,15 +1055,18 @@ fn gc_skips_a_tree_whose_branch_has_graphite_children() {
     let out = run_wt(&root, &["gc"]);
     assert_success(&out, "gc");
     assert!(
-        PathBuf::from(&tree_a_path).exists(),
-        "gc must not reap a tree whose branch has Graphite children"
+        !PathBuf::from(&tree_a_path).exists(),
+        "gc must still reclaim the worktree — the children only block deleting the branch"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains("Graphite children") && stderr.contains('b'),
-        "gc should say why it skipped 'tree a': {stderr}"
+        stdout.contains("reaping") && stdout.contains("keeping branch 'a'"),
+        "gc should say it reaped 'tree a' but kept its branch: {stdout}"
     );
-    assert!(git_branch_exists(&base, "a"), "branch 'a' must survive");
+    assert!(
+        git_branch_exists(&base, "a"),
+        "branch 'a' must survive so 'b' keeps its parent"
+    );
 }
 
 #[test]
