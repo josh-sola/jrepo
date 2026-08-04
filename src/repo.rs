@@ -15,6 +15,11 @@ const PYTHON_PROJECTS: &[&str] = &[
     "python/scripts",
 ];
 
+/// An explicit list, not a directory scan for `package-lock.json`: several
+/// node projects in these repos are never installed, and provisioning all of
+/// them would cost gigabytes of `node_modules` per tree for no benefit.
+const NODE_PROJECTS: &[&str] = &["planhub/web"];
+
 const EXCLUDE_MARKER: &str = "# wt-cli: shared symlinks (managed, do not edit by hand)";
 
 /// Per-tree provisioning log; also excluded in `exclude_shared_paths` so a
@@ -382,6 +387,17 @@ fn detect_steps(base: &Path) -> Vec<Step> {
         });
     }
 
+    for project in NODE_PROJECTS {
+        if base.join(project).join("package-lock.json").exists() {
+            steps.push(Step {
+                label: format!("npm-ci-{}", project.replace('/', "-")),
+                profile: "node".to_string(),
+                cwd: project.to_string(),
+                cmd: vec!["npm".to_string(), "ci".to_string()],
+            });
+        }
+    }
+
     if base.join("python").join("pyproject.toml").exists() {
         steps.push(Step {
             label: "uv-sync-python".to_string(),
@@ -499,6 +515,50 @@ mod tests {
         assert_eq!(steps[0].profile, "python");
         assert_eq!(steps[0].cwd, "planhub");
         assert_eq!(steps[0].cmd, vec!["uv".to_string(), "sync".to_string()]);
+    }
+
+    #[test]
+    fn detect_steps_adds_an_npm_step_for_a_listed_node_project() {
+        let base = temp_dir("npm-listed");
+        fs::create_dir_all(base.join("planhub").join("web")).unwrap();
+        fs::write(base.join("planhub").join("web").join("package.json"), "").unwrap();
+        fs::write(
+            base.join("planhub").join("web").join("package-lock.json"),
+            "",
+        )
+        .unwrap();
+
+        let steps = detect_steps(&base);
+        let matches: Vec<&Step> = steps.iter().filter(|s| s.cwd == "planhub/web").collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].label, "npm-ci-planhub-web");
+        assert_eq!(matches[0].profile, "node");
+        assert_eq!(matches[0].cmd, vec!["npm".to_string(), "ci".to_string()]);
+    }
+
+    #[test]
+    fn detect_steps_skips_a_node_project_with_no_lockfile() {
+        let base = temp_dir("npm-no-lock");
+        fs::create_dir_all(base.join("planhub").join("web")).unwrap();
+        fs::write(base.join("planhub").join("web").join("package.json"), "").unwrap();
+
+        let steps = detect_steps(&base);
+        assert!(!steps.iter().any(|s| s.cwd == "planhub/web"));
+    }
+
+    #[test]
+    fn detect_steps_ignores_an_unlisted_node_project() {
+        let base = temp_dir("npm-unlisted");
+        fs::create_dir_all(base.join("pipelines").join("web")).unwrap();
+        fs::write(base.join("pipelines").join("web").join("package.json"), "").unwrap();
+        fs::write(
+            base.join("pipelines").join("web").join("package-lock.json"),
+            "",
+        )
+        .unwrap();
+
+        let steps = detect_steps(&base);
+        assert!(!steps.iter().any(|s| s.cwd == "pipelines/web"));
     }
 
     #[test]
