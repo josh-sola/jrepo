@@ -135,6 +135,17 @@ cat > "${plist_tmp}" <<EOF
 	<string>${SYNC_LOG_DIR}/wt-sync.err.log</string>
 	<key>RunAtLoad</key>
 	<false/>
+	<!-- sync spawns hot spare builds that outlive it by design; without
+	     this launchd kills them the moment sync exits, so a build long
+	     enough to matter never finishes and is retried every interval. -->
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<!-- A fetch plus a dependency install competes with whatever the user
+	     is doing; this keeps an unattended sync off the foreground's back. -->
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
 </dict>
 </plist>
 EOF
