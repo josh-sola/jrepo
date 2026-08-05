@@ -5,6 +5,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use uuid::Uuid;
 
@@ -12,16 +13,174 @@ fn wt_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_wt"))
 }
 
-fn unique_dir(label: &str) -> PathBuf {
+/// Drops this process, and everything it spawns, to background quality of
+/// service.
+///
+/// The suite competes with the desktop for CPU and, far more painfully, for
+/// disk: it builds dozens of git repos and checks out worktrees while the
+/// machine is in use. Background QoS throttles both, and children inherit
+/// it, so the run gets slower but never makes the machine stutter. Capping
+/// the thread count alone does not achieve this — 4 test threads still fan
+/// out into far more git processes, all competing at normal priority.
+///
+/// Best effort: an older or non-macOS host simply runs unthrottled.
+fn deprioritize_this_run() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = Command::new("/usr/sbin/taskpolicy")
+            .args(["-b", "-p", &std::process::id().to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+/// A test's private directory, holding both its git fixtures and its
+/// `WT_ROOT`. Dropping it stops whatever the test left running and deletes
+/// the tree.
+///
+/// Derefs to `Path`, so it is used exactly like the `PathBuf` it replaced.
+struct TestDir(PathBuf);
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        stop_detached_children(&self.0);
+        // A failing test's directory is the only evidence of why, so it
+        // survives; the processes never do.
+        if std::thread::panicking() {
+            eprintln!("test failed — leaving {} in place", self.0.display());
+            return;
+        }
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// Every test starts by claiming its directory, which makes this the one
+/// place guaranteed to run before any test does work.
+fn unique_dir(label: &str) -> TestDir {
+    deprioritize_this_run();
     let dir = std::env::temp_dir().join(format!("wt-cli-it-{label}-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TestDir(dir)
+}
+
+/// Kills the provisioning children `wt` spawned under `dir`.
+///
+/// Those children are put in their own process group on purpose, so a
+/// signal to the test runner never reaches them and they outlive the run.
+/// The registry records each one's pid, which is the only handle a test has
+/// on them.
+fn stop_detached_children(dir: &Path) {
+    for registry in registries_under(dir) {
+        let Ok(text) = std::fs::read_to_string(&registry) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(trees) = value["trees"].as_array() else {
+            continue;
+        };
+        for pid in trees.iter().filter_map(|t| t["provisionPid"].as_u64()) {
+            kill_if_ours(pid);
+        }
+    }
+}
+
+/// A recorded pid may belong to a child that already exited, and the number
+/// can be reused by anything, so the command line is checked before
+/// signalling. The negative pid reaches the whole group, which is where a
+/// step's own children (an install, say) live.
+fn kill_if_ours(pid: u64) {
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return;
+    };
+    if !String::from_utf8_lossy(&out.stdout).contains("wt") {
+        return;
+    }
+    let _ = Command::new("kill")
+        .args(["-9", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// A test names its `WT_ROOT` whatever it likes inside its own directory,
+/// so the registry is found rather than assumed.
+fn registries_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let direct = dir.join("data.json");
+    if direct.exists() {
+        found.push(direct);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("data.json");
+            if candidate.exists() {
+                found.push(candidate);
+            }
+        }
+    }
+    found
+}
+
+/// Config every git process in the suite runs under, in place of the
+/// developer's own.
+///
+/// `gc.auto`, `maintenance.auto`, and `core.fsmonitor` each spawn detached
+/// background processes that outlive the test that created the repo. The
+/// suite builds dozens of throwaway repos per run, so leaving those on
+/// leaves a pile of daemons churning on the machine long after the run
+/// finishes — and nothing in the run ever reaps them.
+fn hermetic_git_config() -> &'static Path {
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        // A fixed name, not a per-run one: the contents never vary, so
+        // concurrent runs rewriting identical bytes is harmless, and the
+        // suite leaves one small file behind instead of one per run.
+        // Stock `git init` writes sixteen sample hooks nobody runs, turning
+        // an 2-file repo into an 18-file one. Multiplied across the repos a
+        // run creates, that is the bulk of its filesystem traffic — and on a
+        // machine with endpoint security software, every one of those files
+        // is inspected as it appears.
+        let empty_template = std::env::temp_dir().join("wt-cli-it-empty-template");
+        std::fs::create_dir_all(&empty_template).expect("create empty git template");
+
+        let path = std::env::temp_dir().join("wt-cli-it-gitconfig");
+        std::fs::write(
+            &path,
+            format!(
+                "[gc]\n\tauto = 0\n\
+                 [maintenance]\n\tauto = false\n\
+                 [core]\n\tfsmonitor = false\n\
+                 [protocol]\n\tversion = 2\n\
+                 [user]\n\temail = wt-cli-test@example.com\n\tname = wt-cli-test\n\
+                 [commit]\n\tgpgsign = false\n\
+                 [init]\n\ttemplateDir = {}\n",
+                empty_template.display()
+            ),
+        )
+        .expect("write test gitconfig");
+        path
+    })
 }
 
 fn git(args: &[&str], cwd: &Path) {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("spawn git");
     assert!(
@@ -37,7 +196,63 @@ fn git(args: &[&str], cwd: &Path) {
 /// A throwaway "origin" plus a work clone with one commit, wired up so
 /// `git symbolic-ref refs/remotes/origin/HEAD` resolves without network
 /// access — `wt init`'s trunk detection depends on that ref existing.
+///
+/// Copied from a template built once per run rather than built from
+/// scratch, which trades ten git processes per test for one clone. On APFS
+/// the copy is copy-on-write, so it costs metadata rather than data.
 fn fixture_repo(dir: &Path) -> PathBuf {
+    let template = fixture_template();
+    let bare = dir.join("origin.git");
+    let work = dir.join("work");
+    clone_tree(&template.join("origin.git"), &bare);
+    clone_tree(&template.join("work"), &work);
+    // The copy still names the template's bare repo as its origin.
+    git(
+        &["remote", "set-url", "origin", bare.to_str().unwrap()],
+        &work,
+    );
+    work
+}
+
+/// Copies a directory using APFS cloning, so the bytes are shared until one
+/// side writes.
+fn clone_tree(src: &Path, dst: &Path) {
+    let out = Command::new("cp")
+        .args(["-Rc", &src.to_string_lossy(), &dst.to_string_lossy()])
+        .output()
+        .expect("spawn cp");
+    assert!(
+        out.status.success(),
+        "cp -Rc {} {} failed: {}",
+        src.display(),
+        dst.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The pristine fixture every test copies, built at most once per run.
+///
+/// Staged under a unique name and renamed into place so two runs racing
+/// here cannot observe a half-built template; the loser discards its own
+/// copy and uses the winner's.
+fn fixture_template() -> &'static Path {
+    static TEMPLATE: OnceLock<PathBuf> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let final_path = std::env::temp_dir().join("wt-cli-it-template");
+        if final_path.join("work").join(".git").is_dir() {
+            return final_path;
+        }
+        let staging = std::env::temp_dir().join(format!("wt-cli-it-staging-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&staging).expect("create template staging dir");
+        build_fixture_repo(&staging);
+        if std::fs::rename(&staging, &final_path).is_err() {
+            std::fs::remove_dir_all(&staging).ok();
+        }
+        final_path
+    })
+}
+
+fn build_fixture_repo(dir: &Path) -> PathBuf {
     let bare = dir.join("origin.git");
     let work = dir.join("work");
     git(&["init", "--bare", "--quiet", bare.to_str().unwrap()], dir);
@@ -74,6 +289,10 @@ fn run_wt(root: &Path, args: &[&str]) -> Output {
     Command::new(wt_bin())
         .args(args)
         .env("WT_ROOT", root)
+        // `wt` shells out to git constantly, including from the detached
+        // children it spawns, so the same quiescing has to reach those too.
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("spawn wt")
 }
@@ -87,17 +306,191 @@ fn assert_success(out: &Output, label: &str) {
     );
 }
 
+/// Registers `base` as `name`'s repo, then turns off hot spares. The suite
+/// runs every test in parallel across every core; a background spare build
+/// on top of each test's own `wt new` calls would multiply the number of
+/// concurrent `git worktree add`s and installs many times over, and one
+/// that inherits a step a test deliberately made spin forever would never
+/// exit. Tests that mean to exercise spares opt back in with
+/// `enable_spares`.
+fn init_repo(root: &Path, name: &str, base: &Path) {
+    assert_success(
+        &run_wt(root, &["init", name, "--adopt", base.to_str().unwrap()]),
+        &format!("init {name}"),
+    );
+    set_spares(root, name, 0);
+}
+
+/// Opts a repo back into hot spares for a test that means to exercise them.
+fn enable_spares(root: &Path, repo_name: &str, n: u8) {
+    set_spares(root, repo_name, n);
+}
+
+fn set_spares(root: &Path, repo_name: &str, n: u8) {
+    let data_path = root.join("data.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
+    value["repos"][repo_name]["spares"] = serde_json::json!(n);
+    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+/// A spare's registered name, so a test can pick it out of `data.json`
+/// without hardcoding the string twice.
+const SPARE_NAME: &str = "@spare";
+
+/// The spare rows for `repo`, read through `wt ls --all --json` — `wt spare
+/// --json` never reports a spare's path, and a claim, a corrupted registry
+/// row, and a dirty working tree all need it.
+fn spare_rows(root: &Path, repo: &str) -> Vec<serde_json::Value> {
+    let out = run_wt(root, &["ls", "--all", "--json", "--repo", repo]);
+    assert_success(&out, "ls --all --json");
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["spare"] == true)
+        .cloned()
+        .collect()
+}
+
+/// Blocks until at least one of `repo`'s spares is `ready` or `failed`,
+/// returning that row. A test builds a spare through `wt sync` rather than
+/// `wt new`, so the claim it means to test is a separate, later step.
+fn wait_for_settled_spare(root: &Path, repo: &str, timeout_secs: u64) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let rows = spare_rows(root, repo);
+        if let Some(row) = rows
+            .iter()
+            .find(|r| r["state"] == "ready" || r["state"] == "failed")
+        {
+            return row.clone();
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out after {timeout_secs}s waiting for {repo}'s spare to settle: {rows:?}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Blocks until every spare row for `repo` is `ready` or `failed` — the
+/// drain a spare-enabled test runs before it returns, so a background
+/// top-up build is never still running once the test's directory is torn
+/// down.
+fn wait_for_all_spares_settled(
+    root: &Path,
+    repo: &str,
+    timeout_secs: u64,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let rows = spare_rows(root, repo);
+        if !rows.is_empty()
+            && rows
+                .iter()
+                .all(|r| r["state"] == "ready" || r["state"] == "failed")
+        {
+            return rows;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out after {timeout_secs}s waiting for {repo}'s spares to settle: {rows:?}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Builds `repo`'s one hot spare from cold with `wt sync` (which fetches,
+/// then tops up any shortfall) and waits for it to settle.
+fn build_and_wait_spare(root: &Path, repo: &str, timeout_secs: u64) -> serde_json::Value {
+    assert_success(&run_wt(root, &["sync", repo]), "sync (spare top-up)");
+    wait_for_settled_spare(root, repo, timeout_secs)
+}
+
+/// Claims `repo`'s one ready spare with a real `wt new` and waits for the
+/// resulting tree — the shared setup behind the top-up assertions, which
+/// only differ in what they check afterward. Returns the claimed spare's
+/// original id.
+fn build_claim_and_wait(root: &Path, repo: &str, name: &str) -> String {
+    let spare = build_and_wait_spare(root, repo, 60);
+    assert_eq!(spare["state"], "ready");
+    let original_id = spare["id"].as_str().unwrap().to_string();
+
+    let out = run_wt(root, &["new", repo, "--name", name]);
+    assert_success(&out, "new (claim)");
+    assert_success(&run_wt(root, &["wait", name]), "wait");
+    original_id
+}
+
+/// Counts the lines a provisioning step injected by `inject_step` has
+/// appended to its own marker file. The marker is separate from
+/// `.wt-provision.log`, which is truncated on every run and so cannot
+/// distinguish one run from two.
+fn marker_run_count(marker: &Path) -> usize {
+    std::fs::read_to_string(marker)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count()
+}
+
+/// Spawns `wt` without waiting for it, so two calls can race each other
+/// against the same spare.
+fn spawn_wt(root: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(wt_bin())
+        .args(args)
+        .env("WT_ROOT", root)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn wt")
+}
+
+/// Pushes a commit straight to `bare` that overwrites `README.md`, so a
+/// test can put origin ahead of a spare with a change that will conflict
+/// with an uncommitted edit to the same file.
+fn push_readme_commit(bare: &Path, tmp: &Path, content: &str) {
+    let clone_dir = tmp.join(format!("advance-readme-{}", Uuid::now_v7()));
+    git(
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone_dir.to_str().unwrap(),
+        ],
+        tmp,
+    );
+    std::fs::write(clone_dir.join("README.md"), content).unwrap();
+    git(&["add", "-A"], &clone_dir);
+    git(
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "advance readme",
+        ],
+        &clone_dir,
+    );
+    git(&["push", "-q", "origin", "master"], &clone_dir);
+}
+
 #[test]
 fn init_new_ls_rm_round_trip() {
     let tmp = unique_dir("e2e");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    let out = run_wt(
-        &root,
-        &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-    );
-    assert_success(&out, "init");
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt(&root, &["new", "myrepo", "--name", "scratch test"]);
     assert_success(&out, "new");
@@ -201,13 +594,7 @@ fn shared_symlinks_stay_invisible_to_git_status_in_base_and_tree() {
     git(&["remote", "set-head", "origin", "-a"], &work);
 
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", work.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &work);
 
     let base_status = git_status_porcelain(&work);
     assert!(
@@ -270,13 +657,7 @@ fn plans_default_share_stays_invisible_to_git_status_with_no_manifest_and_no_git
     git(&["remote", "set-head", "origin", "-a"], &work);
 
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", work.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &work);
 
     let base_status = git_status_porcelain(&work);
     assert!(
@@ -317,13 +698,7 @@ fn new_with_unslugifiable_name_errors_clearly() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt(&root, &["new", "myrepo", "--name", "???"]);
     assert!(
@@ -395,20 +770,8 @@ fn launch_ambiguous_name_across_repos_names_both_candidates() {
     std::fs::create_dir_all(&dir_b).unwrap();
     let base_b = fixture_repo(&dir_b);
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "repo-a", "--adopt", base_a.to_str().unwrap()],
-        ),
-        "init repo-a",
-    );
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "repo-b", "--adopt", base_b.to_str().unwrap()],
-        ),
-        "init repo-b",
-    );
+    init_repo(&root, "repo-a", &base_a);
+    init_repo(&root, "repo-b", &base_b);
     assert_success(
         &run_wt(&root, &["new", "repo-a", "--name", "same name"]),
         "new in repo-a",
@@ -470,13 +833,7 @@ fn name_matches_longest_registered_path_prefix() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "name lookup test"]);
     assert_success(&out, "new");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -592,13 +949,7 @@ fn rm_never_touches_shared_submodule_config() {
     let base = fixture_repo_with_submodule(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     // Skip the auto-detected submodule step (tagged "node"); the test
     // initializes the submodule itself so the scenario is deterministic.
     let out = run_wt(
@@ -713,13 +1064,7 @@ fn rm_keeps_registry_entry_when_removal_genuinely_fails() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "locked tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
@@ -779,13 +1124,7 @@ fn rm_unregisters_drifted_tree_whose_path_is_already_gone() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "drifted tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
@@ -821,13 +1160,7 @@ fn rm_delete_branch_removes_branch_only_when_safe() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "branch cleanup"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
@@ -923,13 +1256,7 @@ fn gc_dry_run_reports_then_real_run_reaps_clean_tree_and_deletes_branch() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "gc clean"]);
     assert_success(&out, "new");
     let clean_path = PathBuf::from(
@@ -1016,13 +1343,7 @@ fn gc_reaps_a_tree_whose_branch_has_graphite_children_but_keeps_the_branch() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(
             &root,
@@ -1075,13 +1396,7 @@ fn rm_delete_branch_refuses_a_mid_stack_branch_and_force_still_bypasses_it() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(
             &root,
@@ -1137,13 +1452,7 @@ fn status_and_wait_track_background_provisioning_through_a_real_step() {
     let base = fixture_repo_with_submodule(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let mut cmd = Command::new(wt_bin());
     cmd.args(["new", "myrepo", "--name", "provisioned tree"])
         .env("WT_ROOT", &root)
@@ -1210,13 +1519,7 @@ fn doctor_reports_stale_and_unregistered_entries_and_fix_prunes_stale_ones() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "will go stale"]);
     assert_success(&out, "new");
     let stale_path = PathBuf::from(
@@ -1340,13 +1643,7 @@ fn sync_fast_forwards_a_clean_base_on_trunk() {
     let tmp = unique_dir("sync-ff");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
     let head_before = git_rev_parse(&base, "HEAD");
@@ -1375,13 +1672,7 @@ fn sync_refuses_and_touches_nothing_when_base_is_dirty() {
     let tmp = unique_dir("sync-dirty");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
     std::fs::write(base.join("dirty.txt"), "uncommitted\n").unwrap();
@@ -1411,13 +1702,7 @@ fn sync_skips_fast_forward_when_base_is_on_another_branch() {
     let tmp = unique_dir("sync-branch");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     git(&["checkout", "-q", "-b", "not-trunk"], &base);
 
@@ -1448,13 +1733,7 @@ fn claude_on_a_bare_repo_name_warns_about_base_then_fails_on_missing_binary() {
     let tmp = unique_dir("claude-base");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt_claude_without_claude_on_path(&root, &["claude", "myrepo"]);
     assert!(
@@ -1477,13 +1756,7 @@ fn claude_on_a_tree_selector_skips_the_base_notice() {
     let tmp = unique_dir("claude-tree");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(&root, &["new", "myrepo", "--name", "claude target"]),
         "new",
@@ -1511,13 +1784,7 @@ fn claude_on_an_unknown_selector_fails_before_touching_path_lookup() {
     let tmp = unique_dir("claude-unknown");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt_claude_without_claude_on_path(&root, &["claude", "nope"]);
     assert!(!out.status.success());
@@ -1533,13 +1800,7 @@ fn init_blocks_commits_in_base_but_not_in_a_tree() {
     let tmp = unique_dir("commit-block");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     std::fs::write(base.join("blocked.txt"), "nope\n").unwrap();
     git(&["add", "-A"], &base);
@@ -1690,13 +1951,7 @@ fn rm_refuses_a_provisioning_tree_without_force_then_stops_it_with_force() {
     let tmp = unique_dir("rm-provisioning");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let marker = format!("wt-test-spin-{}", Uuid::now_v7());
     inject_step(
@@ -1777,13 +2032,7 @@ fn rm_force_removes_a_tree_whose_recorded_pid_is_long_gone() {
     let tmp = unique_dir("rm-dead-pid");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "dead pid tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
@@ -1814,13 +2063,7 @@ fn status_flags_a_provisioning_tree_whose_recorded_pid_is_dead() {
     let tmp = unique_dir("status-stale");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     let out = run_wt(&root, &["new", "myrepo", "--name", "wedged tree"]);
     assert_success(&out, "new");
     assert_success(&run_wt(&root, &["wait", "wedged tree"]), "wait");
@@ -1862,13 +2105,7 @@ fn adopt_moves_tracked_edits_into_a_fresh_tree() {
     let tmp = unique_dir("adopt-tracked");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     std::fs::write(base.join("README.md"), "edited in base by mistake\n").unwrap();
 
@@ -1915,13 +2152,7 @@ fn adopt_moves_untracked_files_into_a_fresh_tree() {
     let tmp = unique_dir("adopt-untracked");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     std::fs::write(base.join("scratch.txt"), "started this in base\n").unwrap();
 
@@ -1963,13 +2194,7 @@ fn adopt_refuses_on_a_clean_base() {
     let tmp = unique_dir("adopt-clean");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt(&root, &["adopt", "myrepo", "--name", "should fail"]);
     assert!(!out.status.success(), "adopt should refuse a clean base");
@@ -2026,13 +2251,7 @@ fn adopt_pop_conflict_leaves_the_stash_intact() {
     git(&["remote", "set-head", "origin", "-a"], &base);
 
     let root = tmp.join("wt-root");
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     // Dirty base with an edit that will conflict with a commit that lands
     // on origin between the stash and the new tree's checkout.
@@ -2118,13 +2337,7 @@ fn env_refresh_recopies_and_overwrites_a_stale_env_file() {
     git(&["push", "-q", "origin", "master"], &base);
     git(&["fetch", "-q", "origin"], &base);
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
 
     let out = run_wt(&root, &["new", "myrepo", "--name", "env refresh target"]);
     assert_success(&out, "new");
@@ -2208,13 +2421,7 @@ fn launch_with_no_worktree_offers_the_cwd_repo_first_then_newest_first() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(&root, &["new", "myrepo", "--name", "older tree"]),
         "new older",
@@ -2296,13 +2503,7 @@ fn launch_with_no_worktree_and_a_cancelled_picker_exits_cleanly() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(&root, &["new", "myrepo", "--name", "cancel target"]),
         "new",
@@ -2350,13 +2551,7 @@ fn launch_preview_prints_a_provisioned_trees_details() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(&root, &["new", "myrepo", "--name", "preview target"]),
         "new",
@@ -2418,13 +2613,7 @@ fn session_context_reports_stack_position_in_a_mid_stack_tree() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(
             &root,
@@ -2475,13 +2664,7 @@ fn session_context_stack_lines_are_absent_without_graphite() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
-    assert_success(
-        &run_wt(
-            &root,
-            &["init", "myrepo", "--adopt", base.to_str().unwrap()],
-        ),
-        "init",
-    );
+    init_repo(&root, "myrepo", &base);
     assert_success(
         &run_wt(&root, &["new", "myrepo", "--name", "plain tree"]),
         "new",
@@ -2508,5 +2691,565 @@ fn session_context_stack_lines_are_absent_without_graphite() {
     assert!(
         !stdout.contains("Stacked on top of"),
         "must not show stack lines with no Graphite: {stdout}"
+    );
+}
+
+#[test]
+fn a_ready_spare_at_the_same_commit_is_claimed_instantly_with_no_step_rerun() {
+    let tmp = unique_dir("spare-instant");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    let marker = tmp.join("marker.txt");
+    inject_step(
+        &root,
+        "myrepo",
+        "mark",
+        &[
+            "sh",
+            "-c",
+            &format!("printf 'run\\n' >> {}", marker.display()),
+        ],
+    );
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    assert_eq!(
+        marker_run_count(&marker),
+        1,
+        "the spare's own build should have run the step once"
+    );
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+    // A replacement build after the claim reuses the same injected step,
+    // so it would add its own marker line unless spares are off first.
+    set_spares(&root, "myrepo", 0);
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "instant claim"]);
+    assert_success(&out, "new (instant claim)");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(
+        tree_path, spare_path,
+        "an instant claim should reuse the spare's own worktree"
+    );
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    assert_eq!(entries[0]["name"], "instant claim");
+    assert_eq!(
+        entries[0]["state"], "ready",
+        "an instant claim needs no provisioning wait"
+    );
+    assert_eq!(
+        marker_run_count(&marker),
+        1,
+        "an instant claim must not re-run the provisioning step"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "instant claim", "--delete-branch"]),
+        "cleanup tree",
+    );
+}
+
+#[test]
+fn a_spare_behind_a_moved_trunk_is_claimed_but_reruns_its_steps() {
+    let tmp = unique_dir("spare-warm");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    let marker = tmp.join("marker.txt");
+    inject_step(
+        &root,
+        "myrepo",
+        "mark",
+        &[
+            "sh",
+            "-c",
+            &format!("printf 'run\\n' >> {}", marker.display()),
+        ],
+    );
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    assert_eq!(marker_run_count(&marker), 1);
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+    // A replacement build after the claim reuses the same injected step,
+    // so it would add its own marker line unless spares are off first.
+    set_spares(&root, "myrepo", 0);
+
+    push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
+    git(&["fetch", "-q", "origin"], &base);
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "warm claim"]);
+    assert_success(&out, "new (warm claim)");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(
+        tree_path, spare_path,
+        "a warm claim should still reuse the spare's own worktree"
+    );
+
+    assert_success(&run_wt(&root, &["wait", "warm claim"]), "wait");
+    assert_eq!(
+        marker_run_count(&marker),
+        2,
+        "a warm claim must rerun the provisioning step once"
+    );
+    assert!(
+        tree_path.join("advance.txt").exists(),
+        "the claimed tree should be checked out at the new trunk commit"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "warm claim", "--delete-branch"]),
+        "cleanup tree",
+    );
+}
+
+#[test]
+fn two_concurrent_new_calls_against_one_spare_both_succeed_and_only_one_claims_it() {
+    let tmp = unique_dir("spare-concurrent");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+
+    let child_a = spawn_wt(&root, &["new", "myrepo", "--name", "concurrent a"]);
+    let child_b = spawn_wt(&root, &["new", "myrepo", "--name", "concurrent b"]);
+    let out_a = child_a.wait_with_output().expect("wait concurrent a");
+    let out_b = child_b.wait_with_output().expect("wait concurrent b");
+    assert_success(&out_a, "new concurrent a");
+    assert_success(&out_b, "new concurrent b");
+
+    let path_a = PathBuf::from(
+        String::from_utf8_lossy(&out_a.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    let path_b = PathBuf::from(
+        String::from_utf8_lossy(&out_b.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_ne!(
+        path_a, path_b,
+        "the two claims must land in distinct worktrees"
+    );
+
+    assert_success(&run_wt(&root, &["wait", "concurrent a"]), "wait a");
+    assert_success(&run_wt(&root, &["wait", "concurrent b"]), "wait b");
+
+    let claimed_the_spare = [&path_a, &path_b]
+        .iter()
+        .filter(|p| ***p == spare_path)
+        .count();
+    assert_eq!(
+        claimed_the_spare, 1,
+        "exactly one of the two calls should have claimed the spare's own path"
+    );
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    let branch_of = |name: &str| -> String {
+        entries.iter().find(|e| e["name"] == name).unwrap()["branch"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_ne!(branch_of("concurrent a"), branch_of("concurrent b"));
+
+    wait_for_all_spares_settled(&root, "myrepo", 60);
+    assert_success(
+        &run_wt(&root, &["rm", "concurrent a", "--delete-branch"]),
+        "cleanup a",
+    );
+    assert_success(
+        &run_wt(&root, &["rm", "concurrent b", "--delete-branch"]),
+        "cleanup b",
+    );
+    assert_success(
+        &run_wt(&root, &["spare", "drop", "--repo", "myrepo"]),
+        "cleanup spare",
+    );
+}
+
+#[test]
+fn a_repo_never_has_more_than_its_configured_number_of_spares_after_a_claim_tops_up() {
+    let tmp = unique_dir("spare-no-dup");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    build_claim_and_wait(&root, "myrepo", "dup check");
+    let rows = wait_for_all_spares_settled(&root, "myrepo", 60);
+    assert_eq!(
+        rows.len(),
+        1,
+        "myrepo's spares: 1 must never grow past one row: {rows:?}"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "dup check", "--delete-branch"]),
+        "cleanup tree",
+    );
+    assert_success(
+        &run_wt(&root, &["spare", "drop", "--repo", "myrepo"]),
+        "cleanup spare",
+    );
+}
+
+#[test]
+fn a_broken_spare_pointing_at_a_deleted_directory_falls_back_to_a_cold_build() {
+    let tmp = unique_dir("spare-broken");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+
+    mutate_tree_json(&root, SPARE_NAME, |t| {
+        t["path"] = serde_json::json!("/nonexistent-deleted-spare-dir");
+    });
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "cold fallback"]);
+    assert_success(&out, "new (cold fallback)");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert!(
+        tree_path.join(".git").exists(),
+        "the cold path must still build a real worktree"
+    );
+    assert_success(&run_wt(&root, &["wait", "cold fallback"]), "wait");
+
+    let rows = spare_rows(&root, "myrepo");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the broken spare row must survive untouched: {rows:?}"
+    );
+    assert_eq!(rows[0]["state"], "ready");
+    assert_eq!(
+        rows[0]["path"], "/nonexistent-deleted-spare-dir",
+        "a failed claim attempt must never rewrite the spare row it gave up on"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "cold fallback", "--delete-branch"]),
+        "cleanup tree",
+    );
+}
+
+#[test]
+fn gc_never_reaps_a_spare_that_is_clean_with_no_commits() {
+    let tmp = unique_dir("spare-gc");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+
+    let out = run_wt(&root, &["gc"]);
+    assert_success(&out, "gc");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("nothing to reap"),
+        "gc should find nothing to reap with only a hot spare registered"
+    );
+    assert!(
+        spare_path.exists(),
+        "gc must never remove a hot spare's worktree"
+    );
+
+    let rows = spare_rows(&root, "myrepo");
+    assert_eq!(
+        rows.len(),
+        1,
+        "gc must not reap the spare's registry row either"
+    );
+}
+
+#[test]
+fn wait_with_no_selector_ignores_a_provisioning_spare() {
+    let tmp = unique_dir("spare-wait");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+
+    mutate_tree_json(&root, SPARE_NAME, |t| {
+        t["state"] = serde_json::json!("provisioning");
+        t["provisionPid"] = serde_json::json!(999_999);
+    });
+
+    let out = run_wt(&root, &["wait"]);
+    assert!(
+        !out.status.success(),
+        "expected wait to fail with only a provisioning spare registered"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no tree is provisioning"),
+        "wait must not pick a spare with no selector: {stderr}"
+    );
+
+    assert_success(
+        &run_wt(&root, &["spare", "drop", "--repo", "myrepo"]),
+        "cleanup spare",
+    );
+}
+
+#[test]
+fn a_replacement_spare_appears_on_its_own_after_a_claim() {
+    let tmp = unique_dir("spare-replacement");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let original_id = build_claim_and_wait(&root, "myrepo", "replacement check");
+    let rows = wait_for_all_spares_settled(&root, "myrepo", 60);
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one replacement spare: {rows:?}"
+    );
+    assert_ne!(
+        rows[0]["id"].as_str().unwrap(),
+        original_id,
+        "the replacement must be a fresh spare, not the one that was claimed"
+    );
+    assert_eq!(rows[0]["state"], "ready");
+
+    assert_success(
+        &run_wt(&root, &["rm", "replacement check", "--delete-branch"]),
+        "cleanup tree",
+    );
+    assert_success(
+        &run_wt(&root, &["spare", "drop", "--repo", "myrepo"]),
+        "cleanup spare",
+    );
+}
+
+#[test]
+fn spares_set_to_zero_creates_no_spare_and_the_cold_path_is_unchanged() {
+    let tmp = unique_dir("spare-zero");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base); // spares: 0, set by init_repo itself
+
+    assert_eq!(spare_rows(&root, "myrepo").len(), 0);
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "cold as usual"]);
+    assert_success(&out, "new");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_success(&run_wt(&root, &["wait", "cold as usual"]), "wait");
+    assert!(tree_path.join(".git").exists());
+
+    assert_eq!(
+        spare_rows(&root, "myrepo").len(),
+        0,
+        "spares: 0 must never build one, even after wt new's own top-up call"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "cold as usual", "--delete-branch"]),
+        "cleanup",
+    );
+}
+
+#[test]
+fn a_dirty_spare_working_tree_falls_back_to_cold_and_leaves_the_spare_row_untouched() {
+    let tmp = unique_dir("spare-dirty");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+
+    push_readme_commit(&tmp.join("origin.git"), &tmp, "origin edit\n");
+    git(&["fetch", "-q", "origin"], &base);
+    std::fs::write(spare_path.join("README.md"), "dirty local edit\n").unwrap();
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "dirty fallback"]);
+    assert_success(&out, "new (dirty fallback)");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("building the tree from cold instead"),
+        "expected a fallback warning: {stderr}"
+    );
+
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_ne!(
+        tree_path, spare_path,
+        "a dirty claim must build a fresh worktree, not reuse the spare's"
+    );
+    assert_success(&run_wt(&root, &["wait", "dirty fallback"]), "wait");
+
+    let rows = spare_rows(&root, "myrepo");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["state"], "ready",
+        "a failed claim must leave the spare row exactly as it was"
+    );
+    assert_eq!(
+        std::fs::read_to_string(spare_path.join("README.md")).unwrap(),
+        "dirty local edit\n",
+        "the spare's dirty working tree must be untouched by the failed claim"
+    );
+
+    assert_success(
+        &run_wt(&root, &["rm", "dirty fallback", "--delete-branch"]),
+        "cleanup tree",
+    );
+}
+
+#[test]
+fn status_with_no_selector_hides_spares_and_all_shows_them() {
+    let tmp = unique_dir("spare-status");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+
+    mutate_tree_json(&root, SPARE_NAME, |t| {
+        t["state"] = serde_json::json!("failed");
+    });
+
+    let hidden = run_wt(&root, &["status", "--json"]);
+    assert_success(&hidden, "status --json");
+    let entries: serde_json::Value = serde_json::from_slice(&hidden.stdout).unwrap();
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        0,
+        "status with no selector must hide a non-ready spare"
+    );
+
+    let shown = run_wt(&root, &["status", "--all", "--json"]);
+    assert_success(&shown, "status --all --json");
+    let entries: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], SPARE_NAME);
+    assert_eq!(entries[0]["state"], "failed");
+}
+
+#[test]
+fn ls_hides_spares_all_shows_them_and_json_carries_the_spare_field() {
+    let tmp = unique_dir("spare-ls");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+
+    let hidden = run_wt(&root, &["ls", "--json"]);
+    assert_success(&hidden, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&hidden.stdout).unwrap();
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        0,
+        "ls with no --all must hide the spare"
+    );
+
+    let hidden_text = run_wt(&root, &["ls"]);
+    assert_success(&hidden_text, "ls");
+    assert!(!String::from_utf8_lossy(&hidden_text.stdout).contains(SPARE_NAME));
+
+    let shown = run_wt(&root, &["ls", "--all", "--json"]);
+    assert_success(&shown, "ls --all --json");
+    let entries: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], SPARE_NAME);
+    assert_eq!(entries[0]["spare"], true);
+
+    let shown_text = run_wt(&root, &["ls", "--all"]);
+    assert_success(&shown_text, "ls --all");
+    let stdout = String::from_utf8_lossy(&shown_text.stdout);
+    assert!(stdout.contains(SPARE_NAME));
+    assert!(
+        stdout.contains("spare"),
+        "the STATE column should render a ready spare as 'spare': {stdout}"
+    );
+}
+
+#[test]
+fn doctor_reports_nothing_about_a_detached_spare() {
+    let tmp = unique_dir("spare-doctor");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+
+    let out = run_wt(&root, &["doctor"]);
+    assert_success(&out, "doctor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("branch mismatch"),
+        "a detached spare must never be flagged as a branch mismatch: {stdout}"
+    );
+    assert!(
+        !stdout.contains("unregistered worktree"),
+        "the spare's own worktree must be recognized, not flagged as unregistered: {stdout}"
     );
 }

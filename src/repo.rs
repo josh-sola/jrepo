@@ -76,6 +76,12 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
 
     store::with_store_lock(root, |store| {
         let last_fetch = store.repos.get(&opts.name).and_then(|r| r.last_fetch);
+        // Re-running `wt init` must not switch spares back on for a repo
+        // where they were deliberately turned off.
+        let spares = store
+            .repos
+            .get(&opts.name)
+            .map_or_else(store::default_spares, |r| r.spares);
         store.repos.insert(
             opts.name.clone(),
             Repo {
@@ -87,6 +93,7 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
                 copy,
                 env,
                 steps,
+                spares,
             },
         );
         Ok(())

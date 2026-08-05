@@ -112,6 +112,55 @@ pub fn worktree_add(base: &Path, tree_path: &Path, branch: &str, start_point: &s
     Ok(())
 }
 
+/// A hot spare has no branch of its own: whoever claims it creates the
+/// branch they asked for, and a detached HEAD in the meantime keeps the
+/// spare out of the user's branch namespace and out of Graphite's graph.
+pub fn worktree_add_detached(base: &Path, tree_path: &Path, start_point: &str) -> Result<()> {
+    let out = run(
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &tree_path.to_string_lossy(),
+            start_point,
+        ],
+        base,
+    )?;
+    if !out.status.success() {
+        bail!(
+            "git worktree add --detach failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The cutover that turns a spare into a real tree. Failure is expected and
+/// survivable — a dirty working tree left by a half-finished provisioning
+/// step lands here — so callers fall back to building a tree from cold
+/// rather than treating it as fatal.
+pub fn switch_new_branch(tree_path: &Path, branch: &str, start_point: &str) -> Result<()> {
+    let out = run(&["switch", "-c", branch, start_point], tree_path)?;
+    if !out.status.success() {
+        bail!(
+            "git switch -c {branch} {start_point} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn checkout_detached(tree_path: &Path, rev: &str) -> Result<()> {
+    let out = run(&["checkout", "--detach", rev], tree_path)?;
+    if !out.status.success() {
+        bail!(
+            "git checkout --detach {rev} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// `git worktree add` copies the main worktree's `config.worktree` into
 /// every new linked worktree's admin dir when `extensions.worktreeConfig`
 /// is on (verified empirically) — so a `core.hooksPath` set on base to
@@ -401,6 +450,14 @@ pub fn unlanded_commits(path: &Path, upstream: &str, head: &str) -> Result<Vec<S
         .filter_map(|line| line.strip_prefix("+ "))
         .map(str::to_string)
         .collect())
+}
+
+/// Count of commits reachable from `range`'s right side but not its left,
+/// e.g. `HEAD..origin/main` for how far behind a checkout's trunk is.
+pub fn rev_list_count(path: &Path, range: &str) -> Result<usize> {
+    let out = stdout_trimmed(&["rev-list", "--count", range], path)?;
+    out.parse()
+        .with_context(|| format!("parsing `git rev-list --count {range}` output: {out}"))
 }
 
 pub fn log_oneline(path: &Path, range: &str, limit: usize) -> Result<Vec<String>> {

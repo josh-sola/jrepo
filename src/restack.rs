@@ -261,6 +261,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 
@@ -274,6 +275,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         }
     }
 

@@ -47,6 +47,15 @@ pub struct Repo {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// How many pre-provisioned hot spares to keep for this repo. `0` turns
+    /// them off, for when an idle checkout plus its installed dependencies
+    /// costs more disk than a fast `wt new` is worth.
+    #[serde(default = "default_spares")]
+    pub spares: u8,
+}
+
+pub fn default_spares() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +101,26 @@ pub struct Tree {
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_branch: Option<String>,
+    /// An unclaimed hot spare: provisioned ahead of time, sitting on a
+    /// detached HEAD, hidden from listings and never reaped. Claiming one
+    /// clears this, and the row becomes an ordinary tree.
+    ///
+    /// A spare in `Ready` has finished every provisioning step *at its
+    /// current HEAD*. That is what lets a claim off the same commit skip the
+    /// steps entirely, so nothing may move a spare's HEAD without re-running
+    /// them in the same operation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spare: bool,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Display name for an unclaimed spare, shown by `wt ls --all`. It carries
+/// no meaning for lookups: `resolve_index` skips spares outright, so this
+/// never has to be unique or collision-proof.
+pub const SPARE_NAME: &str = "@spare";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -198,6 +226,9 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
         let matches: Vec<usize> = trees
             .iter()
             .enumerate()
+            // Spares are unclaimed and about to be rewritten by whoever
+            // claims them, so no user selector may land on one.
+            .filter(|(_, t)| !t.spare)
             .filter(|(_, t)| tier(t, selector, &needle))
             .map(|(i, _)| i)
             .collect();
@@ -271,6 +302,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 
@@ -362,6 +394,19 @@ mod tests {
         assert!(err.to_string().contains("no tree matches"));
     }
 
+    #[test]
+    fn resolve_cannot_reach_a_spare_by_name_substring_or_uuid_prefix() {
+        let mut spare = sample_tree(SPARE_NAME, "");
+        spare.spare = true;
+        let id_string = spare.id.to_string();
+        let trees = vec![spare];
+
+        assert!(resolve(&trees, SPARE_NAME).is_err());
+        assert!(resolve(&trees, "spare").is_err());
+        assert!(resolve(&trees, &id_string).is_err());
+        assert!(resolve(&trees, &id_string[..8]).is_err());
+    }
+
     fn fixture_repo_on_branch(branch: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wt-store-git-test-{}", Uuid::now_v7()));
         fs::create_dir_all(&dir).unwrap();
@@ -409,6 +454,7 @@ mod tests {
             copy: Vec::new(),
             env: BTreeMap::new(),
             steps: Vec::new(),
+            spares: 1,
         }
     }
 
@@ -451,5 +497,20 @@ mod tests {
             Some("monorepo")
         );
         assert_eq!(repo_for_cwd(&store, Path::new("/somewhere/else")), None);
+    }
+
+    #[test]
+    fn spares_deserializes_to_one_for_a_repo_entry_written_before_it_existed() {
+        let json = r#"{
+            "base": "/r/monorepo/base",
+            "trunk": "main",
+            "branchPrefix": "josh/",
+            "shared": [],
+            "copy": [],
+            "env": {},
+            "steps": []
+        }"#;
+        let repo: Repo = serde_json::from_str(json).unwrap();
+        assert_eq!(repo.spares, 1);
     }
 }

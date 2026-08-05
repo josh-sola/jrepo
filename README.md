@@ -33,7 +33,7 @@ parent shell's directory: `wt go`/`wt cd` resolve a selector to a path and
 └─ <repo>/
    ├─ base/                   canonical clone; shared paths inside it are
    │                          symlinks into shared/, same as in a tree
-   ├─ trees/<uuidv7>/         working copies
+   ├─ trees/<uuidv7>/         working copies, including each repo's hot spare
    ├─ shared/                 durable state symlinked into base and every tree
    ├─ backup/                 base's original directories, moved aside once
    │                          when first symlinked — delete by hand
@@ -50,6 +50,8 @@ wt new <repo> --name "<short summary>" [--branch <b>] [--onto <sel>]
                                        [--profile node,python] [--claude [-- <claude args>]]
     # worktree add + registry + shared state + env copy, then return the
     # path in ~2s; provisioning steps run detached in the background.
+    # Claims a repo's hot spare when one is ready, returning an
+    # already-provisioned tree instantly instead of the above.
     # --onto branches from <sel> instead of origin/<trunk>, joining
     # whatever Graphite stack it belongs to: a wt tree selector (its live
     # branch), a branch name, or a commit-ish.
@@ -83,8 +85,9 @@ wt launch [worktree] [repo] [--branch <b>] [--onto <sel>] [--profile node,python
     # --profile don't apply and are an error alongside it:
     #   wt launch @poking-around monorepo
 
-wt ls [--repo <r>] [--json]
-    # list registered worktrees: name, repo, branch, state, uuid, dirty flag
+wt ls [--repo <r>] [--json] [--all]
+    # list registered worktrees: name, repo, branch, state, uuid, dirty flag.
+    # Hides each repo's hot spare; --all shows it too.
 
 wt path <selector>
     # print a worktree's absolute path
@@ -113,8 +116,8 @@ wt rm <selector> [--force] [--delete-branch] [--reparent-children]
 wt gc [--repo <r>] [--dry-run]
     # reap every tree that is clean, not provisioning, and has no commits
     # beyond origin/<trunk> — deletes its branch too; skips a tree whose
-    # branch has Graphite children rather than orphaning them; --dry-run
-    # touches nothing
+    # branch has Graphite children rather than orphaning them; never reaps
+    # a repo's hot spare; --dry-run touches nothing
 
 wt doctor [--fix]
     # compare the registry against `git worktree list`: stale entries,
@@ -129,6 +132,19 @@ wt sync [<repo>] [--stack]
     # --stack also restacks every Graphite stack in the repo that has
     # branches in more than one worktree, walking bottom-up from wherever
     # each branch lives; never deletes a branch, that's `gt sync`'s job.
+    # Also refreshes each repo's hot spare and tops up a missing one, both
+    # in the background.
+
+wt spare [--repo <r>] [--json]
+    # show each repo's hot spare: state, short HEAD, age, commits behind
+    # origin/<trunk>, and its provisioning log path
+
+wt spare refresh [--repo <r>]
+    # force a refresh now, instead of waiting for the next `wt sync` tick
+
+wt spare drop [--repo <r>]
+    # remove a repo's spare and set its `spares` to 0 — otherwise the next
+    # background top-up just rebuilds it
 
 wt restack [selector] [--dry-run]
     # restack a Graphite stack across every worktree that holds one of its
@@ -176,6 +192,31 @@ Ambiguity is an error listing the candidates — never a guess.
 
 Provisioning steps and the shared/copy path lists are per-repo data in
 `data.json`, seeded from a repo's `.worktreeinclude` if it has one.
+
+## Hot spares
+
+Provisioning a tree from cold on a big monorepo means a full checkout,
+submodule init, `pnpm install`, `pnpm build:packages`, and `uv sync` — none of
+which depends on the branch name you asked for. So each repo keeps one **hot
+spare**: a worktree that has already been through every step, sitting on a
+detached HEAD at `origin/<trunk>`.
+
+`wt new` claims a repo's spare when one is ready, instead of provisioning a
+tree from cold. If the spare's HEAD is already the commit the new branch
+starts from, no working-tree file changes and the installed dependencies are
+correct by construction — `wt new` creates the branch, marks the tree ready,
+and returns instantly. If the commits differ, the provisioning steps still
+have to run, but in a tree that's already warm instead of empty.
+
+A spare has no branch of its own. Detached HEAD keeps it out of your branch
+namespace and off Graphite's graph. `wt sync` keeps each spare pinned to
+`origin/<trunk>` and tops up a missing one, both in the background, so the
+common case is a spare that's already current by the time you ask for a
+tree.
+
+The cost is one extra checkout and one extra set of installed dependencies
+per repo, idling on disk, plus a background install that can fire whenever
+trunk moves. Set `spares: 0` on a repo, or run `wt spare drop`, to opt out.
 
 ## Integrations
 

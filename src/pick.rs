@@ -10,11 +10,13 @@ use crate::store;
 /// `Ok(None)` is the cancel path: escaping the picker ends a bare
 /// `wt launch` without launching anything, and that is not a failure.
 pub fn pick_tree(store: &store::Store, cwd_repo: Option<&str>) -> Result<Option<Uuid>> {
-    if store.trees.is_empty() {
+    // A hot spare is unclaimed by definition, so it has nothing to open.
+    let candidates: Vec<store::Tree> = store.trees.iter().filter(|t| !t.spare).cloned().collect();
+    if candidates.is_empty() {
         bail!("no worktrees registered; create one first with `wt new <repo> --name \"...\"`");
     }
 
-    let trees = ordered(&store.trees, cwd_repo);
+    let trees = ordered(&candidates, cwd_repo);
     let (header, lines) = build_lines(&trees);
 
     let fzf_bin = std::env::var("WT_FZF").unwrap_or_else(|_| "fzf".to_string());
@@ -160,6 +162,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 

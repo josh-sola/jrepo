@@ -1,10 +1,12 @@
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
-use crate::store::{self, TreeState};
+use crate::store::{self, Repo, TreeState};
 
 /// Runs as `wt __provision <tree-id>`, re-exec'd and detached by `wt new`
 /// so the parent can return the tree path immediately. All state lives in
@@ -20,23 +22,38 @@ pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<
         .repos
         .get(&tree.repo)
         .with_context(|| format!("tree {tree_id} references unknown repo '{}'", tree.repo))?;
+    run_steps(root, tree_id, &tree.path, repo, &profiles)
+}
+
+/// Opens the tree's `.wt-provision.log` here rather than inheriting stdio
+/// the caller redirected at spawn time: a hot spare's tree path isn't known
+/// until long after its detached build is already running.
+pub(crate) fn run_steps(
+    root: &Path,
+    tree_id: Uuid,
+    tree_path: &Path,
+    repo: &Repo,
+    profiles: &Option<Vec<String>>,
+) -> Result<()> {
+    let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
+    let mut log =
+        File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
 
     let steps: Vec<_> = repo
         .steps
         .iter()
-        .filter(|s| match &profiles {
+        .filter(|s| match profiles {
             None => true,
             Some(profiles) => profiles.iter().any(|p| p == &s.profile),
         })
         .cloned()
         .collect();
     let total = steps.len() as u32;
-    let tree_path = tree.path.clone();
     let env = repo.env.clone();
 
     for (i, step) in steps.iter().enumerate() {
         let index = i as u32 + 1;
-        println!("[{index}/{total}] {}", step.label);
+        writeln!(log, "[{index}/{total}] {}", step.label).ok();
         store::with_store_lock(root, |s| {
             if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
                 t.step_label = Some(step.label.clone());
@@ -46,15 +63,23 @@ pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<
             Ok(())
         })?;
 
+        let stdout = log
+            .try_clone()
+            .with_context(|| format!("cloning handle for {}", log_path.display()))?;
+        let stderr = log
+            .try_clone()
+            .with_context(|| format!("cloning handle for {}", log_path.display()))?;
         let status = Command::new(&step.cmd[0])
             .args(&step.cmd[1..])
             .current_dir(tree_path.join(&step.cwd))
             .envs(&env)
+            .stdout(stdout)
+            .stderr(stderr)
             .status()
             .with_context(|| format!("running step '{}'", step.label))?;
 
         if !status.success() {
-            eprintln!("step '{}' failed", step.label);
+            writeln!(log, "step '{}' failed", step.label).ok();
             store::with_store_lock(root, |s| {
                 if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
                     t.state = TreeState::Failed;
@@ -76,6 +101,6 @@ pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<
         }
         Ok(())
     })?;
-    println!("provisioning complete");
+    writeln!(log, "provisioning complete").ok();
     Ok(())
 }

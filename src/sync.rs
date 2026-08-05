@@ -47,6 +47,16 @@ pub fn sync(root: &Path, repo_filter: Option<String>, stack: bool) -> Result<()>
                     had_failure = true;
                     println!("{name}: {e:#}");
                 }
+                // Both spawn detached and never fail the sync run: this
+                // runs on a 5-minute timer and must not block on a
+                // `pnpm install`, and one repo's spare trouble is no
+                // reason to fail the rest of the sync.
+                if let Err(e) = crate::spare::refresh(root, Some(name)) {
+                    println!("{name}: hot spare refresh failed: {e:#}");
+                }
+                if let Err(e) = crate::spare::top_up(root, Some(name)) {
+                    println!("{name}: hot spare top-up failed: {e:#}");
+                }
             }
             Err(e) => {
                 had_failure = true;
@@ -237,6 +247,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 
@@ -299,6 +310,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         };
 
         let mut store = Store::default();

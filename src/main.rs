@@ -10,6 +10,7 @@ mod proc;
 mod provision;
 mod repo;
 mod restack;
+mod spare;
 mod stack;
 mod store;
 mod sync;
@@ -102,6 +103,9 @@ enum Command {
     Ls {
         #[arg(long)]
         repo: Option<String>,
+        /// Also show each repo's hot spare, hidden by default.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -128,6 +132,9 @@ enum Command {
     /// Show provisioning status; every non-ready tree if no selector.
     Status {
         selector: Option<String>,
+        /// Also show a non-ready hot spare, hidden by default.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -188,6 +195,16 @@ enum Command {
         #[command(subcommand)]
         action: EnvCommand,
     },
+    /// Show or manage each repo's hot spare — a pre-provisioned worktree
+    /// `wt new` claims instead of building one from cold.
+    Spare {
+        #[command(subcommand)]
+        action: Option<SpareCommand>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Exec `claude` with cwd set to a tree, a repo's base, or the cwd's tree.
     /// Anything after `--` is passed straight to `claude`.
     Claude {
@@ -201,6 +218,13 @@ enum Command {
         tree_id: Uuid,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+    },
+    /// Builds or refreshes one hot spare; spawned detached by `wt new`,
+    /// `wt sync`, and `wt spare refresh`.
+    #[command(name = "__spare", hide = true)]
+    SpareInternal {
+        #[command(subcommand)]
+        action: SpareInternalCommand,
     },
     /// Prints SessionStart/CwdChanged hook context; backs `hooks/session-context.sh`.
     #[command(name = "__session-context", hide = true)]
@@ -222,6 +246,27 @@ enum EnvCommand {
     /// Re-copy the repo's `copy` globs from base into a tree, overwriting
     /// whatever is already there.
     Refresh { selector: String },
+}
+
+#[derive(Subcommand)]
+enum SpareCommand {
+    /// Force a refresh now instead of waiting for `wt sync`.
+    Refresh {
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Remove a repo's spare and turn spares off for it, so `wt sync`/`wt
+    /// new` don't immediately rebuild one.
+    Drop {
+        #[arg(long)]
+        repo: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpareInternalCommand {
+    New { repo: String },
+    Refresh { tree_id: Uuid },
 }
 
 const PROVISION_WAIT_SECS: u64 = 600;
@@ -300,7 +345,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
             profile,
             args,
         } => cmd_launch(root, worktree, repo, branch, onto, profile, &args),
-        Command::Ls { repo, json } => cmd_ls(root, repo, json),
+        Command::Ls { repo, all, json } => cmd_ls(root, repo, all, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
         Command::Rm {
@@ -309,7 +354,11 @@ fn run(root: &Path, command: Command) -> Result<()> {
             delete_branch,
             reparent_children,
         } => tree::rm_tree(root, &selector, force, delete_branch, reparent_children),
-        Command::Status { selector, json } => cmd_status(root, selector, json),
+        Command::Status {
+            selector,
+            all,
+            json,
+        } => cmd_status(root, selector, all, json),
         Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
         Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
@@ -324,8 +373,17 @@ fn run(root: &Path, command: Command) -> Result<()> {
         Command::Env { action } => match action {
             EnvCommand::Refresh { selector } => env_refresh::refresh(root, &selector),
         },
+        Command::Spare { action, repo, json } => match action {
+            None => cmd_spare_status(root, repo, json),
+            Some(SpareCommand::Refresh { repo }) => cmd_spare_refresh(root, repo),
+            Some(SpareCommand::Drop { repo }) => cmd_spare_drop(root, repo),
+        },
         Command::Claude { target, args } => claude::exec_claude(root, target, &args),
         Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
+        Command::SpareInternal { action } => match action {
+            SpareInternalCommand::New { repo } => spare::provision_spare(root, &repo),
+            SpareInternalCommand::Refresh { tree_id } => spare::run_refresh(root, tree_id),
+        },
         Command::SessionContext { path } => context::session_context(root, path),
         Command::TabIndex => {
             println!("{}", tab::index()?);
@@ -636,10 +694,27 @@ fn live_branch(t: &store::Tree) -> String {
     store::live_branch(t).unwrap_or_else(|| t.branch.clone())
 }
 
-fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
+/// `ls`'s STATE column for a spare: its own raw state never says "spare",
+/// so a spare rendering next to ordinary trees under the same header still
+/// reads as one.
+fn ls_state_str(t: &store::Tree) -> String {
+    if !t.spare {
+        return state_str(t.state).to_string();
+    }
+    match t.state {
+        store::TreeState::Ready => "spare".to_string(),
+        store::TreeState::Provisioning => "spare:provisioning".to_string(),
+        store::TreeState::Failed => "spare:failed".to_string(),
+    }
+}
+
+fn cmd_ls(root: &Path, repo_filter: Option<String>, all: bool, json: bool) -> Result<()> {
     let store = store::load(root)?;
     let mut rows = Vec::new();
     for t in &store.trees {
+        if !all && t.spare {
+            continue;
+        }
         if let Some(ref r) = repo_filter
             && &t.repo != r
         {
@@ -664,6 +739,7 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
                     "created": t.created,
                     "state": t.state,
                     "dirty": dirty,
+                    "spare": t.spare,
                 })
             })
             .collect();
@@ -675,6 +751,7 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
         .iter()
         .map(|(t, _, _)| unique_id_prefix(&t.id, &store.trees))
         .collect();
+    let states: Vec<String> = rows.iter().map(|(t, _, _)| ls_state_str(t)).collect();
     let w = |header: &str, vals: &mut dyn Iterator<Item = usize>| {
         vals.chain(std::iter::once(header.len())).max().unwrap_or(0)
     };
@@ -690,23 +767,20 @@ fn cmd_ls(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
         "BRANCH",
         &mut rows.iter().map(|(_, _, branch)| branch.chars().count()),
     );
-    let state_w = w(
-        "STATE",
-        &mut rows.iter().map(|(t, _, _)| state_str(t.state).len()),
-    );
+    let state_w = w("STATE", &mut states.iter().map(String::len));
     let id_w = w("UUID", &mut ids.iter().map(String::len));
 
     println!(
         "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} DIRTY",
         "NAME", "REPO", "BRANCH", "STATE", "UUID"
     );
-    for ((t, dirty, branch), id) in rows.iter().zip(&ids) {
+    for (((t, dirty, branch), id), state) in rows.iter().zip(&ids).zip(&states) {
         println!(
             "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<id_w$} {}",
             t.name,
             t.repo,
             branch,
-            state_str(t.state),
+            state,
             id,
             if *dirty { "dirty" } else { "" }
         );
@@ -1101,17 +1175,8 @@ fn step_str(t: &store::Tree) -> String {
     }
 }
 
-/// A `provisioning` tree whose recorded pid is no longer alive is wedged,
-/// not progressing — a killed child leaves the row in `provisioning`
-/// forever otherwise. `None` (not yet recorded, or an older registry entry)
-/// is not flagged: there is nothing to compare against.
-fn provisioning_is_stale(t: &store::Tree) -> bool {
-    t.state == store::TreeState::Provisioning
-        && t.provision_pid.is_some_and(|pid| !proc::pid_alive(pid))
-}
-
 pub(crate) fn status_state_str(t: &store::Tree) -> String {
-    if provisioning_is_stale(t) {
+    if proc::provisioning_is_stale(t) {
         format!("{} (stale)", state_str(t.state))
     } else {
         state_str(t.state).to_string()
@@ -1190,7 +1255,7 @@ fn collapse_home(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
+fn cmd_status(root: &Path, selector: Option<String>, all: bool, json: bool) -> Result<()> {
     let store = store::load(root)?;
     let trees: Vec<&store::Tree> = match &selector {
         Some(sel) => vec![store::resolve(&store.trees, sel)?],
@@ -1198,6 +1263,7 @@ fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
             .trees
             .iter()
             .filter(|t| t.state != store::TreeState::Ready)
+            .filter(|t| all || !t.spare)
             .collect(),
     };
 
@@ -1212,7 +1278,7 @@ fn cmd_status(root: &Path, selector: Option<String>, json: bool) -> Result<()> {
                     "branch": t.branch,
                     "path": t.path,
                     "state": t.state,
-                    "stale": provisioning_is_stale(t),
+                    "stale": proc::provisioning_is_stale(t),
                     "stepLabel": t.step_label,
                     "stepIndex": t.step_index,
                     "stepTotal": t.step_total,
@@ -1262,7 +1328,7 @@ fn cmd_wait(root: &Path, selector: Option<String>, timeout_secs: u64) -> Result<
                 let provisioning: Vec<_> = store
                     .trees
                     .iter()
-                    .filter(|t| t.state == store::TreeState::Provisioning)
+                    .filter(|t| t.state == store::TreeState::Provisioning && !t.spare)
                     .collect();
                 match provisioning.len() {
                     0 => bail!("no tree is provisioning"),
@@ -1325,6 +1391,111 @@ fn wait_for_ready(root: &Path, id: Uuid, timeout_secs: u64) -> Result<PathBuf> {
     }
 }
 
+fn cmd_spare_status(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
+    let store = store::load(root)?;
+    let mut rows = Vec::new();
+    for t in &store.trees {
+        if !t.spare {
+            continue;
+        }
+        if let Some(ref r) = repo_filter
+            && &t.repo != r
+        {
+            continue;
+        }
+        let repo = store.repos.get(&t.repo);
+        let head = git::rev_parse(&t.path, "HEAD").ok();
+        let behind = match (repo, &head) {
+            (Some(repo), Some(_)) => {
+                git::rev_list_count(&t.path, &format!("HEAD..origin/{}", repo.trunk)).ok()
+            }
+            _ => None,
+        };
+        rows.push((t, head, behind));
+    }
+
+    if json {
+        let entries: Vec<_> = rows
+            .iter()
+            .map(|(t, head, behind)| {
+                serde_json::json!({
+                    "repo": t.repo,
+                    "id": t.id,
+                    "state": t.state,
+                    "stale": proc::provisioning_is_stale(t),
+                    "head": head,
+                    "createdSeconds": (Utc::now() - t.created).num_seconds().max(0),
+                    "behindTrunk": behind,
+                    "logPath": t.log_path,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("no hot spares");
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:<21} {:<10} {:<8} {:<8} LOG",
+        "REPO", "STATE", "HEAD", "AGE", "BEHIND"
+    );
+    for (t, head, behind) in &rows {
+        let age = format_duration((Utc::now() - t.created).num_seconds());
+        let head = head.as_deref().map_or("-", |h| &h[..h.len().min(8)]);
+        let behind = behind.map_or("-".to_string(), |n| n.to_string());
+        let log = t
+            .log_path
+            .as_ref()
+            .map_or("-".to_string(), |p| p.display().to_string());
+        println!(
+            "{:<12} {:<21} {:<10} {:<8} {:<8} {}",
+            t.repo,
+            status_state_str(t),
+            head,
+            age,
+            behind,
+            log
+        );
+    }
+    Ok(())
+}
+
+fn cmd_spare_refresh(root: &Path, repo: Option<String>) -> Result<()> {
+    spare::refresh(root, repo.as_deref())?;
+    println!("refreshing");
+    Ok(())
+}
+
+/// Resolves `--repo`, else the current directory's repo, and errors
+/// naming the registered repos rather than falling back to "every repo" —
+/// a bare `wt spare drop` must never silently turn spares off everywhere.
+fn cmd_spare_drop(root: &Path, repo: Option<String>) -> Result<()> {
+    let repo_name = match repo {
+        Some(r) => r,
+        None => {
+            let store = store::load(root)?;
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+            store::repo_for_cwd(&store, &cwd)
+                .map(str::to_string)
+                .with_context(|| {
+                    format!(
+                        "pass --repo; the current directory isn't inside a registered repo. \
+                         Known repos: {}",
+                        known_repos(&store)
+                    )
+                })?
+        }
+    };
+    spare::drop_spare(root, &repo_name)?;
+    println!("dropped {repo_name}'s hot spare; spares are now off for it");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1518,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 
@@ -1387,6 +1559,7 @@ mod tests {
             copy: Vec::new(),
             env: std::collections::BTreeMap::new(),
             steps: Vec::new(),
+            spares: 1,
         }
     }
 
@@ -1417,6 +1590,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         }
     }
 

@@ -1,8 +1,7 @@
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -44,26 +43,48 @@ pub fn slugify(name: &str) -> String {
     slug
 }
 
+/// The result of `plan_tree`: every decision `wt new` has to make before it
+/// touches disk, resolved once so both the claim path and the cold path act
+/// on the same answer.
+pub(crate) struct TreePlan {
+    pub(crate) repo_name: String,
+    pub(crate) repo: Repo,
+    pub(crate) name: String,
+    pub(crate) branch: String,
+    /// Resolved to a concrete commit, not a ref — this is what a claim
+    /// compares a spare's HEAD against, and what the cold path branches
+    /// from.
+    pub(crate) start_point: String,
+    pub(crate) parent_branch: Option<String>,
+    pub(crate) profiles: Option<Vec<String>>,
+}
+
 pub fn new_tree(root: &Path, opts: NewOptions) -> Result<PathBuf> {
-    let (id, tree_path, log_path) = create_tree(root, &opts)?;
-    start_provisioning(root, id, &log_path, &opts.profiles)?;
+    let plan = plan_tree(root, &opts)?;
+    let claimed = crate::spare::claim(root, &plan)?;
+    let (id, tree_path, needs_steps) = match claimed {
+        Some(c) => (c.id, c.path, c.needs_steps),
+        None => {
+            let (id, tree_path, _) = create_cold(root, &plan)?;
+            (id, tree_path, true)
+        }
+    };
+    if needs_steps {
+        start_provisioning(root, id, &plan.profiles)?;
+    }
     println!("{}", tree_path.display());
+    // A claimed or freshly built tree both leave the repo's spare pool one
+    // short; topping up here is what keeps the next `wt new` fast too. Never
+    // lets a spare-provisioning hiccup fail the command that just succeeded.
+    crate::spare::top_up(root, Some(&plan.repo_name)).ok();
     Ok(tree_path)
 }
 
-/// Worktree creation, shared-state wiring, and the registry write — stops
-/// short of starting provisioning so `wt adopt` can pop its stash into the
-/// tree first, before a background install could touch any of the same
-/// files. `wt new` runs this immediately followed by `start_provisioning`.
-fn create_tree(root: &Path, opts: &NewOptions) -> Result<(Uuid, PathBuf, PathBuf)> {
-    create_tree_with(root, opts, "gt")
-}
-
-fn create_tree_with(
-    root: &Path,
-    opts: &NewOptions,
-    gt_bin: &str,
-) -> Result<(Uuid, PathBuf, PathBuf)> {
+/// Resolves `--onto`, fetches trunk when stale, derives the branch name, and
+/// rejects a collision — everything `wt new` needs to decide before it
+/// claims a spare or builds cold. Branch validation happens here, ahead of
+/// any claim, so a colliding name never consumes a spare only to fail anyway.
+fn plan_tree(root: &Path, opts: &NewOptions) -> Result<TreePlan> {
     let store = store::load(root)?;
     let repo = store.repos.get(&opts.repo).cloned().with_context(|| {
         format!(
@@ -118,20 +139,54 @@ fn create_tree_with(
         bail!("branch '{branch}' already exists on origin");
     }
 
-    let id = Uuid::now_v7();
-    let repo_dir = root.join(&opts.repo);
-    let tree_path = repo_dir.join("trees").join(id.to_string());
-    let start_point = parent_branch
+    let start_point_ref = parent_branch
         .clone()
         .unwrap_or_else(|| format!("origin/{}", repo.trunk));
-    git::worktree_add(&repo.base, &tree_path, &branch, &start_point)?;
+    let start_point = git::rev_parse(&repo.base, &start_point_ref)
+        .with_context(|| format!("resolving {start_point_ref}"))?;
+
+    Ok(TreePlan {
+        repo_name: opts.repo.clone(),
+        repo,
+        name: opts.name.clone(),
+        branch,
+        start_point,
+        parent_branch,
+        profiles: opts.profiles.clone(),
+    })
+}
+
+/// Worktree creation, shared-state wiring, and the registry write — stops
+/// short of starting provisioning so `wt adopt` can pop its stash into the
+/// tree first, before a background install could touch any of the same
+/// files, and so `new_tree` can start it only when `needs_steps` says so.
+fn create_cold(root: &Path, plan: &TreePlan) -> Result<(Uuid, PathBuf, PathBuf)> {
+    create_cold_with(root, plan, "gt")
+}
+
+fn create_cold_with(
+    root: &Path,
+    plan: &TreePlan,
+    gt_bin: &str,
+) -> Result<(Uuid, PathBuf, PathBuf)> {
+    let id = Uuid::now_v7();
+    let repo_dir = root.join(&plan.repo_name);
+    let tree_path = repo_dir.join("trees").join(id.to_string());
+    git::worktree_add(&plan.repo.base, &tree_path, &plan.branch, &plan.start_point)?;
     if let Err(e) = git::clear_worktree_hooks_path(&tree_path) {
         eprintln!("warning: could not clear inherited worktree hooksPath: {e:#}");
     }
     let tree_path = fs::canonicalize(&tree_path)?;
-    if let Some(parent) = &parent_branch {
+    if let Some(parent) = &plan.parent_branch {
+        let store = store::load(root)?;
         track_with_graphite(
-            &store, &opts.repo, &repo, &opts.name, &tree_path, parent, gt_bin,
+            &store,
+            &plan.repo_name,
+            &plan.repo,
+            &plan.name,
+            &tree_path,
+            parent,
+            gt_bin,
         );
     }
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
@@ -143,9 +198,9 @@ fn create_tree_with(
     store::with_store_lock(root, |s| {
         s.trees.push(Tree {
             id,
-            repo: opts.repo.clone(),
-            name: opts.name.clone(),
-            branch: branch.clone(),
+            repo: plan.repo_name.clone(),
+            name: plan.name.clone(),
+            branch: plan.branch.clone(),
             path: tree_path.clone(),
             created: now,
             state: TreeState::Provisioning,
@@ -154,14 +209,13 @@ fn create_tree_with(
             step_total: None,
             log_path: Some(log_path.clone()),
             provision_pid: None,
-            parent_branch: parent_branch.clone(),
+            parent_branch: plan.parent_branch.clone(),
+            spare: false,
         });
         Ok(())
     })?;
 
-    if let Err(e) = wire_shared_symlinks(&repo_dir.join("shared"), &tree_path, &repo.shared)
-        .and_then(|()| copy_globs(&repo.base, &tree_path, &repo.copy, &repo.shared))
-    {
+    if let Err(e) = wire_fresh_checkout(&repo_dir, &plan.repo, &tree_path) {
         return Err(mark_failed::<()>(
             root,
             id,
@@ -173,6 +227,18 @@ fn create_tree_with(
     }
 
     Ok((id, tree_path, log_path))
+}
+
+/// Test seam for exercising `plan_tree` and `create_cold_with` together
+/// against a stubbed `gt` binary.
+#[cfg(test)]
+fn create_tree_with(
+    root: &Path,
+    opts: &NewOptions,
+    gt_bin: &str,
+) -> Result<(Uuid, PathBuf, PathBuf)> {
+    let plan = plan_tree(root, opts)?;
+    create_cold_with(root, &plan, gt_bin)
 }
 
 /// Resolves `--onto`'s selector into the branch `wt new` should create its
@@ -349,13 +415,8 @@ fn track_failure_message(
     )
 }
 
-fn start_provisioning(
-    root: &Path,
-    id: Uuid,
-    log_path: &Path,
-    profiles: &Option<Vec<String>>,
-) -> Result<()> {
-    let pid = spawn_background_provisioning(root, id, log_path, profiles)?;
+fn start_provisioning(root: &Path, id: Uuid, profiles: &Option<Vec<String>>) -> Result<()> {
+    let pid = spawn_background_provisioning(root, id, profiles)?;
     store::with_store_lock(root, |s| {
         if let Some(t) = s.trees.iter_mut().find(|t| t.id == id) {
             t.provision_pid = Some(pid);
@@ -404,7 +465,14 @@ pub fn adopt(root: &Path, opts: AdoptOptions) -> Result<PathBuf> {
         onto: None,
         profiles: opts.profiles.clone(),
     };
-    let (id, tree_path, log_path) = create_tree(root, &new_opts).map_err(|e| {
+    let plan = plan_tree(root, &new_opts).map_err(|e| {
+        anyhow::anyhow!(
+            "adopted work is stashed in {repo_name}'s base; planning the tree failed: {e:#}\n\
+             recover it with: git -C {} stash pop",
+            repo.base.display()
+        )
+    })?;
+    let (id, tree_path, _log_path) = create_cold(root, &plan).map_err(|e| {
         anyhow::anyhow!(
             "adopted work is stashed in {repo_name}'s base; creating the tree failed: {e:#}\n\
              recover it with: git -C {} stash pop",
@@ -429,7 +497,7 @@ pub fn adopt(root: &Path, opts: AdoptOptions) -> Result<PathBuf> {
         .unwrap_err());
     }
 
-    start_provisioning(root, id, &log_path, &opts.profiles)?;
+    start_provisioning(root, id, &opts.profiles)?;
     println!("{}", tree_path.display());
     Ok(tree_path)
 }
@@ -455,37 +523,21 @@ fn resolve_adopt_repo(store: &store::Store, repo: Option<String>) -> Result<(Str
         .context("current directory is not a registered repo's base; pass a repo name")
 }
 
-/// Re-execs the binary as `wt __provision` instead of threading, so the
-/// parent can exit and the OS reparents the child rather than a live handle
-/// (and thread) pinning it to a process that is about to go away.
-/// `process_group(0)` detaches it from the parent's process group so a
-/// Ctrl-C at the terminal that spawned `wt new` doesn't also signal it.
+/// Re-execs the binary as `wt __provision`, detached, so the parent can
+/// return the tree path immediately and the OS reparents the child rather
+/// than a live handle pinning it to a process that is about to go away.
 fn spawn_background_provisioning(
     root: &Path,
     id: Uuid,
-    log_path: &Path,
     profiles: &Option<Vec<String>>,
 ) -> Result<u32> {
-    let exe = std::env::current_exe().context("resolving current executable")?;
-    let stdout_log =
-        fs::File::create(log_path).with_context(|| format!("creating {}", log_path.display()))?;
-    let stderr_log = stdout_log
-        .try_clone()
-        .with_context(|| format!("cloning handle for {}", log_path.display()))?;
-
-    let mut cmd = Command::new(exe);
-    cmd.arg("__provision").arg(id.to_string());
+    let mut args = vec!["__provision".to_string(), id.to_string()];
     if let Some(profiles) = profiles {
-        cmd.arg("--profile").arg(profiles.join(","));
+        args.push("--profile".to_string());
+        args.push(profiles.join(","));
     }
-    cmd.env("WT_ROOT", root)
-        .stdin(Stdio::null())
-        .stdout(stdout_log)
-        .stderr(stderr_log)
-        .process_group(0);
-
-    let child = cmd.spawn().context("spawning background provisioning")?;
-    Ok(child.id())
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::proc::spawn_detached(root, &arg_refs)
 }
 
 /// Leaves the tree on disk and registered as `Failed` rather than cleaning
@@ -494,7 +546,7 @@ fn spawn_background_provisioning(
 /// Generic over its `Ok` type since it never actually produces one — every
 /// path through this function ends in `bail!` — which lets each caller's
 /// `?`/`return Err(...)` line up with whatever type that caller returns.
-fn mark_failed<T>(
+pub(crate) fn mark_failed<T>(
     root: &Path,
     id: Uuid,
     tree_path: &Path,
@@ -545,6 +597,16 @@ fn wire_shared_symlinks(shared_root: &Path, tree_path: &Path, shared: &[String])
             Err(e) => return Err(e).with_context(|| format!("checking {}", dst.display())),
         }
     }
+    Ok(())
+}
+
+/// Symlinks each shared path into a fresh checkout and copies its env-glob
+/// files in from base — everything a brand new worktree needs wired before
+/// any provisioning step runs, whether it becomes an ordinary tree right
+/// away or sits as a hot spare until claimed.
+pub(crate) fn wire_fresh_checkout(repo_dir: &Path, repo: &Repo, tree_path: &Path) -> Result<()> {
+    wire_shared_symlinks(&repo_dir.join("shared"), tree_path, &repo.shared)?;
+    copy_globs(&repo.base, tree_path, &repo.copy, &repo.shared)?;
     Ok(())
 }
 
@@ -739,6 +801,7 @@ fn rm_tree_with(
         }
     }
 
+    crate::spare::top_up(root, Some(&tree.repo)).ok();
     Ok(())
 }
 
@@ -863,7 +926,7 @@ fn guard_stacked_children(
 /// A few retries: a step that was still running when it got signalled can
 /// keep a writer inside the tree for a moment after the signal is sent, and
 /// that writer can lose the race with this walk by a hair.
-fn remove_tree_dir(tree_path: &Path) -> Result<()> {
+pub(crate) fn remove_tree_dir(tree_path: &Path) -> Result<()> {
     let mut last_err = None;
     for attempt in 0..3 {
         match fs::remove_dir_all(tree_path) {
@@ -967,6 +1030,9 @@ enum GcVerdict {
 /// hands every tree it picks to `rm_tree`, so a guard that is stricter than
 /// this one refuses each one in turn and gc reaps nothing at all.
 fn gc_verdict(store: &store::Store, repo: &Repo, tree: &Tree) -> Result<GcVerdict> {
+    if tree.spare {
+        return Ok(GcVerdict::Skip("hot spare".to_string()));
+    }
     if tree.state == TreeState::Provisioning {
         return Ok(GcVerdict::Skip("still provisioning".to_string()));
     }
@@ -1059,7 +1125,10 @@ pub fn doctor(root: &Path, opts: DoctorOptions) -> Result<()> {
                 continue;
             }
             match worktrees.iter().find(|w| w.path == t.path) {
-                Some(w) if w.branch.as_deref() != Some(t.branch.as_str()) => {
+                // A spare is detached by design; comparing it against a
+                // recorded branch it was never meant to have would flag
+                // every single one.
+                Some(w) if !t.spare && w.branch.as_deref() != Some(t.branch.as_str()) => {
                     let actual = w.branch.as_deref().unwrap_or("(detached)");
                     println!(
                         "  branch mismatch: '{}' registered as '{}' but checked out as {actual}",
@@ -1111,6 +1180,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         };
         let tree = Tree {
             id: Uuid::now_v7(),
@@ -1126,6 +1196,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         };
 
         match gc_verdict(&store::Store::default(), &repo, &tree).unwrap() {
@@ -1134,6 +1205,45 @@ mod tests {
                 "unexpected reason: {reason}"
             ),
             GcVerdict::Reap { .. } => panic!("a failed tree must not be reaped"),
+        }
+    }
+
+    #[test]
+    fn gc_skips_a_spare_even_though_it_is_clean_with_no_commits() {
+        let repo = Repo {
+            base: PathBuf::from("/nonexistent-base"),
+            trunk: "master".into(),
+            branch_prefix: "josh/".into(),
+            last_fetch: None,
+            shared: Vec::new(),
+            copy: Vec::new(),
+            env: Default::default(),
+            steps: Vec::new(),
+            spares: 1,
+        };
+        // A spare with no branch and nothing dirty is exactly the state
+        // that gets an ordinary tree reaped; only `tree.spare` tells gc
+        // to leave it alone.
+        let tree = Tree {
+            id: Uuid::now_v7(),
+            repo: "myrepo".into(),
+            name: store::SPARE_NAME.into(),
+            branch: String::new(),
+            path: PathBuf::from("/nonexistent-tree"),
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+            parent_branch: None,
+            spare: true,
+        };
+
+        match gc_verdict(&store::Store::default(), &repo, &tree).unwrap() {
+            GcVerdict::Skip(reason) => assert_eq!(reason, "hot spare"),
+            GcVerdict::Reap { .. } => panic!("a hot spare must never be reaped"),
         }
     }
 
@@ -1207,6 +1317,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         };
         let tree = Tree {
             id: Uuid::now_v7(),
@@ -1222,6 +1333,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         };
         let mut store = store::Store::default();
         store.repos.insert("r".to_string(), repo.clone());
@@ -1309,6 +1421,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         };
         let tree = Tree {
             id: Uuid::now_v7(),
@@ -1324,6 +1437,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         };
         let mut store = store::Store::default();
         store.repos.insert("r".to_string(), repo.clone());
@@ -1394,6 +1508,7 @@ mod tests {
             copy: Vec::new(),
             env: Default::default(),
             steps: Vec::new(),
+            spares: 1,
         };
         let tree = Tree {
             id: Uuid::now_v7(),
@@ -1409,6 +1524,7 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            spare: false,
         };
         let mut store = store::Store::default();
         store.repos.insert("r".to_string(), repo.clone());
@@ -1688,6 +1804,7 @@ mod tests {
                 copy: Vec::new(),
                 env: Default::default(),
                 steps: Vec::new(),
+                spares: 1,
             };
             (dir, repo, tree_a, tree_b)
         }
@@ -1707,6 +1824,7 @@ mod tests {
                 log_path: None,
                 provision_pid: None,
                 parent_branch: None,
+                spare: false,
             }
         }
 
@@ -1914,6 +2032,7 @@ mod tests {
                 copy: Vec::new(),
                 env: Default::default(),
                 steps: Vec::new(),
+                spares: 1,
             };
             let tree = Tree {
                 id: Uuid::now_v7(),
@@ -1929,6 +2048,7 @@ mod tests {
                 log_path: None,
                 provision_pid: None,
                 parent_branch: None,
+                spare: false,
             };
             let root = dir.join("wtroot");
             store::with_store_lock(&root, |s| {
@@ -2118,6 +2238,7 @@ mod tests {
                 copy: Vec::new(),
                 env: Default::default(),
                 steps: Vec::new(),
+                spares: 1,
             };
             (dir, repo)
         }
@@ -2186,6 +2307,7 @@ mod tests {
                 log_path: None,
                 provision_pid: None,
                 parent_branch: None,
+                spare: false,
             }
         }
 

@@ -1,0 +1,10 @@
+# Each integration test builds several throwaway git repos and drives the
+# real binary, which spawns detached children of its own. On a machine with
+# many cores the default of one thread per core turns a run into dozens of
+# concurrent git processes.
+#
+# This cap is the coarse limit; the suite also drops itself to background
+# quality of service at startup, which is what actually keeps the desktop
+# responsive. Raise for a one-off with `RUST_TEST_THREADS=n cargo test`.
+[env]
+RUST_TEST_THREADS = "4"
