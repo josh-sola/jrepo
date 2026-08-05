@@ -19,6 +19,15 @@ pub struct Store {
     pub repos: BTreeMap<String, Repo>,
     #[serde(default)]
     pub trees: Vec<Tree>,
+    /// Environment every repo's provisioning steps run under, before that
+    /// repo's own `env` is layered on top.
+    ///
+    /// This is where `PATH` belongs. Steps are spawned from `wt sync` under
+    /// launchd as often as from a terminal, and launchd's default `PATH`
+    /// reaches none of the version-manager shims that `pnpm`, `npm`, and
+    /// `uv` actually live behind.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for Store {
@@ -27,6 +36,7 @@ impl Default for Store {
             version: 1,
             repos: BTreeMap::new(),
             trees: Vec::new(),
+            env: BTreeMap::new(),
         }
     }
 }

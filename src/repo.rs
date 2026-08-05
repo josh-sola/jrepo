@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -75,6 +76,10 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
     );
 
     store::with_store_lock(root, |store| {
+        store
+            .env
+            .entry("PATH".to_string())
+            .or_insert_with(steps_path);
         let last_fetch = store.repos.get(&opts.name).and_then(|r| r.last_fetch);
         // Re-running `wt init` must not switch spares back on for a repo
         // where they were deliberately turned off.
@@ -138,6 +143,29 @@ const GLOB_CHARS: &[char] = &['*', '?', '['];
 /// `plans`: durable plans are the reason `shared/` exists at all, so a repo
 /// that never opted in still gets a `plans/` directory in every tree instead
 /// of silently going without one.
+/// A `PATH` for provisioning steps that holds up whether they run from a
+/// terminal or from launchd, which supplies only the system directories.
+///
+/// Built from directories rather than copied from the caller's own `PATH`:
+/// a version manager installs into a versioned directory, so a captured
+/// `PATH` stops resolving the moment a toolchain is upgraded. A shim
+/// directory keeps pointing at whatever version is current.
+fn steps_path() -> String {
+    let home = env::var("HOME").unwrap_or_default();
+    let candidates = [
+        format!("{home}/.local/share/mise/shims"),
+        format!("{home}/.cargo/bin"),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    let mut dirs: Vec<String> = candidates
+        .into_iter()
+        .filter(|d| Path::new(d).is_dir())
+        .collect();
+    dirs.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(str::to_string));
+    dirs.join(":")
+}
+
 fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let path = base.join(".worktreeinclude");
     let contents = match fs::read_to_string(&path) {

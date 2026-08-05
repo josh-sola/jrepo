@@ -49,7 +49,10 @@ pub(crate) fn run_steps(
         .cloned()
         .collect();
     let total = steps.len() as u32;
-    let env = repo.env.clone();
+    // The repo's own entries win, so a repo can still override anything the
+    // global map sets.
+    let mut env = store::load(root).map(|s| s.env).unwrap_or_default();
+    env.extend(repo.env.clone());
 
     for (i, step) in steps.iter().enumerate() {
         let index = i as u32 + 1;
@@ -69,17 +72,28 @@ pub(crate) fn run_steps(
         let stderr = log
             .try_clone()
             .with_context(|| format!("cloning handle for {}", log_path.display()))?;
-        let status = Command::new(&step.cmd[0])
+        // A command that cannot even start — the usual cause is a tool the
+        // caller's PATH doesn't reach — has to land in `Failed` like any
+        // other step failure. Letting the error escape instead leaves the
+        // tree `provisioning` behind a pid that is already gone, which
+        // reads as merely wedged, so nothing reports it and the work is
+        // retried forever.
+        let outcome = Command::new(&step.cmd[0])
             .args(&step.cmd[1..])
             .current_dir(tree_path.join(&step.cwd))
             .envs(&env)
             .stdout(stdout)
             .stderr(stderr)
-            .status()
-            .with_context(|| format!("running step '{}'", step.label))?;
+            .status();
 
-        if !status.success() {
-            writeln!(log, "step '{}' failed", step.label).ok();
+        let failure = match outcome {
+            Err(e) => Some(format!("step '{}' could not start: {e}", step.label)),
+            Ok(status) if !status.success() => Some(format!("step '{}' failed", step.label)),
+            Ok(_) => None,
+        };
+
+        if let Some(reason) = failure {
+            writeln!(log, "{reason}").ok();
             store::with_store_lock(root, |s| {
                 if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
                     t.state = TreeState::Failed;
@@ -87,7 +101,7 @@ pub(crate) fn run_steps(
                 }
                 Ok(())
             })?;
-            bail!("step '{}' failed", step.label);
+            bail!("{reason}");
         }
     }
 
