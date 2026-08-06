@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::config;
 use crate::git;
 use crate::proc;
 use crate::provision;
@@ -16,14 +17,16 @@ use crate::tree::{self, TreePlan};
 /// detached background process `top_up` spawned, so there is no further
 /// re-exec to do here. A no-op when the repo has opted out, or when the
 /// pool is already full.
-pub fn provision_spare(root: &Path, repo_name: &str) -> Result<()> {
+pub fn provision_spare(root: &Path, config_path: &Path, repo_name: &str) -> Result<()> {
     let store = store::load(root)?;
     let repo = store
         .repos
         .get(repo_name)
         .with_context(|| format!("unknown repo '{repo_name}'"))?
         .clone();
-    if repo.spares == 0 {
+    let config = config::load(config_path)?;
+    let repo_config = config::repo(&config, repo_name)?.clone();
+    if repo_config.spares == 0 {
         return Ok(());
     }
 
@@ -47,7 +50,7 @@ pub fn provision_spare(root: &Path, repo_name: &str) -> Result<()> {
             .filter(|t| t.repo == repo_name && t.spare)
             .filter(|t| t.state == TreeState::Ready || t.state == TreeState::Provisioning)
             .count();
-        if live >= repo.spares as usize {
+        if live >= repo_config.spares as usize {
             return Ok(false);
         }
         s.trees.push(Tree {
@@ -72,7 +75,7 @@ pub fn provision_spare(root: &Path, repo_name: &str) -> Result<()> {
         return Ok(());
     }
 
-    let start_point = format!("origin/{}", repo.trunk);
+    let start_point = format!("origin/{}", repo_config.trunk);
     if let Err(e) = git::worktree_add_detached(&repo.base, &tree_path, &start_point) {
         return Err(tree::mark_failed::<()>(
             root,
@@ -100,7 +103,7 @@ pub fn provision_spare(root: &Path, repo_name: &str) -> Result<()> {
         Ok(())
     })?;
 
-    if let Err(e) = tree::wire_fresh_checkout(&repo_dir, &repo, &tree_path) {
+    if let Err(e) = tree::wire_fresh_checkout(&repo_dir, &repo.base, &tree_path) {
         return Err(tree::mark_failed::<()>(
             root,
             id,
@@ -111,7 +114,7 @@ pub fn provision_spare(root: &Path, repo_name: &str) -> Result<()> {
         .unwrap_err());
     }
 
-    provision::run_steps(root, id, &tree_path, &repo, &None)
+    provision::run_steps(root, id, &tree_path, repo_name, &config, &None)
 }
 
 pub struct Claimed {
@@ -199,18 +202,22 @@ pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
 /// Reaps a failed spare, or one stuck `provisioning` behind a dead pid,
 /// before counting — otherwise a spare that failed once would sit in the
 /// registry forever, permanently short-circuiting every future top-up.
-pub fn top_up(root: &Path, repo_filter: Option<&str>) -> Result<()> {
+pub fn top_up(root: &Path, config_path: &Path, repo_filter: Option<&str>) -> Result<()> {
     let store = store::load(root)?;
+    let config = config::load(config_path)?;
     let repo_names: Vec<String> = match repo_filter {
         Some(r) => vec![r.to_string()],
         None => store.repos.keys().cloned().collect(),
     };
 
     for repo_name in repo_names {
-        let Some(repo) = store.repos.get(&repo_name) else {
+        // A repo registered on this machine but missing from config is a
+        // real error elsewhere, but a background top-up has nothing useful
+        // to do about it beyond skipping this one repo.
+        let Ok(repo_config) = config::repo(&config, &repo_name) else {
             continue;
         };
-        if repo.spares == 0 {
+        if repo_config.spares == 0 {
             continue;
         }
 
@@ -223,8 +230,8 @@ pub fn top_up(root: &Path, repo_filter: Option<&str>) -> Result<()> {
             .filter(|t| t.state == TreeState::Ready || t.state == TreeState::Provisioning)
             .count();
 
-        for _ in live..repo.spares as usize {
-            proc::spawn_detached(root, &["__spare", "new", &repo_name])?;
+        for _ in live..repo_config.spares as usize {
+            proc::spawn_detached(root, config_path, &["__spare", "new", &repo_name])?;
         }
     }
     Ok(())
@@ -281,8 +288,9 @@ fn remove_spare(root: &Path, id: Uuid) -> Result<()> {
 /// `origin/<trunk>` and re-provisions it when trunk has moved on. A spare
 /// still `provisioning` is left alone — that's what keeps two overlapping
 /// `wt sync` ticks out of each other's way.
-pub fn refresh(root: &Path, repo_filter: Option<&str>) -> Result<()> {
+pub fn refresh(root: &Path, config_path: &Path, repo_filter: Option<&str>) -> Result<()> {
     let store = store::load(root)?;
+    let config = config::load(config_path)?;
     for t in &store.trees {
         if !t.spare || t.state != TreeState::Ready {
             continue;
@@ -295,7 +303,10 @@ pub fn refresh(root: &Path, repo_filter: Option<&str>) -> Result<()> {
         let Some(repo) = store.repos.get(&t.repo) else {
             continue;
         };
-        let trunk_ref = format!("origin/{}", repo.trunk);
+        let Ok(repo_config) = config::repo(&config, &t.repo) else {
+            continue;
+        };
+        let trunk_ref = format!("origin/{}", repo_config.trunk);
         let Ok(trunk_head) = git::rev_parse(&repo.base, &trunk_ref) else {
             continue;
         };
@@ -330,7 +341,7 @@ pub fn refresh(root: &Path, repo_filter: Option<&str>) -> Result<()> {
             Ok(true)
         })?;
         if claimed_it {
-            proc::spawn_detached(root, &["__spare", "refresh", &id.to_string()])?;
+            proc::spawn_detached(root, config_path, &["__spare", "refresh", &id.to_string()])?;
         }
     }
     Ok(())
@@ -341,7 +352,7 @@ pub fn refresh(root: &Path, repo_filter: Option<&str>) -> Result<()> {
 /// invariant a claim relies on — a `ready` spare has finished every step at
 /// its current HEAD — so nothing may move a spare's HEAD without redoing
 /// its steps in the same operation.
-pub fn run_refresh(root: &Path, id: Uuid) -> Result<()> {
+pub fn run_refresh(root: &Path, config_path: &Path, id: Uuid) -> Result<()> {
     let store = store::load(root)?;
     let tree = store
         .trees
@@ -354,6 +365,8 @@ pub fn run_refresh(root: &Path, id: Uuid) -> Result<()> {
         .get(&tree.repo)
         .with_context(|| format!("spare {id} references unknown repo '{}'", tree.repo))?
         .clone();
+    let config = config::load(config_path)?;
+    let repo_config = config::repo(&config, &tree.repo)?.clone();
 
     store::with_store_lock(root, |s| {
         if let Some(t) = s.trees.iter_mut().find(|t| t.id == id) {
@@ -363,7 +376,7 @@ pub fn run_refresh(root: &Path, id: Uuid) -> Result<()> {
         Ok(())
     })?;
 
-    let trunk_ref = format!("origin/{}", repo.trunk);
+    let trunk_ref = format!("origin/{}", repo_config.trunk);
     if let Err(e) = git::checkout_detached(&tree.path, &trunk_ref) {
         return Err(tree::mark_failed::<()>(
             root,
@@ -376,7 +389,7 @@ pub fn run_refresh(root: &Path, id: Uuid) -> Result<()> {
     }
 
     let repo_dir = root.join(&tree.repo);
-    if let Err(e) = tree::wire_fresh_checkout(&repo_dir, &repo, &tree.path) {
+    if let Err(e) = tree::wire_fresh_checkout(&repo_dir, &repo.base, &tree.path) {
         return Err(tree::mark_failed::<()>(
             root,
             id,
@@ -387,13 +400,14 @@ pub fn run_refresh(root: &Path, id: Uuid) -> Result<()> {
         .unwrap_err());
     }
 
-    provision::run_steps(root, id, &tree.path, &repo, &None)
+    provision::run_steps(root, id, &tree.path, &tree.repo, &config, &None)
 }
 
 /// Removes every one of `repo_name`'s spares — ordinarily just one, but
-/// nothing here assumes that — and sets `spares` to 0 so `top_up` doesn't
-/// immediately rebuild one.
-pub fn drop_spare(root: &Path, repo_name: &str) -> Result<()> {
+/// nothing here assumes that. Also sets `spares` to 0 in config, so a
+/// `wt sync` tick five minutes later can't quietly rebuild the one this
+/// just removed.
+pub fn drop_spare(root: &Path, config_path: &Path, repo_name: &str) -> Result<()> {
     let store = store::load(root)?;
     if !store.repos.contains_key(repo_name) {
         anyhow::bail!(
@@ -414,11 +428,6 @@ pub fn drop_spare(root: &Path, repo_name: &str) -> Result<()> {
     for id in spare_ids {
         remove_spare(root, id)?;
     }
-    store::with_store_lock(root, |s| {
-        if let Some(r) = s.repos.get_mut(repo_name) {
-            r.spares = 0;
-        }
-        Ok(())
-    })?;
+    config::set_repo_spares(config_path, repo_name, 0)?;
     Ok(())
 }

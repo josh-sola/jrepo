@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
+use crate::config;
 use crate::git;
 use crate::restack::{self, Step};
 use crate::stack::{self, Stacks};
@@ -15,8 +16,14 @@ use crate::store::{self, Repo, Store};
 /// same walk `wt restack` runs, just over every such stack instead of one.
 /// Never destructive: a repo that fails to sync is reported and skipped
 /// rather than aborting the rest.
-pub fn sync(root: &Path, repo_filter: Option<String>, stack: bool) -> Result<()> {
+pub fn sync(
+    root: &Path,
+    config_path: &Path,
+    repo_filter: Option<String>,
+    stack: bool,
+) -> Result<()> {
     let store = store::load(root)?;
+    let config = config::load(config_path)?;
     let repos: Vec<(String, Repo)> = match repo_filter {
         Some(name) => {
             let repo = store
@@ -40,7 +47,15 @@ pub fn sync(root: &Path, repo_filter: Option<String>, stack: bool) -> Result<()>
 
     let mut had_failure = false;
     for (name, repo) in &repos {
-        match sync_one(root, name, repo) {
+        let repo_config = match config::repo(&config, name) {
+            Ok(c) => c,
+            Err(e) => {
+                had_failure = true;
+                println!("{name}: {e:#}");
+                continue;
+            }
+        };
+        match sync_one(root, name, repo, repo_config) {
             Ok(line) => {
                 println!("{name}: {line}");
                 if stack && let Err(e) = sync_stack(root, name, repo) {
@@ -51,10 +66,10 @@ pub fn sync(root: &Path, repo_filter: Option<String>, stack: bool) -> Result<()>
                 // runs on a 5-minute timer and must not block on a
                 // `pnpm install`, and one repo's spare trouble is no
                 // reason to fail the rest of the sync.
-                if let Err(e) = crate::spare::refresh(root, Some(name)) {
+                if let Err(e) = crate::spare::refresh(root, config_path, Some(name)) {
                     println!("{name}: hot spare refresh failed: {e:#}");
                 }
-                if let Err(e) = crate::spare::top_up(root, Some(name)) {
+                if let Err(e) = crate::spare::top_up(root, config_path, Some(name)) {
                     println!("{name}: hot spare top-up failed: {e:#}");
                 }
             }
@@ -144,8 +159,13 @@ fn distinct_dirs(steps: &[Step]) -> usize {
     steps.iter().map(|s| &s.dir).collect::<HashSet<_>>().len()
 }
 
-fn sync_one(root: &Path, name: &str, repo: &Repo) -> Result<String> {
-    let trunk_ref = format!("origin/{}", repo.trunk);
+fn sync_one(
+    root: &Path,
+    name: &str,
+    repo: &Repo,
+    repo_config: &config::RepoConfig,
+) -> Result<String> {
+    let trunk_ref = format!("origin/{}", repo_config.trunk);
     let before = git::rev_parse(&repo.base, &trunk_ref).ok();
 
     git::fetch_prune(&repo.base)?;
@@ -174,10 +194,10 @@ fn sync_one(root: &Path, name: &str, repo: &Repo) -> Result<String> {
     }
 
     let branch = git::current_branch(&repo.base)?;
-    if branch != repo.trunk {
+    if branch != repo_config.trunk {
         return Ok(format!(
             "{fetch_desc}; on branch '{branch}', not '{}' — skipping fast-forward",
-            repo.trunk
+            repo_config.trunk
         ));
     }
 
@@ -189,7 +209,7 @@ fn sync_one(root: &Path, name: &str, repo: &Repo) -> Result<String> {
     git::merge_ff_only(&repo.base, &trunk_ref)?;
     Ok(format!(
         "{fetch_desc}; fast-forwarded {} to {}",
-        repo.trunk,
+        repo_config.trunk,
         &after[..after.len().min(7)]
     ))
 }
@@ -303,14 +323,7 @@ mod tests {
 
         let repo = Repo {
             base: base.clone(),
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
             last_fetch: None,
-            shared: Vec::new(),
-            copy: Vec::new(),
-            env: Default::default(),
-            steps: Vec::new(),
-            spares: 1,
         };
 
         let mut store = Store::default();

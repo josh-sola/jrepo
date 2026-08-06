@@ -29,7 +29,8 @@ parent shell's directory: `wt go`/`wt cd` resolve a selector to a path and
 
 ```
 ~/repos/wt/
-├─ data.json                  registry (single file, atomic writes)
+├─ state.json                 machine state: repo base paths, every tree
+│                             (single file, atomic writes)
 └─ <repo>/
    ├─ base/                   canonical clone; shared paths inside it are
    │                          symlinks into shared/, same as in a tree
@@ -40,11 +41,22 @@ parent shell's directory: `wt go`/`wt cd` resolve a selector to a path and
    └─ cache/cargo-target/     shared CARGO_TARGET_DIR
 ```
 
+Portable, hand-editable config — trunk, branch prefix, spare count,
+per-repo env, provisioning steps — lives separately at
+`~/.config/wt/config.kdl` (override with `$WT_CONFIG`). `wt init` appends a
+`repo` block there once per repo and never rewrites one you've edited by
+hand; re-running it is safe to do as often as you like.
+
 ## Commands
 
 ```sh
-wt init <name> --adopt <path> [--branch-prefix <prefix>]
-    # register an existing clone as a repo's base
+wt init <name> --adopt <path> [--branch-prefix <prefix>] [--redetect]
+    # register an existing clone as a repo's base, appending a config block
+    # for it. A repo that already has a block is left alone (a passed
+    # --branch-prefix is ignored, with a warning) — edit config.kdl by hand
+    # to change trunk/branch-prefix/spares/env once it exists.
+    # --redetect re-runs step detection against an existing block, replacing
+    # just its steps; everything else in the block is untouched.
 
 wt new <repo> --name "<short summary>" [--branch <b>] [--onto <sel>]
                                        [--profile node,python] [--claude [-- <claude args>]]
@@ -143,8 +155,8 @@ wt spare refresh [--repo <r>]
     # force a refresh now, instead of waiting for the next `wt sync` tick
 
 wt spare drop [--repo <r>]
-    # remove a repo's spare and set its `spares` to 0 — otherwise the next
-    # background top-up just rebuilds it
+    # remove a repo's spare and set its `spares` to 0 in config.kdl —
+    # otherwise the next background top-up just rebuilds it
 
 wt restack [selector] [--dry-run]
     # restack a Graphite stack across every worktree that holds one of its
@@ -190,8 +202,11 @@ A selector is resolved in one order everywhere: exact uuid, uuid prefix,
 exact name, unique case-insensitive name substring, then branch name.
 Ambiguity is an error listing the candidates — never a guess.
 
-Provisioning steps and the shared/copy path lists are per-repo data in
-`data.json`, seeded from a repo's `.worktreeinclude` if it has one.
+Provisioning steps are per-repo data in `config.kdl`, detected by `wt init`
+and refreshed on demand with `--redetect`. The shared/copy path lists aren't
+stored anywhere — they're read from a repo's `.worktreeinclude` fresh each
+time a tree is created, so an edit to that file takes effect on the next
+`wt new` with no re-init needed.
 
 ## Hot spares
 
@@ -216,7 +231,8 @@ tree.
 
 The cost is one extra checkout and one extra set of installed dependencies
 per repo, idling on disk, plus a background install that can fire whenever
-trunk moves. Set `spares: 0` on a repo, or run `wt spare drop`, to opt out.
+trunk moves. Set `spares 0` on a repo in `config.kdl`, or run
+`wt spare drop`, to opt out.
 
 ## Integrations
 

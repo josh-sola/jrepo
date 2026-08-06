@@ -271,14 +271,7 @@ mod tests {
     fn sample_repo(base: PathBuf) -> Repo {
         Repo {
             base,
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
             last_fetch: None,
-            shared: Vec::new(),
-            copy: Vec::new(),
-            env: Default::default(),
-            steps: Vec::new(),
-            spares: 1,
         }
     }
 

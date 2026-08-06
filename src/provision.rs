@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -6,23 +7,26 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
-use crate::store::{self, Repo, TreeState};
+use crate::config;
+use crate::store::{self, TreeState};
 
 /// Runs as `wt __provision <tree-id>`, re-exec'd and detached by `wt new`
 /// so the parent can return the tree path immediately. All state lives in
-/// `data.json`; `wt status`/`wt wait` read it back, no IPC needed.
-pub fn run(root: &Path, tree_id: Uuid, profiles: Option<Vec<String>>) -> Result<()> {
+/// `state.json`; `wt status`/`wt wait` read it back, no IPC needed.
+pub fn run(
+    root: &Path,
+    config_path: &Path,
+    tree_id: Uuid,
+    profiles: Option<Vec<String>>,
+) -> Result<()> {
     let store = store::load(root)?;
     let tree = store
         .trees
         .iter()
         .find(|t| t.id == tree_id)
         .with_context(|| format!("tree {tree_id} not found in registry"))?;
-    let repo = store
-        .repos
-        .get(&tree.repo)
-        .with_context(|| format!("tree {tree_id} references unknown repo '{}'", tree.repo))?;
-    run_steps(root, tree_id, &tree.path, repo, &profiles)
+    let config = config::load(config_path)?;
+    run_steps(root, tree_id, &tree.path, &tree.repo, &config, &profiles)
 }
 
 /// Opens the tree's `.wt-provision.log` here rather than inheriting stdio
@@ -32,14 +36,17 @@ pub(crate) fn run_steps(
     root: &Path,
     tree_id: Uuid,
     tree_path: &Path,
-    repo: &Repo,
+    repo_name: &str,
+    config: &config::Config,
     profiles: &Option<Vec<String>>,
 ) -> Result<()> {
+    let repo_config = config::repo(config, repo_name)?;
+
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
     let mut log =
         File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
 
-    let steps: Vec<_> = repo
+    let steps: Vec<_> = repo_config
         .steps
         .iter()
         .filter(|s| match profiles {
@@ -49,10 +56,21 @@ pub(crate) fn run_steps(
         .cloned()
         .collect();
     let total = steps.len() as u32;
-    // The repo's own entries win, so a repo can still override anything the
-    // global map sets.
-    let mut env = store::load(root).map(|s| s.env).unwrap_or_default();
-    env.extend(repo.env.clone());
+    // Lowest priority first: a machine-computed default, then the config's
+    // global env, then the repo's own — each later layer can override
+    // anything an earlier one set.
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    env.insert("PATH".to_string(), crate::repo::steps_path());
+    env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        root.join(repo_name)
+            .join("cache")
+            .join("cargo-target")
+            .to_string_lossy()
+            .to_string(),
+    );
+    env.extend(config.env.clone());
+    env.extend(repo_config.env.clone());
 
     for (i, step) in steps.iter().enumerate() {
         let index = i as u32 + 1;

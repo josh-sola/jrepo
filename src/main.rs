@@ -1,9 +1,11 @@
 mod claude;
 mod color;
+mod config;
 mod context;
 mod env_refresh;
 mod git;
 mod graphite;
+mod migrate;
 mod pick;
 mod planter;
 mod proc;
@@ -41,8 +43,14 @@ enum Command {
         #[arg(long)]
         adopt: PathBuf,
         /// Prefix applied to branch names `wt new` generates for this repo.
-        #[arg(long, default_value = "josh/")]
-        branch_prefix: String,
+        /// Defaults to "josh/" for a fresh repo; ignored (with a warning)
+        /// when the repo already has a config block.
+        #[arg(long)]
+        branch_prefix: Option<String>,
+        /// Regenerate just the detected provisioning steps of an existing
+        /// config block.
+        #[arg(long)]
+        redetect: bool,
     },
     /// Create a new worktree and provision it.
     New {
@@ -274,7 +282,10 @@ const PROVISION_WAIT_SECS: u64 = 600;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = store::root_dir();
-    match run(&root, cli.command) {
+    let config_path = config::config_path();
+    let result = migrate::run_if_needed(&root, &config_path)
+        .and_then(|()| run(&root, &config_path, cli.command));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -283,18 +294,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(root: &Path, command: Command) -> Result<()> {
+fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
     match command {
         Command::Init {
             name,
             adopt,
             branch_prefix,
+            redetect,
         } => repo::init(
             root,
+            config_path,
             repo::InitOptions {
                 name,
                 adopt_path: adopt,
                 branch_prefix,
+                redetect,
             },
         ),
         Command::New {
@@ -308,6 +322,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
         } => {
             let path = tree::new_tree(
                 root,
+                config_path,
                 tree::NewOptions {
                     repo,
                     name,
@@ -328,6 +343,7 @@ fn run(root: &Path, command: Command) -> Result<()> {
         } => {
             let path = tree::adopt(
                 root,
+                config_path,
                 tree::AdoptOptions {
                     repo,
                     name,
@@ -344,7 +360,18 @@ fn run(root: &Path, command: Command) -> Result<()> {
             onto,
             profile,
             args,
-        } => cmd_launch(root, worktree, repo, branch, onto, profile, &args),
+        } => cmd_launch(
+            root,
+            config_path,
+            LaunchArgs {
+                worktree,
+                repo,
+                branch,
+                onto,
+                profile,
+            },
+            &args,
+        ),
         Command::Ls { repo, all, json } => cmd_ls(root, repo, all, json),
         Command::Path { selector } => cmd_path(root, &selector),
         Command::Name { path } => cmd_name(root, path),
@@ -353,16 +380,25 @@ fn run(root: &Path, command: Command) -> Result<()> {
             force,
             delete_branch,
             reparent_children,
-        } => tree::rm_tree(root, &selector, force, delete_branch, reparent_children),
+        } => tree::rm_tree(
+            root,
+            config_path,
+            &selector,
+            force,
+            delete_branch,
+            reparent_children,
+        ),
         Command::Status {
             selector,
             all,
             json,
         } => cmd_status(root, selector, all, json),
         Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
-        Command::Gc { repo, dry_run } => tree::gc(root, tree::GcOptions { repo, dry_run }),
+        Command::Gc { repo, dry_run } => {
+            tree::gc(root, config_path, tree::GcOptions { repo, dry_run })
+        }
         Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
-        Command::Sync { repo, stack } => sync::sync(root, repo, stack),
+        Command::Sync { repo, stack } => sync::sync(root, config_path, repo, stack),
         Command::Restack { selector, dry_run } => cmd_restack(root, selector, dry_run),
         Command::Stack {
             selector,
@@ -374,22 +410,26 @@ fn run(root: &Path, command: Command) -> Result<()> {
             EnvCommand::Refresh { selector } => env_refresh::refresh(root, &selector),
         },
         Command::Spare { action, repo, json } => match action {
-            None => cmd_spare_status(root, repo, json),
-            Some(SpareCommand::Refresh { repo }) => cmd_spare_refresh(root, repo),
-            Some(SpareCommand::Drop { repo }) => cmd_spare_drop(root, repo),
+            None => cmd_spare_status(root, config_path, repo, json),
+            Some(SpareCommand::Refresh { repo }) => cmd_spare_refresh(root, config_path, repo),
+            Some(SpareCommand::Drop { repo }) => cmd_spare_drop(root, config_path, repo),
         },
         Command::Claude { target, args } => claude::exec_claude(root, target, &args),
-        Command::Provision { tree_id, profile } => provision::run(root, tree_id, profile),
+        Command::Provision { tree_id, profile } => {
+            provision::run(root, config_path, tree_id, profile)
+        }
         Command::SpareInternal { action } => match action {
-            SpareInternalCommand::New { repo } => spare::provision_spare(root, &repo),
-            SpareInternalCommand::Refresh { tree_id } => spare::run_refresh(root, tree_id),
+            SpareInternalCommand::New { repo } => spare::provision_spare(root, config_path, &repo),
+            SpareInternalCommand::Refresh { tree_id } => {
+                spare::run_refresh(root, config_path, tree_id)
+            }
         },
         Command::SessionContext { path } => context::session_context(root, path),
         Command::TabIndex => {
             println!("{}", tab::index()?);
             Ok(())
         }
-        Command::LaunchPreview { selector } => cmd_launch_preview(root, &selector),
+        Command::LaunchPreview { selector } => cmd_launch_preview(root, config_path, &selector),
     }
 }
 
@@ -550,15 +590,22 @@ fn wait_for_tree(root: &Path, id: Uuid) -> Result<store::Tree> {
         .with_context(|| format!("tree {id} is no longer registered"))
 }
 
-fn cmd_launch(
-    root: &Path,
+struct LaunchArgs {
     worktree: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
     onto: Option<String>,
     profile: Option<Vec<String>>,
-    args: &[String],
-) -> Result<()> {
+}
+
+fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[String]) -> Result<()> {
+    let LaunchArgs {
+        worktree,
+        repo,
+        branch,
+        onto,
+        profile,
+    } = launch;
     let store = store::load(root)?;
     let cwd = std::env::current_dir().context("reading current directory")?;
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
@@ -606,6 +653,7 @@ fn cmd_launch(
         LaunchPlan::New { repo, name } => {
             let path = tree::new_tree(
                 root,
+                config_path,
                 tree::NewOptions {
                     repo: repo.clone(),
                     name,
@@ -1186,9 +1234,10 @@ pub(crate) fn status_state_str(t: &store::Tree) -> String {
 /// Each git-backed section degrades to `(unavailable)` on its own instead
 /// of failing the whole preview: a tree still provisioning may have no
 /// usable git dir yet.
-fn cmd_launch_preview(root: &Path, selector: &str) -> Result<()> {
+fn cmd_launch_preview(root: &Path, config_path: &Path, selector: &str) -> Result<()> {
     let store = store::load(root)?;
     let t = store::resolve(&store.trees, selector)?;
+    let config = config::load(config_path)?;
 
     println!("\x1b[1m{}\x1b[0m\x1b[2m  ·  {}\x1b[0m", t.name, t.repo);
     println!("\x1b[2m{}\x1b[0m", t.branch);
@@ -1212,7 +1261,7 @@ fn cmd_launch_preview(root: &Path, selector: &str) -> Result<()> {
     }
     println!();
 
-    match store.repos.get(&t.repo).map(|r| r.trunk.clone()) {
+    match config::repo(&config, &t.repo).ok().map(|r| r.trunk.clone()) {
         Some(trunk) => {
             println!("commits beyond origin/{trunk}");
             match git::log_oneline(&t.path, &format!("origin/{trunk}..HEAD"), 10) {
@@ -1391,8 +1440,14 @@ fn wait_for_ready(root: &Path, id: Uuid, timeout_secs: u64) -> Result<PathBuf> {
     }
 }
 
-fn cmd_spare_status(root: &Path, repo_filter: Option<String>, json: bool) -> Result<()> {
+fn cmd_spare_status(
+    root: &Path,
+    config_path: &Path,
+    repo_filter: Option<String>,
+    json: bool,
+) -> Result<()> {
     let store = store::load(root)?;
+    let config = config::load(config_path)?;
     let mut rows = Vec::new();
     for t in &store.trees {
         if !t.spare {
@@ -1403,11 +1458,11 @@ fn cmd_spare_status(root: &Path, repo_filter: Option<String>, json: bool) -> Res
         {
             continue;
         }
-        let repo = store.repos.get(&t.repo);
+        let repo_config = config::repo(&config, &t.repo).ok();
         let head = git::rev_parse(&t.path, "HEAD").ok();
-        let behind = match (repo, &head) {
-            (Some(repo), Some(_)) => {
-                git::rev_list_count(&t.path, &format!("HEAD..origin/{}", repo.trunk)).ok()
+        let behind = match (repo_config, &head) {
+            (Some(repo_config), Some(_)) => {
+                git::rev_list_count(&t.path, &format!("HEAD..origin/{}", repo_config.trunk)).ok()
             }
             _ => None,
         };
@@ -1464,8 +1519,8 @@ fn cmd_spare_status(root: &Path, repo_filter: Option<String>, json: bool) -> Res
     Ok(())
 }
 
-fn cmd_spare_refresh(root: &Path, repo: Option<String>) -> Result<()> {
-    spare::refresh(root, repo.as_deref())?;
+fn cmd_spare_refresh(root: &Path, config_path: &Path, repo: Option<String>) -> Result<()> {
+    spare::refresh(root, config_path, repo.as_deref())?;
     println!("refreshing");
     Ok(())
 }
@@ -1473,7 +1528,7 @@ fn cmd_spare_refresh(root: &Path, repo: Option<String>) -> Result<()> {
 /// Resolves `--repo`, else the current directory's repo, and errors
 /// naming the registered repos rather than falling back to "every repo" —
 /// a bare `wt spare drop` must never silently turn spares off everywhere.
-fn cmd_spare_drop(root: &Path, repo: Option<String>) -> Result<()> {
+fn cmd_spare_drop(root: &Path, config_path: &Path, repo: Option<String>) -> Result<()> {
     let repo_name = match repo {
         Some(r) => r,
         None => {
@@ -1491,7 +1546,7 @@ fn cmd_spare_drop(root: &Path, repo: Option<String>) -> Result<()> {
                 })?
         }
     };
-    spare::drop_spare(root, &repo_name)?;
+    spare::drop_spare(root, config_path, &repo_name)?;
     println!("dropped {repo_name}'s hot spare; spares are now off for it");
     Ok(())
 }
@@ -1552,14 +1607,7 @@ mod tests {
     fn sample_repo(base: &str) -> store::Repo {
         store::Repo {
             base: PathBuf::from(base),
-            trunk: "main".into(),
-            branch_prefix: "josh/".into(),
             last_fetch: None,
-            shared: Vec::new(),
-            copy: Vec::new(),
-            env: std::collections::BTreeMap::new(),
-            steps: Vec::new(),
-            spares: 1,
         }
     }
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -6,8 +7,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::config;
 use crate::git;
-use crate::store::{self, Repo, Step};
+use crate::store::{self, Repo};
 
 const PYTHON_PROJECTS: &[&str] = &[
     "python/datahub",
@@ -30,10 +32,18 @@ pub(crate) const PROVISION_LOG_NAME: &str = ".wt-provision.log";
 pub struct InitOptions {
     pub name: String,
     pub adopt_path: PathBuf,
-    pub branch_prefix: String,
+    /// `None` means the flag was not passed, distinct from an explicit
+    /// value — that distinction is what lets a re-init warn when
+    /// `--branch-prefix` is ignored rather than silently dropping it.
+    pub branch_prefix: Option<String>,
+    /// Regenerates just the detected provisioning steps of an existing
+    /// config block instead of appending a new one.
+    pub redetect: bool,
 }
 
-pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
+const DEFAULT_BRANCH_PREFIX: &str = "josh/";
+
+pub fn init(root: &Path, config_path: &Path, opts: InitOptions) -> Result<()> {
     let base = fs::canonicalize(&opts.adopt_path)
         .with_context(|| format!("resolving {}", opts.adopt_path.display()))?;
 
@@ -52,7 +62,7 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
 
     link_base(&repo_dir.join("base"), &base)?;
 
-    let (shared, copy) = parse_worktreeinclude(&base)?;
+    let (shared, _copy) = parse_worktreeinclude(&base)?;
 
     let shared_dir = repo_dir.join("shared");
     let backup_dir = repo_dir.join("backup");
@@ -63,46 +73,52 @@ pub fn init(root: &Path, opts: InitOptions) -> Result<()> {
     exclude_shared_paths(&base, &shared)?;
     install_base_commit_block(&repo_dir, &base, &opts.name)?;
 
-    let steps = detect_steps(&base);
-
-    let mut env = std::collections::BTreeMap::new();
-    env.insert(
-        "CARGO_TARGET_DIR".to_string(),
-        repo_dir
-            .join("cache")
-            .join("cargo-target")
-            .to_string_lossy()
-            .to_string(),
-    );
-
     store::with_store_lock(root, |store| {
-        store
-            .env
-            .entry("PATH".to_string())
-            .or_insert_with(steps_path);
         let last_fetch = store.repos.get(&opts.name).and_then(|r| r.last_fetch);
-        // Re-running `wt init` must not switch spares back on for a repo
-        // where they were deliberately turned off.
-        let spares = store
-            .repos
-            .get(&opts.name)
-            .map_or_else(store::default_spares, |r| r.spares);
         store.repos.insert(
             opts.name.clone(),
             Repo {
                 base: base.clone(),
-                trunk,
-                branch_prefix: opts.branch_prefix.clone(),
                 last_fetch,
-                shared,
-                copy,
-                env,
-                steps,
-                spares,
             },
         );
         Ok(())
     })?;
+
+    let steps = detect_steps(&base);
+    let existing = config::load(config_path)?.repos.contains_key(&opts.name);
+
+    if opts.redetect && existing {
+        config::replace_repo_steps(config_path, &opts.name, &steps)?;
+        println!(
+            "redetected steps for '{}' in {}",
+            opts.name,
+            config_path.display()
+        );
+        return Ok(());
+    }
+
+    let repo_config = config::RepoConfig {
+        trunk,
+        branch_prefix: opts
+            .branch_prefix
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BRANCH_PREFIX.to_string()),
+        spares: config::default_spares(),
+        env: BTreeMap::new(),
+        steps,
+    };
+    let wrote = config::append_repo(config_path, &opts.name, &repo_config)?;
+    if !wrote {
+        println!(
+            "'{}' already has a config block in {}; left it alone",
+            opts.name,
+            config_path.display()
+        );
+        if opts.branch_prefix.is_some() {
+            println!("--branch-prefix was ignored because the block already exists");
+        }
+    }
 
     Ok(())
 }
@@ -150,7 +166,7 @@ const GLOB_CHARS: &[char] = &['*', '?', '['];
 /// a version manager installs into a versioned directory, so a captured
 /// `PATH` stops resolving the moment a toolchain is upgraded. A shim
 /// directory keeps pointing at whatever version is current.
-fn steps_path() -> String {
+pub(crate) fn steps_path() -> String {
     let home = env::var("HOME").unwrap_or_default();
     let candidates = [
         format!("{home}/.local/share/mise/shims"),
@@ -166,7 +182,7 @@ fn steps_path() -> String {
     dirs.join(":")
 }
 
-fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
+pub(crate) fn parse_worktreeinclude(base: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let path = base.join(".worktreeinclude");
     let contents = match fs::read_to_string(&path) {
         Ok(c) => c,
@@ -385,11 +401,11 @@ fn write_guard_hook(hooks_dir: &Path, name: &str, repo_name: &str) -> Result<()>
 /// step here would run it unconditionally against every chart on every
 /// `wt new`, so helm is deliberately left with an empty step list rather
 /// than scanned for `Chart.yaml`.
-fn detect_steps(base: &Path) -> Vec<Step> {
+fn detect_steps(base: &Path) -> Vec<config::Step> {
     let mut steps = Vec::new();
 
     if base.join(".gitmodules").exists() {
-        steps.push(Step {
+        steps.push(config::Step {
             label: "submodules".to_string(),
             profile: "node".to_string(),
             cwd: ".".to_string(),
@@ -404,7 +420,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
     }
 
     if base.join("pnpm-lock.yaml").exists() {
-        steps.push(Step {
+        steps.push(config::Step {
             label: "pnpm-install".to_string(),
             profile: "node".to_string(),
             cwd: ".".to_string(),
@@ -414,7 +430,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
                 "--frozen-lockfile".to_string(),
             ],
         });
-        steps.push(Step {
+        steps.push(config::Step {
             label: "pnpm-build-packages".to_string(),
             profile: "node".to_string(),
             cwd: ".".to_string(),
@@ -424,7 +440,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
 
     for project in NODE_PROJECTS {
         if base.join(project).join("package-lock.json").exists() {
-            steps.push(Step {
+            steps.push(config::Step {
                 label: format!("npm-ci-{}", project.replace('/', "-")),
                 profile: "node".to_string(),
                 cwd: project.to_string(),
@@ -434,7 +450,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
     }
 
     if base.join("python").join("pyproject.toml").exists() {
-        steps.push(Step {
+        steps.push(config::Step {
             label: "uv-sync-python".to_string(),
             profile: "python".to_string(),
             cwd: "python".to_string(),
@@ -447,7 +463,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
         for project in PYTHON_PROJECTS {
             if base.join(project).exists() {
                 let label = format!("uv-sync-{}", project.rsplit('/').next().unwrap());
-                steps.push(Step {
+                steps.push(config::Step {
                     label,
                     profile: "python".to_string(),
                     cwd: project.to_string(),
@@ -467,7 +483,7 @@ fn detect_steps(base: &Path) -> Vec<Step> {
 /// is the case this exists for. Each direct subdirectory that owns both a
 /// `pyproject.toml` and a `uv.lock` gets its own `uv sync` step; sorted so
 /// the step order doesn't depend on directory-read order.
-fn detect_standalone_uv_projects(base: &Path) -> Vec<Step> {
+fn detect_standalone_uv_projects(base: &Path) -> Vec<config::Step> {
     let Ok(entries) = fs::read_dir(base) else {
         return Vec::new();
     };
@@ -484,7 +500,7 @@ fn detect_standalone_uv_projects(base: &Path) -> Vec<Step> {
 
     names
         .into_iter()
-        .map(|name| Step {
+        .map(|name| config::Step {
             label: format!("uv-sync-{name}"),
             profile: "python".to_string(),
             cwd: name,
@@ -564,7 +580,7 @@ mod tests {
         .unwrap();
 
         let steps = detect_steps(&base);
-        let matches: Vec<&Step> = steps.iter().filter(|s| s.cwd == "planhub/web").collect();
+        let matches: Vec<&config::Step> = steps.iter().filter(|s| s.cwd == "planhub/web").collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].label, "npm-ci-planhub-web");
         assert_eq!(matches[0].profile, "node");

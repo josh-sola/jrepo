@@ -80,9 +80,9 @@ pub fn stop_provisioning_child(pid: Option<u32>, tree_id: Uuid) {
 /// Re-execs the current binary as `wt <args...>`, detached from the caller:
 /// its own process group so a Ctrl-C at the spawning terminal doesn't also
 /// signal it, and null stdio so it can outlive the caller with nothing to
-/// write into or read from. `WT_ROOT` is carried across so the child reads
-/// the same registry.
-pub fn spawn_detached(root: &Path, args: &[&str]) -> Result<u32> {
+/// write into or read from. `WT_ROOT` and `WT_CONFIG` are carried across so
+/// the child reads the same registry and config file.
+pub fn spawn_detached(root: &Path, config_path: &Path, args: &[&str]) -> Result<u32> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     // Under a unit-test harness `current_exe` is the test binary, not the
     // CLI, and it reads these arguments as test-name filters — so a
@@ -97,6 +97,7 @@ pub fn spawn_detached(root: &Path, args: &[&str]) -> Result<u32> {
     let child = Command::new(exe)
         .args(args)
         .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -121,6 +122,7 @@ mod tests {
     fn spawn_detached_refuses_anything_but_the_real_binary() {
         let err = spawn_detached(
             Path::new("/tmp"),
+            Path::new("/tmp/config.kdl"),
             &["__provision", "00000000-0000-0000-0000-000000000000"],
         )
         .expect_err("spawning from a test harness must fail");

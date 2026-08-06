@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 use crate::git;
 
+pub const STORE_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Store {
     pub version: u32,
@@ -19,24 +21,14 @@ pub struct Store {
     pub repos: BTreeMap<String, Repo>,
     #[serde(default)]
     pub trees: Vec<Tree>,
-    /// Environment every repo's provisioning steps run under, before that
-    /// repo's own `env` is layered on top.
-    ///
-    /// This is where `PATH` belongs. Steps are spawned from `wt sync` under
-    /// launchd as often as from a terminal, and launchd's default `PATH`
-    /// reaches none of the version-manager shims that `pnpm`, `npm`, and
-    /// `uv` actually live behind.
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
 }
 
 impl Default for Store {
     fn default() -> Self {
         Store {
-            version: 1,
+            version: STORE_VERSION,
             repos: BTreeMap::new(),
             trees: Vec::new(),
-            env: BTreeMap::new(),
         }
     }
 }
@@ -44,36 +36,8 @@ impl Default for Store {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub base: PathBuf,
-    pub trunk: String,
-    #[serde(rename = "branchPrefix", default)]
-    pub branch_prefix: String,
     #[serde(rename = "lastFetch", default, skip_serializing_if = "Option::is_none")]
     pub last_fetch: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub shared: Vec<String>,
-    #[serde(default)]
-    pub copy: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub steps: Vec<Step>,
-    /// How many pre-provisioned hot spares to keep for this repo. `0` turns
-    /// them off, for when an idle checkout plus its installed dependencies
-    /// costs more disk than a fast `wt new` is worth.
-    #[serde(default = "default_spares")]
-    pub spares: u8,
-}
-
-pub fn default_spares() -> u8 {
-    1
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Step {
-    pub label: String,
-    pub profile: String,
-    pub cwd: String,
-    pub cmd: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,21 +114,32 @@ pub fn root_dir() -> PathBuf {
     PathBuf::from(home).join("repos").join("wt")
 }
 
-pub fn data_path(root: &Path) -> PathBuf {
-    root.join("data.json")
+pub fn state_path(root: &Path) -> PathBuf {
+    root.join("state.json")
 }
 
+/// Named apart from `state.json` on purpose: renaming it too would let an
+/// old binary and a new one hold different locks during the upgrade.
 fn lock_path(root: &Path) -> PathBuf {
     root.join(".data.lock")
 }
 
-/// A missing `data.json` is an empty store, not an error — a fresh
+/// A missing `state.json` is an empty store, not an error — a fresh
 /// `$WT_ROOT` is the normal starting state.
 pub fn load(root: &Path) -> Result<Store> {
-    let path = data_path(root);
+    let path = state_path(root);
     match fs::read(&path) {
         Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+            let store: Store = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            if store.version != STORE_VERSION {
+                bail!(
+                    "{} has version {}, but wt supports version {STORE_VERSION}",
+                    path.display(),
+                    store.version
+                );
+            }
+            Ok(store)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Store::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -173,23 +148,23 @@ pub fn load(root: &Path) -> Result<Store> {
 
 fn save(root: &Path, store: &Store) -> Result<()> {
     fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
-    let tmp = root.join("data.json.tmp");
+    let tmp = root.join("state.json.tmp");
     let bytes = serde_json::to_vec_pretty(store)?;
     let mut file = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     file.write_all(&bytes)
         .with_context(|| format!("writing {}", tmp.display()))?;
     // Without this, `rename` can land before the bytes do, so a crash
-    // between the two can leave `data.json` empty or truncated.
+    // between the two can leave `state.json` empty or truncated.
     file.sync_all()
         .with_context(|| format!("syncing {}", tmp.display()))?;
     drop(file);
-    fs::rename(&tmp, data_path(root))
+    fs::rename(&tmp, state_path(root))
         .with_context(|| format!("renaming {} into place", tmp.display()))?;
     Ok(())
 }
 
 /// Concurrent `wt new` calls from separate processes serialize on the
-/// lockfile rather than racing on `data.json` directly.
+/// lockfile rather than racing on `state.json` directly.
 pub fn with_store_lock<F, R>(root: &Path, f: F) -> Result<R>
 where
     F: FnOnce(&mut Store) -> Result<R>,
@@ -203,11 +178,11 @@ where
         .with_context(|| format!("opening {}", lock_path(root).display()))?;
     // Qualified so this exercises fs4's flock wrapper rather than the
     // inherent std::fs::File::lock stabilized in later toolchains.
-    FileExt::lock(&lock_file).context("acquiring data.json lock")?;
+    FileExt::lock(&lock_file).context("acquiring state.json lock")?;
     let mut store = load(root)?;
     let result = f(&mut store)?;
     save(root, &store)?;
-    FileExt::unlock(&lock_file).context("releasing data.json lock")?;
+    FileExt::unlock(&lock_file).context("releasing state.json lock")?;
     Ok(result)
 }
 
@@ -325,18 +300,26 @@ mod tests {
             .push(sample_tree("scratch test", "josh/scratch-test"));
         save(&root, &store).unwrap();
 
-        assert!(!root.join("data.json.tmp").exists());
+        assert!(!root.join("state.json.tmp").exists());
         let loaded = load(&root).unwrap();
         assert_eq!(loaded.trees.len(), 1);
         assert_eq!(loaded.trees[0].name, "scratch test");
     }
 
     #[test]
-    fn missing_data_json_is_empty_store() {
+    fn missing_state_json_is_empty_store() {
         let root = temp_root();
         let store = load(&root).unwrap();
         assert_eq!(store.trees.len(), 0);
-        assert_eq!(store.version, 1);
+        assert_eq!(store.version, STORE_VERSION);
+    }
+
+    #[test]
+    fn load_rejects_an_unsupported_version() {
+        let root = temp_root();
+        fs::write(state_path(&root), r#"{"version": 99}"#).unwrap();
+        let err = load(&root).unwrap_err();
+        assert!(err.to_string().contains("version 99"), "message was: {err}");
     }
 
     #[test]
@@ -457,14 +440,7 @@ mod tests {
     fn sample_repo(base: &str) -> Repo {
         Repo {
             base: PathBuf::from(base),
-            trunk: "main".into(),
-            branch_prefix: "josh/".into(),
             last_fetch: None,
-            shared: Vec::new(),
-            copy: Vec::new(),
-            env: BTreeMap::new(),
-            steps: Vec::new(),
-            spares: 1,
         }
     }
 
@@ -507,20 +483,5 @@ mod tests {
             Some("monorepo")
         );
         assert_eq!(repo_for_cwd(&store, Path::new("/somewhere/else")), None);
-    }
-
-    #[test]
-    fn spares_deserializes_to_one_for_a_repo_entry_written_before_it_existed() {
-        let json = r#"{
-            "base": "/r/monorepo/base",
-            "trunk": "main",
-            "branchPrefix": "josh/",
-            "shared": [],
-            "copy": [],
-            "env": {},
-            "steps": []
-        }"#;
-        let repo: Repo = serde_json::from_str(json).unwrap();
-        assert_eq!(repo.spares, 1);
     }
 }

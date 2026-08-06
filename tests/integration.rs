@@ -119,13 +119,13 @@ fn kill_if_ours(pid: u64) {
 /// so the registry is found rather than assumed.
 fn registries_under(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let direct = dir.join("data.json");
+    let direct = dir.join("state.json");
     if direct.exists() {
         found.push(direct);
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let candidate = entry.path().join("data.json");
+            let candidate = entry.path().join("state.json");
             if candidate.exists() {
                 found.push(candidate);
             }
@@ -285,10 +285,22 @@ fn build_fixture_repo(dir: &Path) -> PathBuf {
     work
 }
 
+/// `WT_CONFIG` for a `WT_ROOT` living at `root`, so a test never reaches the
+/// developer's own `~/.config/wt/config.kdl`. Every test's root is a
+/// `wt-root` subdirectory of its own private tmp dir, so the config file is
+/// placed next to it rather than inside it — sharing that tmp dir with
+/// `state.json` without the two ever colliding.
+fn config_path_for(root: &Path) -> PathBuf {
+    root.parent()
+        .expect("root must live under the test's tmp dir")
+        .join("config.kdl")
+}
+
 fn run_wt(root: &Path, args: &[&str]) -> Output {
     Command::new(wt_bin())
         .args(args)
         .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
         // `wt` shells out to git constantly, including from the detached
         // children it spawns, so the same quiescing has to reach those too.
         .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
@@ -326,16 +338,64 @@ fn enable_spares(root: &Path, repo_name: &str, n: u8) {
     set_spares(root, repo_name, n);
 }
 
+/// Rewrites `repo_name`'s `spares` line in `config.kdl`, touching only that
+/// repo's block — a config with more than one `repo` block (`repo-a`,
+/// `repo-b`) makes a whole-file replace wrong.
 fn set_spares(root: &Path, repo_name: &str, n: u8) {
-    let data_path = root.join("data.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
-    value["repos"][repo_name]["spares"] = serde_json::json!(n);
-    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let config_path = config_path_for(root);
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    let body = repo_block_body(&text, repo_name);
+
+    let marker = "spares ";
+    let rel = text[body.clone()]
+        .find(marker)
+        .unwrap_or_else(|| panic!("no 'spares' line in {repo_name}'s config block"));
+    let digits_start = body.start + rel + marker.len();
+    let digits_end = digits_start
+        + text[digits_start..]
+            .bytes()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+
+    let mut new_text = String::with_capacity(text.len());
+    new_text.push_str(&text[..digits_start]);
+    new_text.push_str(&n.to_string());
+    new_text.push_str(&text[digits_end..]);
+    std::fs::write(&config_path, new_text).unwrap();
 }
 
-/// A spare's registered name, so a test can pick it out of `data.json`
-/// without hardcoding the string twice.
+/// The byte range of a `repo "<name>" { ... }` block's body in `text`,
+/// found by tracking brace depth from the block's own opening brace — the
+/// scope every block-local edit in this file works within.
+fn repo_block_body(text: &str, repo_name: &str) -> std::ops::Range<usize> {
+    let needle = format!("repo \"{repo_name}\" {{");
+    let open = text
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no repo block named '{repo_name}' in config"))
+        + needle.len()
+        - 1;
+
+    let bytes = text.as_bytes();
+    let mut depth = 1;
+    let mut i = open + 1;
+    loop {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (open + 1)..i
+}
+
+/// A spare's registered name, so a test can pick it out of `wt ls --all
+/// --json` without hardcoding the string twice.
 const SPARE_NAME: &str = "@spare";
 
 /// The spare rows for `repo`, read through `wt ls --all --json` — `wt spare
@@ -444,6 +504,7 @@ fn spawn_wt(root: &Path, args: &[&str]) -> std::process::Child {
     Command::new(wt_bin())
         .args(args)
         .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
         .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .stdout(std::process::Stdio::piped())
@@ -1456,6 +1517,7 @@ fn status_and_wait_track_background_provisioning_through_a_real_step() {
     let mut cmd = Command::new(wt_bin());
     cmd.args(["new", "myrepo", "--name", "provisioned tree"])
         .env("WT_ROOT", &root)
+        .env("WT_CONFIG", config_path_for(&root))
         .env("GIT_ALLOW_PROTOCOL", "file");
     let out = cmd.output().expect("spawn wt new");
     assert_success(&out, "new");
@@ -1723,6 +1785,7 @@ fn run_wt_claude_without_claude_on_path(root: &Path, args: &[&str]) -> Output {
     Command::new(wt_bin())
         .args(args)
         .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
         .env("PATH", "/nonexistent-bin-dir")
         .output()
         .expect("spawn wt")
@@ -1902,38 +1965,212 @@ fn init_is_idempotent_about_the_commit_block() {
     );
 }
 
-/// Appends a step to a registered repo's config directly in `data.json` —
-/// there's no CLI surface for authoring a repo's provisioning steps, and a
-/// test that needs a tree to stay `provisioning` for a controlled window
-/// needs a step slower than anything auto-detected from a bare fixture repo.
+#[test]
+fn reinit_preserves_a_hand_edited_spares_value_byte_for_byte() {
+    let tmp = unique_dir("reinit-preserve-spares");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    let args = ["init", "myrepo", "--adopt", base.to_str().unwrap()];
+
+    assert_success(&run_wt(&root, &args), "first init");
+    set_spares(&root, "myrepo", 0);
+    let config_path = config_path_for(&root);
+    let bytes_after_edit = std::fs::read(&config_path).unwrap();
+
+    let out = run_wt(&root, &args);
+    assert_success(&out, "second init");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("already has a config block"),
+        "expected a no-op notice: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).unwrap(),
+        bytes_after_edit,
+        "re-init must not touch a block a person has hand-edited"
+    );
+}
+
+#[test]
+fn init_redetect_replaces_steps_but_leaves_everything_else_alone() {
+    let tmp = unique_dir("init-redetect");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    init_repo(&root, "myrepo", &base);
+    set_spares(&root, "myrepo", 7);
+
+    // The fixture has nothing `detect_steps` picks up on; adding a
+    // pnpm-lock.yaml gives redetect something new to find.
+    std::fs::write(base.join("pnpm-lock.yaml"), "lockfileVersion: '6'\n").unwrap();
+
+    let out = run_wt(
+        &root,
+        &[
+            "init",
+            "myrepo",
+            "--adopt",
+            base.to_str().unwrap(),
+            "--redetect",
+        ],
+    );
+    assert_success(&out, "init --redetect");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("redetected steps for"),
+        "expected a redetect notice: {stdout}"
+    );
+
+    let config_text = std::fs::read_to_string(config_path_for(&root)).unwrap();
+    assert!(
+        config_text.contains("pnpm-install"),
+        "expected the newly detected step: {config_text}"
+    );
+    assert!(
+        config_text.contains("spares 7"),
+        "redetect must leave the hand-edited spares value alone: {config_text}"
+    );
+}
+
+#[test]
+fn init_with_explicit_branch_prefix_on_an_existing_repo_warns_it_was_ignored() {
+    let tmp = unique_dir("branch-prefix-ignored");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt(
+        &root,
+        &[
+            "init",
+            "myrepo",
+            "--adopt",
+            base.to_str().unwrap(),
+            "--branch-prefix",
+            "other/",
+        ],
+    );
+    assert_success(&out, "second init with --branch-prefix");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("already has a config block"),
+        "expected a no-op notice: {stdout}"
+    );
+    assert!(
+        stdout.contains("--branch-prefix was ignored"),
+        "expected a warning that --branch-prefix was ignored: {stdout}"
+    );
+
+    let config_text = std::fs::read_to_string(config_path_for(&root)).unwrap();
+    assert!(
+        config_text.contains("branch-prefix \"josh/\""),
+        "the original branch-prefix must survive: {config_text}"
+    );
+}
+
+#[test]
+fn first_run_migrates_a_pre_split_data_json() {
+    let tmp = unique_dir("migrate-smoke");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("data.json"),
+        format!(
+            r#"{{"version":1,"repos":{{"myrepo":{{"base":"{}","trunk":"master",
+            "branchPrefix":"josh/","shared":[],"copy":[],"env":{{}},"steps":[],"spares":1}}}},
+            "trees":[],"env":{{}}}}"#,
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let out = run_wt(&root, &["ls"]);
+    assert_success(&out, "ls (triggers migration)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("migrated to"),
+        "expected a migration notice: {stdout}"
+    );
+
+    assert!(root.join("state.json").exists(), "state.json missing");
+    let config_path = config_path_for(&root);
+    assert!(config_path.exists(), "config.kdl missing");
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config_text.contains("repo \"myrepo\""),
+        "expected myrepo's block: {config_text}"
+    );
+    assert!(
+        root.join("data.json.migrated").exists(),
+        "data.json should have been renamed aside"
+    );
+    assert!(
+        !root.join("data.json").exists(),
+        "data.json should be gone after migration"
+    );
+}
+
+/// Inserts a `step` node into `repo_name`'s block in `config.kdl` — there's
+/// no CLI surface for authoring a repo's provisioning steps, and a test that
+/// needs a tree to stay `provisioning` for a controlled window needs a step
+/// slower than anything auto-detected from a bare fixture repo.
 fn inject_step(root: &Path, repo_name: &str, label: &str, cmd: &[&str]) {
-    let data_path = root.join("data.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
-    value["repos"][repo_name]["steps"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "label": label,
-            "profile": "test",
-            "cwd": ".",
-            "cmd": cmd,
-        }));
-    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let config_path = config_path_for(root);
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    let body = repo_block_body(&text, repo_name);
+
+    let args = cmd
+        .iter()
+        .map(|a| quote_kdl_string(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let step = format!(
+        "    step {} profile=\"test\" cwd=\".\" {{\n        cmd {args}\n    }}\n",
+        quote_kdl_string(label)
+    );
+
+    let mut new_text = String::with_capacity(text.len() + step.len());
+    new_text.push_str(&text[..body.end]);
+    new_text.push_str(&step);
+    new_text.push_str(&text[body.end..]);
+    std::fs::write(&config_path, new_text).unwrap();
+}
+
+/// Quotes a string the way `wt init` itself writes one into `config.kdl`,
+/// so an injected step survives a value with a quote or backslash in it.
+fn quote_kdl_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn mutate_tree_json(root: &Path, tree_name: &str, f: impl FnOnce(&mut serde_json::Value)) {
-    let data_path = root.join("data.json");
+    let state_path = root.join("state.json");
     let mut value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&data_path).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
     let tree = value["trees"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
         .find(|t| t["name"] == tree_name)
-        .expect("tree not found in data.json");
+        .expect("tree not found in state.json");
     f(tree);
-    std::fs::write(&data_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    std::fs::write(&state_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 }
 
 fn pgrep_matches(needle: &str) -> bool {
@@ -2399,6 +2636,7 @@ fn launch_with_no_worktree_and_no_trees_fails_before_spawning_the_picker() {
     let out = Command::new(wt_bin())
         .args(["launch"])
         .env("WT_ROOT", &root)
+        .env("WT_CONFIG", config_path_for(&root))
         .env("WT_FZF", &fzf)
         .output()
         .expect("spawn wt");
@@ -2465,6 +2703,7 @@ fn launch_with_no_worktree_offers_the_cwd_repo_first_then_newest_first() {
     let out = Command::new(wt_bin())
         .args(["launch"])
         .env("WT_ROOT", &root)
+        .env("WT_CONFIG", config_path_for(&root))
         .env("WT_FZF", &fzf)
         .env("PATH", "/nonexistent-bin-dir")
         .output()
@@ -2515,6 +2754,7 @@ fn launch_with_no_worktree_and_a_cancelled_picker_exits_cleanly() {
     let out = Command::new(wt_bin())
         .args(["launch"])
         .env("WT_ROOT", &root)
+        .env("WT_CONFIG", config_path_for(&root))
         .env("WT_FZF", &fzf)
         .output()
         .expect("spawn wt");
@@ -3098,6 +3338,58 @@ fn spares_set_to_zero_creates_no_spare_and_the_cold_path_is_unchanged() {
         &run_wt(&root, &["rm", "cold as usual", "--delete-branch"]),
         "cleanup",
     );
+}
+
+#[test]
+fn spare_drop_survives_a_sync_top_up() {
+    let tmp = unique_dir("spare-drop-durable");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    // Timed so the behavioral check below can wait comfortably longer than
+    // a real build takes on this fixture, instead of guessing a constant.
+    let build_started = std::time::Instant::now();
+    build_and_wait_spare(&root, "myrepo", 60);
+    let build_elapsed = build_started.elapsed();
+    assert_eq!(spare_rows(&root, "myrepo").len(), 1);
+
+    assert_success(
+        &run_wt(&root, &["spare", "drop", "--repo", "myrepo"]),
+        "spare drop",
+    );
+    assert_eq!(spare_rows(&root, "myrepo").len(), 0);
+
+    // Deterministic half: this is the actual guard, independent of any
+    // timing — `wt spare drop` must persist `spares 0`, not just clear the
+    // rows in state.
+    let config_text = std::fs::read_to_string(config_path_for(&root)).unwrap();
+    let body = repo_block_body(&config_text, "myrepo");
+    assert!(
+        config_text[body].contains("spares 0"),
+        "wt spare drop must set spares to 0 in config.kdl: {config_text}"
+    );
+
+    // Behavioral half: prove a sync tick doesn't rebuild one, by actually
+    // waiting rather than checking once right after `sync` returns — the
+    // spawned top-up child registers its row asynchronously, so a single
+    // immediate check passes whether or not the fix is in.
+    assert_success(&run_wt(&root, &["sync", "myrepo"]), "sync after drop");
+    let window = (build_elapsed * 3).max(std::time::Duration::from_secs(5));
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        let rows = spare_rows(&root, "myrepo");
+        assert_eq!(
+            rows.len(),
+            0,
+            "a sync tick must not rebuild a spare `wt spare drop` just turned off: {rows:?}"
+        );
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 #[test]

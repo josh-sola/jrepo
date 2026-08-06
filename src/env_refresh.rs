@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::repo;
 use crate::store;
 use crate::tree;
 
@@ -20,12 +21,13 @@ pub fn refresh(root: &Path, selector: &str) -> Result<()> {
         )
     })?;
 
-    let copied = tree::copy_globs(&repo.base, &target.path, &repo.copy, &repo.shared)?;
+    let (shared, copy) = repo::parse_worktreeinclude(&repo.base)?;
+    let copied = tree::copy_globs(&repo.base, &target.path, &copy, &shared)?;
 
     if copied.is_empty() {
         println!(
             "no files matched {:?} in {}; nothing copied",
-            repo.copy,
+            copy,
             repo.base.display()
         );
         return Ok(());
