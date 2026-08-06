@@ -888,6 +888,60 @@ fn launch_scratch_session_with_branch_errors() {
     );
 }
 
+/// A `get-position` hook that just creates a sentinel file — enough to prove
+/// whether `wt launch` ran it, without needing a real Ghostty or a real
+/// `claude` session. Uses a shell redirect rather than `touch`: these tests
+/// point `PATH` at a nonexistent directory, which an external command would
+/// need to resolve.
+fn sentinel_get_position_hook(sentinel: &Path) -> String {
+    format!(
+        "version 1\n\nfeatures {{\n    planter {{\n        get-position {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n}}\n",
+        sentinel.display()
+    )
+}
+
+#[test]
+fn launch_runs_a_hook_only_when_its_feature_block_is_present() {
+    let tmp = unique_dir("launch-features-gate");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "hook target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "hook target"]), "wait");
+
+    let sentinel = tmp.join("sentinel");
+    let config_path = config_path_for(&root);
+
+    // No `features` block: the hook the config could have pointed at never runs.
+    std::fs::write(&config_path, "version 1\n").unwrap();
+    let out = run_wt_claude_without_claude_on_path(&root, &["launch", "hook target", "myrepo"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not on PATH"),
+        "expected the launch to still reach the claude exec, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !sentinel.exists(),
+        "a hook must not run when its feature block is absent"
+    );
+
+    // The same hook, declared under `features`: it runs.
+    std::fs::write(&config_path, sentinel_get_position_hook(&sentinel)).unwrap();
+    let out = run_wt_claude_without_claude_on_path(&root, &["launch", "hook target", "myrepo"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not on PATH"),
+        "expected the launch to still reach the claude exec, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sentinel.exists(),
+        "a hook declared under 'features' should have run"
+    );
+}
+
 #[test]
 fn name_matches_longest_registered_path_prefix() {
     let tmp = unique_dir("name");

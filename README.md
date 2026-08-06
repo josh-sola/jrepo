@@ -234,6 +234,47 @@ per repo, idling on disk, plus a background install that can fire whenever
 trunk moves. Set `spares 0` on a repo in `config.kdl`, or run
 `wt spare drop`, to opt out.
 
+## Features
+
+`wt launch` can reach outside wt — driving a terminal to find its tab
+position, coordinating with claude-planter's tab state, setting a terminal
+background color. All of that assumes macOS, Ghostty, and claude-planter, so
+it's opt-in, declared under a `features` block in `config.kdl`. Absent
+block means off:
+
+```kdl
+features {
+    planter {
+        get-position { builtin "ghostty-tab" }
+        renumber-peers { builtin "planter-state" }
+    }
+    terminal {
+        set-background { builtin "osc11" }
+    }
+}
+```
+
+- **`planter`** integrates with claude-planter, a tab-labeling overlay:
+  `get-position` finds this session's rank among its terminal's other tabs,
+  and `renumber-peers` corrects the other claude-planter sessions whose rank
+  a new tab just pushed down a slot. Declaring `planter` also makes `wt
+  launch` set `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` in
+  the session's environment.
+- **`terminal`** sets the terminal background: `set-background` writes an
+  OSC 11 escape sequence in the session's color.
+
+Each hook takes exactly one of a `builtin` (one of wt's own
+implementations) or a `cmd` (your own command, run with `WT_TREE_PATH`,
+`WT_REPO`, `WT_LABEL`, and `WT_COLOR_HEX` in its environment, killed after
+2 seconds). A hook that fails — wrong builtin, non-zero exit, unparseable
+output, timeout — is treated as absent; it never fails the launch. The
+builtins are `ghostty-tab` and `planter-state` for `planter`, and `osc11`
+for `terminal`. A user on a different terminal swaps in their own:
+
+```kdl
+    get-position { cmd "~/bin/iterm-tab-index" }
+```
+
 ## Integrations
 
 - **Statusline.** `statusline.sh` calls `wt name --path "$PWD"` and falls

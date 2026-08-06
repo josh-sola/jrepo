@@ -3,6 +3,7 @@ mod color;
 mod config;
 mod context;
 mod env_refresh;
+mod features;
 mod git;
 mod graphite;
 mod migrate;
@@ -607,6 +608,7 @@ fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[Strin
         profile,
     } = launch;
     let store = store::load(root)?;
+    let config = config::load(config_path)?;
     let cwd = std::env::current_dir().context("reading current directory")?;
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let cwd_repo = store::repo_for_cwd(&store, &cwd);
@@ -675,21 +677,46 @@ fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[Strin
 
     let (color, hex) = color::pick(&color_repo, &color_name);
 
-    // The tab probe reads and rewrites tab titles, so it runs before the
-    // background-color write, which should be the last thing that touches
-    // the terminal. It must never block or fail a launch, so any error just
-    // drops PLANTER_TAB_INDEX and skips the renumber below.
-    let tabs = tab::probe().ok();
-    if let Some(tabs) = &tabs {
-        planter::renumber(tabs);
-    }
-    color::set_background(hex);
+    let ctx = features::Context {
+        tree_path: &tree_path,
+        repo: &color_repo,
+        label: &label,
+        color_hex: hex,
+    };
+    let get_position_hook = config
+        .features
+        .planter
+        .as_ref()
+        .and_then(|p| p.get_position.as_ref());
+    let renumber_peers_hook = config
+        .features
+        .planter
+        .as_ref()
+        .and_then(|p| p.renumber_peers.as_ref());
+    let set_background_hook = config
+        .features
+        .terminal
+        .as_ref()
+        .and_then(|t| t.set_background.as_ref());
 
-    let mut env: Vec<(&str, &str)> = vec![("PLANTER_COLOR", color), ("PLANTER_LABEL", &label)];
+    // The tab probe reads and rewrites tab titles, so it runs before the
+    // background-color write, which must be the last thing that touches
+    // the terminal.
+    let tabs = features::get_position(get_position_hook, &ctx);
+    if let Some(tabs) = &tabs {
+        features::renumber_peers(renumber_peers_hook, tabs, &ctx);
+    }
+    features::set_background(set_background_hook, hex, &ctx);
+
+    let mut env: Vec<(&str, &str)> = Vec::new();
     let tab_index_str;
-    if let Some(idx) = tabs.map(|t| t.mine) {
-        tab_index_str = idx.to_string();
-        env.push(("PLANTER_TAB_INDEX", &tab_index_str));
+    if config.features.planter.is_some() {
+        env.push(("PLANTER_COLOR", color));
+        env.push(("PLANTER_LABEL", &label));
+        if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
+            tab_index_str = idx.to_string();
+            env.push(("PLANTER_TAB_INDEX", &tab_index_str));
+        }
     }
 
     claude::exec_at(&tree_path, &launch_args(&label, args, color), &env)

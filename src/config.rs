@@ -15,6 +15,32 @@ pub const CONFIG_VERSION: i128 = 1;
 pub struct Config {
     pub env: BTreeMap<String, String>,
     pub repos: BTreeMap<String, RepoConfig>,
+    pub features: Features,
+}
+
+/// A hook holds exactly one of a name into wt's own implementations, or an
+/// argv to run instead.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Hook {
+    Builtin(String),
+    Cmd(Vec<String>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Features {
+    pub planter: Option<Planter>,
+    pub terminal: Option<Terminal>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Planter {
+    pub get_position: Option<Hook>,
+    pub renumber_peers: Option<Hook>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Terminal {
+    pub set_background: Option<Hook>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +259,17 @@ fn is_repo_named(node: &KdlNode, name: &str) -> bool {
 const HEADER_COMMENT: &str = "\
 // wt's user config. `wt init` appends a `repo` block here once per repo,\n\
 // but never rewrites a block you have edited by hand.\n\
+//\n\
+// Uncomment to opt into hooks that reach outside wt. Absent means off.\n\
+// features {\n\
+//     planter {\n\
+//         get-position { builtin \"ghostty-tab\" }\n\
+//         renumber-peers { builtin \"planter-state\" }\n\
+//     }\n\
+//     terminal {\n\
+//         set-background { builtin \"osc11\" }\n\
+//     }\n\
+// }\n\
 \n";
 
 fn fresh_document() -> KdlDocument {
@@ -577,6 +614,190 @@ fn parse_cmd_node(text: &str, node: &KdlNode) -> Result<Vec<String>> {
     Ok(argv)
 }
 
+/// Parses a hook block, e.g. `get-position { builtin "ghostty-tab" }`. Exactly
+/// one of `builtin` or `cmd` is required; a `builtin` name must be one of
+/// `valid_builtins`.
+fn parse_hook_block(text: &str, node: &KdlNode, valid_builtins: &[&str]) -> Result<Hook> {
+    reject_properties(text, node)?;
+    if !positional_entries(node).is_empty() {
+        return Err(config_error(
+            text,
+            node.span(),
+            format!("'{}' does not take arguments", node.name().value()),
+        ));
+    }
+
+    let mut builtin = None;
+    let mut cmd = None;
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            match child.name().value() {
+                "builtin" => {
+                    if builtin.is_some() || cmd.is_some() {
+                        return Err(config_error(
+                            text,
+                            child.span(),
+                            format!(
+                                "'{}' may have only one of 'builtin' or 'cmd'",
+                                node.name().value()
+                            ),
+                        ));
+                    }
+                    let name = single_string_arg(text, child)?;
+                    if !valid_builtins.contains(&name.as_str()) {
+                        return Err(config_error(
+                            text,
+                            child.span(),
+                            format!(
+                                "unknown builtin '{name}' for '{}'; valid builtins: {}",
+                                node.name().value(),
+                                valid_builtins.join(", ")
+                            ),
+                        ));
+                    }
+                    builtin = Some(name);
+                }
+                "cmd" => {
+                    if builtin.is_some() || cmd.is_some() {
+                        return Err(config_error(
+                            text,
+                            child.span(),
+                            format!(
+                                "'{}' may have only one of 'builtin' or 'cmd'",
+                                node.name().value()
+                            ),
+                        ));
+                    }
+                    cmd = Some(parse_cmd_node(text, child)?);
+                }
+                other => {
+                    return Err(config_error(
+                        text,
+                        child.span(),
+                        format!("unknown node '{other}' inside '{}'", node.name().value()),
+                    ));
+                }
+            }
+        }
+    }
+
+    match (builtin, cmd) {
+        (Some(b), None) => Ok(Hook::Builtin(b)),
+        (None, Some(c)) => Ok(Hook::Cmd(c)),
+        _ => Err(config_error(
+            text,
+            node.span(),
+            format!(
+                "'{}' needs exactly one of 'builtin' or 'cmd'",
+                node.name().value()
+            ),
+        )),
+    }
+}
+
+fn parse_planter_block(text: &str, node: &KdlNode) -> Result<Planter> {
+    reject_properties(text, node)?;
+    if !positional_entries(node).is_empty() {
+        return Err(config_error(
+            text,
+            node.span(),
+            "'planter' does not take arguments",
+        ));
+    }
+
+    let mut planter = Planter::default();
+    let Some(children) = node.children() else {
+        return Ok(planter);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "get-position" => {
+                planter.get_position = Some(parse_hook_block(text, child, &["ghostty-tab"])?);
+            }
+            "renumber-peers" => {
+                planter.renumber_peers = Some(parse_hook_block(text, child, &["planter-state"])?);
+            }
+            other => {
+                return Err(config_error(
+                    text,
+                    child.span(),
+                    format!(
+                        "unknown node '{other}' inside 'planter'; valid hooks: get-position, \
+                         renumber-peers"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(planter)
+}
+
+fn parse_terminal_block(text: &str, node: &KdlNode) -> Result<Terminal> {
+    reject_properties(text, node)?;
+    if !positional_entries(node).is_empty() {
+        return Err(config_error(
+            text,
+            node.span(),
+            "'terminal' does not take arguments",
+        ));
+    }
+
+    let mut terminal = Terminal::default();
+    let Some(children) = node.children() else {
+        return Ok(terminal);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "set-background" => {
+                terminal.set_background = Some(parse_hook_block(text, child, &["osc11"])?);
+            }
+            other => {
+                return Err(config_error(
+                    text,
+                    child.span(),
+                    format!(
+                        "unknown node '{other}' inside 'terminal'; valid hooks: set-background"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(terminal)
+}
+
+fn parse_features_block(text: &str, node: &KdlNode) -> Result<Features> {
+    reject_properties(text, node)?;
+    if !positional_entries(node).is_empty() {
+        return Err(config_error(
+            text,
+            node.span(),
+            "'features' does not take arguments",
+        ));
+    }
+
+    let mut features = Features::default();
+    let Some(children) = node.children() else {
+        return Ok(features);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "planter" => features.planter = Some(parse_planter_block(text, child)?),
+            "terminal" => features.terminal = Some(parse_terminal_block(text, child)?),
+            other => {
+                return Err(config_error(
+                    text,
+                    child.span(),
+                    format!(
+                        "unknown node '{other}' inside 'features'; valid features: planter, \
+                         terminal"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(features)
+}
+
 fn parse_step_node(text: &str, node: &KdlNode) -> Result<Step> {
     let positional = positional_entries(node);
     if positional.len() != 1 {
@@ -796,6 +1017,9 @@ fn parse_config(text: &str) -> Result<Config> {
             }
             "env" => {
                 config.env = parse_env_block(text, node)?;
+            }
+            "features" => {
+                config.features = parse_features_block(text, node)?;
             }
             "repo" => {
                 let (name, repo) = parse_repo_node(text, node)?;
@@ -1198,5 +1422,175 @@ mod tests {
         let line = line_of(text, "version 2");
         assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
         assert!(msg.contains("config version 2 is not supported"));
+    }
+
+    #[test]
+    fn parses_a_full_features_block() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n        renumber-peers { cmd \"~/bin/iterm-tab-index\" }\n    }\n    terminal {\n        set-background { builtin \"osc11\" }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let config = load(&path).unwrap();
+        let planter = config.features.planter.unwrap();
+        assert_eq!(
+            planter.get_position,
+            Some(Hook::Builtin("ghostty-tab".to_string()))
+        );
+        assert_eq!(
+            planter.renumber_peers,
+            Some(Hook::Cmd(vec!["~/bin/iterm-tab-index".to_string()]))
+        );
+        let terminal = config.features.terminal.unwrap();
+        assert_eq!(
+            terminal.set_background,
+            Some(Hook::Builtin("osc11".to_string()))
+        );
+    }
+
+    #[test]
+    fn absent_features_block_is_default() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        fs::write(&path, "version 1\n").unwrap();
+
+        let config = load(&path).unwrap();
+        assert_eq!(config.features, Features::default());
+    }
+
+    #[test]
+    fn planter_alone_leaves_terminal_absent() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let config = load(&path).unwrap();
+        assert!(config.features.planter.is_some());
+        assert!(config.features.terminal.is_none());
+    }
+
+    #[test]
+    fn terminal_alone_leaves_planter_absent() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    terminal {\n        set-background { builtin \"osc11\" }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let config = load(&path).unwrap();
+        assert!(config.features.terminal.is_some());
+        assert!(config.features.planter.is_none());
+    }
+
+    #[test]
+    fn hook_with_both_builtin_and_cmd_errors() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position {\n            builtin \"ghostty-tab\"\n            cmd \"x\"\n        }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("only one of 'builtin' or 'cmd'"),
+            "message was:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn hook_with_neither_builtin_nor_cmd_errors() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text =
+            "version 1\n\nfeatures {\n    planter {\n        get-position {\n        }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("needs exactly one of 'builtin' or 'cmd'"),
+            "message was:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_feature_names_the_line() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    bogus {\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        let line = line_of(text, "bogus {");
+        assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
+        assert!(msg.contains("unknown node 'bogus'"));
+    }
+
+    #[test]
+    fn unknown_hook_names_the_line() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text =
+            "version 1\n\nfeatures {\n    planter {\n        bogus-hook {\n        }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        let line = line_of(text, "bogus-hook {");
+        assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
+        assert!(msg.contains("unknown node 'bogus-hook'"));
+    }
+
+    #[test]
+    fn unknown_builtin_names_the_line() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"nope\" }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        let line = line_of(text, "builtin \"nope\"");
+        assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
+        assert!(msg.contains("unknown builtin 'nope'"));
+    }
+
+    #[test]
+    fn empty_cmd_names_the_line() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text =
+            "version 1\n\nfeatures {\n    planter {\n        get-position { cmd }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        let line = line_of(text, "get-position { cmd }");
+        assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
+        assert!(msg.contains("needs at least one argument"));
+    }
+
+    #[test]
+    fn features_block_survives_append_repo_and_set_repo_spares() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let original = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n    }\n}\n";
+        fs::write(&path, original).unwrap();
+
+        assert!(append_repo(&path, "monorepo", &sample_repo()).unwrap());
+        set_repo_spares(&path, "monorepo", 0).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("features {"));
+        assert!(written.contains("get-position"));
+
+        let config = load(&path).unwrap();
+        assert!(config.features.planter.is_some());
+        assert_eq!(
+            config.features.planter.unwrap().get_position,
+            Some(Hook::Builtin("ghostty-tab".to_string()))
+        );
+        assert_eq!(config.repos["monorepo"].spares, 0);
     }
 }
