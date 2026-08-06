@@ -1777,6 +1777,142 @@ fn sync_skips_fast_forward_when_base_is_on_another_branch() {
     );
 }
 
+/// Advances `submodule_path`'s own upstream with one new commit, then bumps
+/// `base_bare`'s recorded pointer to match — an upstream submodule bump
+/// landing on the wire, without touching the test's own `base` checkout.
+/// The scratch clone this builds through needs
+/// `protocol.file.allow=always` for its own submodule population; `base`
+/// itself never does, since its submodule was trusted once at `add` time.
+fn push_submodule_bump_to_origin(base_bare: &Path, submodule_path: &str, tmp: &Path) {
+    let clone_dir = tmp.join(format!("advance-submodule-{}", Uuid::now_v7()));
+    git(
+        &[
+            "clone",
+            "-q",
+            base_bare.to_str().unwrap(),
+            clone_dir.to_str().unwrap(),
+        ],
+        tmp,
+    );
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+        &clone_dir,
+    );
+
+    let sub_dir = clone_dir.join(submodule_path);
+    git(&["checkout", "-q", "master"], &sub_dir);
+    std::fs::write(sub_dir.join("f.txt"), "bumped\n").unwrap();
+    git(
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-aqm",
+            "bump",
+        ],
+        &sub_dir,
+    );
+    git(&["push", "-q", "origin", "master"], &sub_dir);
+
+    git(&["add", submodule_path], &clone_dir);
+    git(
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "bump submodule pointer",
+        ],
+        &clone_dir,
+    );
+    git(&["push", "-q", "origin", "master"], &clone_dir);
+}
+
+/// A superproject that has already fast-forwarded past a submodule bump
+/// while the checked-out submodule was left behind. `wt sync` must repair
+/// the stale pointer and still complete its fast-forward in the same run,
+/// and a follow-up sync must find nothing left to do.
+#[test]
+fn sync_repairs_a_stale_submodule_pointer_and_still_fast_forwards() {
+    let tmp = unique_dir("sync-submodule-stuck");
+    let base = fixture_repo_with_submodule(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let base_bare = tmp.join("origin.git");
+    push_submodule_bump_to_origin(&base_bare, "vendor/sub", &tmp);
+
+    // Reproduce the stuck state directly, bypassing `wt sync` entirely: the
+    // superproject fast-forwards past the bump, the submodule checkout does
+    // not move.
+    git(&["fetch", "-q", "origin"], &base);
+    git(&["merge", "-q", "--ff-only", "origin/master"], &base);
+    assert!(
+        !status_porcelain(&base).is_empty(),
+        "the stale gitlink should already show as dirty"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("vendor/sub").join("f.txt")).unwrap(),
+        "sub\n",
+        "the submodule checkout must still be at its old commit"
+    );
+
+    push_new_commit_to_origin(&base_bare, &tmp, "advance.txt");
+
+    let out = run_wt(&root, &["sync", "myrepo"]);
+    assert_success(&out, "sync");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("repaired") && stdout.contains("submodule"),
+        "expected the repair to be mentioned: {stdout}"
+    );
+    assert!(
+        stdout.contains("fast-forwarded"),
+        "expected the fast-forward to still happen: {stdout}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(base.join("vendor/sub").join("f.txt")).unwrap(),
+        "bumped\n",
+        "the submodule checkout should have caught up to the bump"
+    );
+    assert!(
+        status_porcelain(&base).is_empty(),
+        "base should be fully clean after the repair"
+    );
+    assert!(base.join("advance.txt").exists());
+
+    let out = run_wt(&root, &["sync", "myrepo"]);
+    assert_success(&out, "second sync");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("dirty") && !stdout.contains("repaired"),
+        "a second sync should find nothing left to fix: {stdout}"
+    );
+}
+
+fn status_porcelain(path: &Path) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("spawn git status");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Runs `wt claude` with `PATH` pointed at an empty directory, so resolution
 /// always reaches the same "claude is not on PATH" failure regardless of
 /// whether the host actually has `claude` installed — the assertions below

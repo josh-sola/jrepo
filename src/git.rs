@@ -198,7 +198,35 @@ pub fn is_dirty(path: &Path) -> Result<bool> {
 }
 
 pub fn status_porcelain(path: &Path) -> Result<Vec<String>> {
-    let out = run(&["status", "--porcelain"], path)?;
+    status_porcelain_filtered(path, SubmoduleFilter::None)
+}
+
+/// `Dirty` hides a submodule's own uncommitted changes but still reports a
+/// stale gitlink; `All` hides both. Neither affects a diff in the
+/// superproject itself.
+pub enum SubmoduleFilter {
+    None,
+    #[allow(dead_code)]
+    Dirty,
+    All,
+}
+
+impl SubmoduleFilter {
+    fn arg(&self) -> Option<&'static str> {
+        match self {
+            SubmoduleFilter::None => None,
+            SubmoduleFilter::Dirty => Some("--ignore-submodules=dirty"),
+            SubmoduleFilter::All => Some("--ignore-submodules=all"),
+        }
+    }
+}
+
+pub fn status_porcelain_filtered(path: &Path, filter: SubmoduleFilter) -> Result<Vec<String>> {
+    let mut args = vec!["status", "--porcelain"];
+    if let Some(arg) = filter.arg() {
+        args.push(arg);
+    }
+    let out = run(&args, path)?;
     if !out.status.success() {
         bail!(
             "git status failed: {}",
@@ -209,6 +237,68 @@ pub fn status_porcelain(path: &Path) -> Result<Vec<String>> {
         .lines()
         .map(str::to_string)
         .collect())
+}
+
+pub struct SubmoduleEntry {
+    pub path: String,
+    pub state: SubmoduleState,
+}
+
+pub enum SubmoduleState {
+    InSync,
+    StalePointer,
+    Uninitialized,
+    Conflicted,
+}
+
+/// Parses `git submodule status` — a leading ` `, `+`, `-`, or `U` per line,
+/// then the submodule's checked-out sha, then its path, then an optional
+/// `(describe)` suffix this ignores.
+pub fn submodule_status(path: &Path) -> Result<Vec<SubmoduleEntry>> {
+    let out = run(&["submodule", "status"], path)?;
+    if !out.status.success() {
+        bail!(
+            "git submodule status failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let prefix = line
+                .chars()
+                .next()
+                .with_context(|| format!("parsing submodule status line: {line}"))?;
+            let state = match prefix {
+                ' ' => SubmoduleState::InSync,
+                '+' => SubmoduleState::StalePointer,
+                '-' => SubmoduleState::Uninitialized,
+                'U' => SubmoduleState::Conflicted,
+                other => bail!("unrecognized submodule status prefix '{other}' in line: {line}"),
+            };
+            let sub_path = line[1..]
+                .split_whitespace()
+                .nth(1)
+                .with_context(|| format!("parsing submodule status line: {line}"))?
+                .to_string();
+            Ok(SubmoduleEntry {
+                path: sub_path,
+                state,
+            })
+        })
+        .collect()
+}
+
+pub fn submodule_update_recursive(path: &Path) -> Result<()> {
+    let out = run(&["submodule", "update", "--init", "--recursive"], path)?;
+    if !out.status.success() {
+        bail!(
+            "git submodule update --init --recursive failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 pub fn current_branch(path: &Path) -> Result<String> {
@@ -536,5 +626,100 @@ mod tests {
         assert_eq!(stash_top(&repo).unwrap().as_deref(), Some(theirs.as_str()));
 
         fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A base repo with `sub` added as a submodule at HEAD. Local-path
+    /// submodules need `protocol.file.allow=always` — git refuses `file://`
+    /// submodules otherwise.
+    fn submodule_fixture() -> (PathBuf, PathBuf) {
+        let sub = fixture_repo();
+        let base = fixture_repo();
+        run(
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+            &base,
+        )
+        .unwrap();
+        run(&["commit", "-qm", "add submodule"], &base).unwrap();
+        (base, sub)
+    }
+
+    #[test]
+    fn submodule_status_reports_in_sync_stale_and_uninitialized() {
+        let (base, sub) = submodule_fixture();
+
+        assert!(matches!(
+            submodule_status(&base).unwrap()[0].state,
+            SubmoduleState::InSync
+        ));
+
+        fs::write(base.join("sub").join("tracked.txt"), "two\n").unwrap();
+        run(&["commit", "-qam", "advance"], &base.join("sub")).unwrap();
+        let entries = submodule_status(&base).unwrap();
+        assert_eq!(entries[0].path, "sub");
+        assert!(matches!(entries[0].state, SubmoduleState::StalePointer));
+
+        run(&["submodule", "deinit", "-f", "sub"], &base).unwrap();
+        let entries = submodule_status(&base).unwrap();
+        assert!(matches!(entries[0].state, SubmoduleState::Uninitialized));
+
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&sub).ok();
+    }
+
+    #[test]
+    fn ignore_submodules_flags_distinguish_stale_pointer_from_dirty_submodule_work() {
+        let (base, sub) = submodule_fixture();
+
+        // A stale gitlink with an otherwise clean submodule stays visible
+        // under `dirty` but disappears under `all`.
+        fs::write(base.join("sub").join("tracked.txt"), "two\n").unwrap();
+        run(&["commit", "-qam", "advance"], &base.join("sub")).unwrap();
+        assert!(
+            !status_porcelain_filtered(&base, SubmoduleFilter::Dirty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            status_porcelain_filtered(&base, SubmoduleFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+
+        run(&["add", "sub"], &base).unwrap();
+        run(&["commit", "-qm", "bump sub"], &base).unwrap();
+
+        // Uncommitted work inside the submodule disappears even under
+        // `dirty`, since the checked-out commit itself matches the index.
+        fs::write(base.join("sub").join("tracked.txt"), "edited\n").unwrap();
+        assert!(!status_porcelain(&base).unwrap().is_empty());
+        assert!(
+            status_porcelain_filtered(&base, SubmoduleFilter::Dirty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            status_porcelain_filtered(&base, SubmoduleFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A change in the base itself is never hidden.
+        run(&["checkout", "--", "tracked.txt"], &base.join("sub")).unwrap();
+        fs::write(base.join("tracked.txt"), "edited\n").unwrap();
+        assert!(
+            !status_porcelain_filtered(&base, SubmoduleFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&sub).ok();
     }
 }

@@ -159,6 +159,95 @@ fn distinct_dirs(steps: &[Step]) -> usize {
     steps.iter().map(|s| &s.dir).collect::<HashSet<_>>().len()
 }
 
+/// The base's state, in the order it must be checked: a base with its own
+/// uncommitted changes always blocks, before anything submodule-related is
+/// even considered.
+#[derive(Debug)]
+enum BaseState {
+    Clean,
+    /// Stale or uninitialized submodule paths, each confirmed to hold
+    /// nothing uncommitted of its own — safe to move.
+    Repairable(Vec<String>),
+    /// Human-readable reason naming what is in the way.
+    Blocked(String),
+}
+
+fn repaired_note(paths: &[String]) -> String {
+    format!(
+        "repaired {} stale submodule pointer{}",
+        paths.len(),
+        if paths.len() == 1 { "" } else { "s" }
+    )
+}
+
+/// A stale gitlink, a submodule with uncommitted work of its own, and the
+/// base's own uncommitted changes all look identical to a plain `git status
+/// --porcelain`. Only the first is safe to repair automatically; the other
+/// two must still block a fast-forward exactly as an unfiltered dirty check
+/// always has.
+fn classify_base(base: &Path) -> Result<BaseState> {
+    let own_changes = git::status_porcelain_filtered(base, git::SubmoduleFilter::All)?;
+    if !own_changes.is_empty() {
+        return Ok(BaseState::Blocked(format!(
+            "dirty, refusing to fast-forward ({}): {}",
+            own_changes.len(),
+            own_changes.join("; ")
+        )));
+    }
+
+    let submodules = git::submodule_status(base)?;
+    if let Some(conflicted) = submodules
+        .iter()
+        .find(|s| matches!(s.state, git::SubmoduleState::Conflicted))
+    {
+        return Ok(BaseState::Blocked(format!(
+            "submodule '{}' has unresolved merge conflicts, refusing to fast-forward",
+            conflicted.path
+        )));
+    }
+
+    let candidates: Vec<&git::SubmoduleEntry> = submodules
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.state,
+                git::SubmoduleState::StalePointer | git::SubmoduleState::Uninitialized
+            )
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        let plain = git::status_porcelain(base)?;
+        if !plain.is_empty() {
+            return Ok(BaseState::Blocked(format!(
+                "dirty, refusing to fast-forward ({}): {}",
+                plain.len(),
+                plain.join("; ")
+            )));
+        }
+        return Ok(BaseState::Clean);
+    }
+
+    for entry in &candidates {
+        if matches!(entry.state, git::SubmoduleState::Uninitialized) {
+            continue;
+        }
+        let dirty = git::status_porcelain(&base.join(&entry.path))?;
+        if !dirty.is_empty() {
+            return Ok(BaseState::Blocked(format!(
+                "submodule '{}' has uncommitted changes, refusing to move it ({}): {}",
+                entry.path,
+                dirty.len(),
+                dirty.join("; ")
+            )));
+        }
+    }
+
+    Ok(BaseState::Repairable(
+        candidates.into_iter().map(|e| e.path.clone()).collect(),
+    ))
+}
+
 fn sync_one(
     root: &Path,
     name: &str,
@@ -184,34 +273,64 @@ fn sync_one(
         "fetched new commits"
     };
 
-    let dirty = git::status_porcelain(&repo.base)?;
-    if !dirty.is_empty() {
-        bail!(
-            "dirty, refusing to fast-forward ({}): {}",
-            dirty.len(),
-            dirty.join("; ")
-        );
-    }
+    let repair_note = match classify_base(&repo.base)? {
+        BaseState::Blocked(reason) => bail!(reason),
+        BaseState::Repairable(paths) => {
+            git::submodule_update_recursive(&repo.base)
+                .with_context(|| format!("repairing {} stale submodule pointer(s)", paths.len()))?;
+            Some(repaired_note(&paths))
+        }
+        BaseState::Clean => None,
+    };
+    let prefixed = |rest: String| match &repair_note {
+        Some(note) => format!("{note}; {rest}"),
+        None => rest,
+    };
 
     let branch = git::current_branch(&repo.base)?;
     if branch != repo_config.trunk {
-        return Ok(format!(
+        return Ok(prefixed(format!(
             "{fetch_desc}; on branch '{branch}', not '{}' — skipping fast-forward",
             repo_config.trunk
-        ));
+        )));
     }
 
     let head = git::rev_parse(&repo.base, "HEAD").context("resolving HEAD")?;
     if head == after {
-        return Ok(format!("{fetch_desc}; trunk unchanged"));
+        return Ok(prefixed(format!("{fetch_desc}; trunk unchanged")));
     }
 
     git::merge_ff_only(&repo.base, &trunk_ref)?;
-    Ok(format!(
+    let mut line = prefixed(format!(
         "{fetch_desc}; fast-forwarded {} to {}",
         repo_config.trunk,
         &after[..after.len().min(7)]
-    ))
+    ));
+
+    // Non-fatal: the fast-forward already succeeded, so a submodule that
+    // can't be repaired afterward is a warning on the status line, not a
+    // failed sync.
+    match classify_base(&repo.base) {
+        Ok(BaseState::Repairable(paths)) => match git::submodule_update_recursive(&repo.base) {
+            Ok(()) => line.push_str(&format!("; {} after fast-forward", repaired_note(&paths))),
+            Err(e) => line.push_str(&format!(
+                "; warning: fast-forward left {} submodule pointer(s) stale and the repair \
+                 failed: {e:#}",
+                paths.len()
+            )),
+        },
+        Ok(BaseState::Blocked(reason)) => {
+            line.push_str(&format!(
+                "; warning: fast-forward left a submodule that needs attention: {reason}"
+            ));
+        }
+        Ok(BaseState::Clean) => {}
+        Err(e) => line.push_str(&format!(
+            "; warning: could not verify submodule state after fast-forward: {e:#}"
+        )),
+    }
+
+    Ok(line)
 }
 
 #[cfg(test)]
@@ -354,5 +473,122 @@ mod tests {
         assert_eq!(branches, vec!["s2a", "s2b"]);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base repo with `sub` added as a submodule at HEAD, both on tracked
+    /// commits. Local-path submodules need `protocol.file.allow=always` —
+    /// git refuses `file://` submodules otherwise.
+    fn submodule_fixture() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("wt-sync-submodule-test-{}", Uuid::now_v7()));
+        let sub = dir.join("sub");
+        let base = dir.join("base");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&base).unwrap();
+        for path in [&sub, &base] {
+            git(&["init", "-q", "-b", "main"], path);
+            git(&["config", "user.email", "t@t"], path);
+            git(&["config", "user.name", "t"], path);
+        }
+
+        fs::write(sub.join("f.txt"), "one\n").unwrap();
+        git(&["add", "-A"], &sub);
+        git(&["commit", "-qm", "init"], &sub);
+
+        fs::write(base.join("g.txt"), "x\n").unwrap();
+        git(&["add", "-A"], &base);
+        git(&["commit", "-qm", "init"], &base);
+        git(
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+            &base,
+        );
+        git(&["commit", "-qm", "add submodule"], &base);
+        (base, sub)
+    }
+
+    fn cleanup_submodule_fixture(base: &Path) {
+        fs::remove_dir_all(base.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn classify_base_is_clean_when_nothing_is_dirty() {
+        let (base, _sub) = submodule_fixture();
+
+        assert!(matches!(classify_base(&base).unwrap(), BaseState::Clean));
+
+        cleanup_submodule_fixture(&base);
+    }
+
+    #[test]
+    fn classify_base_is_repairable_for_a_stale_pointer_with_a_clean_submodule() {
+        let (base, _sub) = submodule_fixture();
+        fs::write(base.join("sub").join("f.txt"), "two\n").unwrap();
+        git(&["commit", "-qam", "advance"], &base.join("sub"));
+
+        match classify_base(&base).unwrap() {
+            BaseState::Repairable(paths) => assert_eq!(paths, vec!["sub".to_string()]),
+            other => panic!("expected Repairable, got {other:?}"),
+        }
+
+        cleanup_submodule_fixture(&base);
+    }
+
+    #[test]
+    fn classify_base_blocks_on_uncommitted_work_inside_a_submodule() {
+        let (base, _sub) = submodule_fixture();
+        fs::write(base.join("sub").join("f.txt"), "edited\n").unwrap();
+
+        match classify_base(&base).unwrap() {
+            BaseState::Blocked(reason) => assert!(
+                reason.contains("sub"),
+                "expected the submodule to be named: {reason}"
+            ),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+
+        cleanup_submodule_fixture(&base);
+    }
+
+    #[test]
+    fn classify_base_blocks_on_changes_in_the_base_itself() {
+        let (base, _sub) = submodule_fixture();
+        fs::write(base.join("g.txt"), "changed\n").unwrap();
+
+        match classify_base(&base).unwrap() {
+            BaseState::Blocked(reason) => assert!(
+                reason.contains("dirty, refusing to fast-forward"),
+                "unexpected reason: {reason}"
+            ),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+
+        cleanup_submodule_fixture(&base);
+    }
+
+    #[test]
+    fn classify_base_blocks_a_stale_pointer_that_also_has_uncommitted_work() {
+        let (base, _sub) = submodule_fixture();
+        fs::write(base.join("sub").join("f.txt"), "two\n").unwrap();
+        git(&["commit", "-qam", "advance"], &base.join("sub"));
+        fs::write(base.join("sub").join("f.txt"), "three\n").unwrap();
+
+        match classify_base(&base).unwrap() {
+            BaseState::Blocked(reason) => assert!(
+                reason.contains("sub"),
+                "expected the submodule to be named: {reason}"
+            ),
+            other => panic!(
+                "a submodule with both a stale pointer and its own uncommitted work must \
+                 block, got {other:?}"
+            ),
+        }
+
+        cleanup_submodule_fixture(&base);
     }
 }
