@@ -75,22 +75,37 @@ private let colorSlots: [String: Int] = [
 /// --json` only stands in when that directory is missing or unreadable, and it
 /// misses sessions whose job record was never written.
 private enum BackgroundSessions {
+    /// Which sessions to hide as their own plants, plus how many busy
+    /// background sessions to credit to each interactive one instead.
+    struct Snapshot {
+        var backgroundIDs: Set<String> = []
+        var attribution: [String: Int] = [:]
+    }
+
     private static var sessionsDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/sessions")
     }
 
-    static func current() -> Set<String> {
-        fromSessionsDir() ?? fromAgentsCLI()
+    static func current() -> Snapshot {
+        fromSessionsDir() ?? Snapshot(backgroundIDs: fromAgentsCLI())
+    }
+
+    private struct Record {
+        var sessionID: String
+        var kind: String
+        var status: String?
+        var cwd: String?
+        var name: String?
     }
 
     /// nil means the directory itself could not answer, so the caller should
     /// fall back rather than treat silence as "nothing is background".
-    private static func fromSessionsDir() -> Set<String>? {
+    private static func fromSessionsDir() -> Snapshot? {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: sessionsDir.path) else { return nil }
 
-        var ids = Set<String>()
+        var records: [Record] = []
         var sawRecord = false
         for name in names where name.hasSuffix(".json") {
             let url = sessionsDir.appendingPathComponent(name)
@@ -100,9 +115,30 @@ private enum BackgroundSessions {
                   let kind = json["kind"] as? String
             else { continue }
             sawRecord = true
-            if kind == "bg" { ids.insert(sessionID) }
+            records.append(Record(
+                sessionID: sessionID, kind: kind,
+                status: json["status"] as? String,
+                cwd: json["cwd"] as? String,
+                name: json["name"] as? String
+            ))
         }
-        return sawRecord ? ids : nil
+        guard sawRecord else { return nil }
+
+        let backgroundIDs = Set(records.filter { $0.kind == "bg" }.map(\.sessionID))
+        let interactive = records.filter { $0.kind == "interactive" }
+
+        var attribution: [String: Int] = [:]
+        for job in records where job.kind == "bg" && job.status == "busy" {
+            guard let cwd = job.cwd, let name = job.name else { continue }
+            let owners = interactive.filter { $0.cwd == cwd && $0.name == name }
+            // A dispatch has no explicit parent link, so cwd+name is a guess.
+            // Crediting it when more than one interactive session matches
+            // could hang a bud on a plant that never started this work.
+            guard owners.count == 1 else { continue }
+            attribution[owners[0].sessionID, default: 0] += 1
+        }
+
+        return Snapshot(backgroundIDs: backgroundIDs, attribution: attribution)
     }
 
     private static let ttl: Double = 5
@@ -184,7 +220,7 @@ enum Store {
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
 
         let now = Date().timeIntervalSince1970
-        let backgroundSessions = BackgroundSessions.current()
+        let sessions = BackgroundSessions.current()
         var plants: [Plant] = []
         for name in names where name.hasSuffix(".json") && !reservedFiles.contains(name) {
             let url = dir.appendingPathComponent(name)
@@ -200,9 +236,9 @@ enum Store {
 
             // A background dispatch rewrites this file on every event same as an
             // interactive one, so its plant is skipped here rather than deleted.
-            if backgroundSessions.contains(sessionID) { continue }
+            if sessions.backgroundIDs.contains(sessionID) { continue }
 
-            let state = PlantState(raw: (json["state"] as? String) ?? "waiting")
+            var state = PlantState(raw: (json["state"] as? String) ?? "waiting")
             let updated = (json["updated_at"] as? Double) ?? 0
 
             // A plant that was already waiting before this clock existed carries no
@@ -218,6 +254,13 @@ enum Store {
             var agents = (json["agents"] as? Int) ?? 0
             let agentsAt = (json["agents_at"] as? Double) ?? 0
             if agents > 0, agentsAt > 0, now - agentsAt > staleAgentSeconds { agents = 0 }
+
+            let attributed = sessions.attribution[sessionID] ?? 0
+            agents += attributed
+            // Buds only draw in the working pose, so a waiting plant with
+            // attributed work must switch to it or the bud never shows. A
+            // plant already blocked on you (attention) stays that way.
+            if attributed > 0, state == .waiting { state = .working }
 
             plants.append(Plant(
                 sessionID: sessionID,
