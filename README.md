@@ -237,6 +237,15 @@ planter --pack candles
 Packs live in `$XDG_CONFIG_HOME/planter/<name>/`, or `~/.config/planter/<name>/`
 when that variable is unset. One pack draws the whole row.
 
+There is a worked one in `examples/packs/lavalamp` — a row of lava lamps, at
+four times the resolution of the plants. Copy it in and run it to see what the
+format can do:
+
+```sh
+cp -r examples/packs/lavalamp ~/.config/planter/lavalamp
+planter --pack lavalamp
+```
+
 ### pack.conf
 
 The grid size, and a colour for each character used in the art.
