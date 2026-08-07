@@ -364,18 +364,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
 // MARK: - Preview sheet
 
 /// Renders every frame in every colour to a PNG, over both a dark and a light
-/// background. Used to eyeball the art without starting a session.
+/// background. Used to eyeball the art without starting a session. Covers
+/// every pose planter can draw, at whatever frame count the pack gives each one.
 func writePreview(to path: String, pack: Pack, scale: CGFloat = 6) {
-    let frames: [(String, [[String]])] = [
-        ("working", pack.frames(state: .working, level: 0)),
-        ("1 agent", [pack.frames(state: .working, level: 1)[0]]),
-        ("2 agents", [pack.frames(state: .working, level: 2)[0]]),
-        ("waiting", pack.frames(state: .waiting, level: 0)),
-        ("wilt 2min", pack.frames(state: .waiting, level: 1)),
-        ("wilt 10min", pack.frames(state: .waiting, level: 2)),
-        ("attention", pack.frames(state: .attention, level: 0)),
-    ]
-    let flat = frames.flatMap { name, list in list.enumerated().map { ("\(name)\($0.offset + 1)", $0.element) } }
+    let flat: [(String, [String])] = PlantState.allCases.flatMap { state in
+        (0...2).flatMap { level -> [(String, [String])] in
+            let pose = "\(state.rawValue)-\(level)"
+            let frames = pack.frames(state: state, level: level)
+            return frames.enumerated().map { i, frame in
+                (frames.count > 1 ? "\(pose) \(frameSuffix(i))" : pose, frame)
+            }
+        }
+    }
 
     let cellW = CGFloat(pack.width) * scale
     let cellH = CGFloat(pack.height) * scale + 16
@@ -423,6 +423,81 @@ func writePreview(to path: String, pack: Pack, scale: CGFloat = 6) {
     print("wrote \(path)")
 }
 
+// MARK: - Pack export
+
+/// Spreadsheet-style labels for a multi-frame pose's files: a, b, ..., z, aa, ...
+private func frameSuffix(_ index: Int) -> String {
+    var n = index
+    var letters = ""
+    repeat {
+        letters = String(UnicodeScalar(97 + n % 26)!) + letters
+        n = n / 26 - 1
+    } while n >= 0
+    return letters
+}
+
+private func hueField(_ hue: PaletteHue) -> String {
+    switch hue {
+    case .session(let offset):
+        if offset == 0 { return "session" }
+        return offset > 0 ? "session+\(Double(offset))" : "session-\(Double(-offset))"
+    case .literal(let value):
+        return "\(Double(value))"
+    }
+}
+
+/// Double's default description is the shortest string that reads back to the
+/// exact same value, which is what a round-trip through pack.conf needs.
+private func packConf(_ pack: Pack) -> String {
+    var lines = ["size = \(pack.width) \(pack.height)", ""]
+    for glyph in pack.glyphs.keys.sorted() {
+        let c = pack.glyphs[glyph]!
+        lines.append("\(glyph) = \(hueField(c.hue)) \(Double(c.saturation)) \(Double(c.brightness)) \(Double(c.alpha))")
+    }
+    return lines.joined(separator: "\n") + "\n"
+}
+
+/// Writes `pack` as a loadable pack directory: `pack.conf` plus one frame file
+/// per pose, bare for a single frame or suffixed `-a`, `-b`, ... for several.
+/// Refuses a directory that already has a pack.conf, so an export can never
+/// clobber a pack someone is already keeping there.
+func exportPack(to dirPath: String, pack: Pack) {
+    let dir = URL(fileURLWithPath: dirPath)
+    let confPath = dir.appendingPathComponent("pack.conf")
+    if FileManager.default.fileExists(atPath: confPath.path) {
+        FileHandle.standardError.write(
+            "planter: \(dirPath) already has a pack.conf — refusing to overwrite\n".data(using: .utf8)!
+        )
+        exit(1)
+    }
+
+    do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try packConf(pack).write(to: confPath, atomically: true, encoding: .utf8)
+    } catch {
+        FileHandle.standardError.write("planter: could not write \(dirPath): \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+
+    var fileCount = 1
+    for pose in pack.poses.keys.sorted() {
+        let frames = pack.poses[pose]!
+        for (i, frame) in frames.enumerated() {
+            let name = frames.count > 1 ? "\(pose)-\(frameSuffix(i)).txt" : "\(pose).txt"
+            let text = frame.joined(separator: "\n") + "\n"
+            do {
+                try text.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+                fileCount += 1
+            } catch {
+                FileHandle.standardError.write("planter: could not write \(name): \(error)\n".data(using: .utf8)!)
+                exit(1)
+            }
+        }
+    }
+
+    print("wrote \(dirPath) (\(fileCount) files)")
+}
+
 // MARK: - Entry
 
 func printPlants() {
@@ -455,13 +530,14 @@ if args.contains("--help") || args.contains("-h") {
     print("""
     planter — a row of pixel plants, one per Claude Code session
 
-      planter                 run the overlay
-      planter --list          print the live sessions as text
-      planter --demo          run the overlay with four fake plants
-      planter --preview FILE  render all frames and colours to a PNG
-      planter --scale N       pixel size, default 3
-      planter --no-labels     hide the directory labels
-      planter --pack NAME     use a pack from ~/.config/planter/NAME for this run
+      planter                      run the overlay
+      planter --list               print the live sessions as text
+      planter --demo               run the overlay with four fake plants
+      planter --preview FILE       render all frames and colours to a PNG
+      planter --export-pack DIR    write the active pack to DIR, ready to load
+      planter --scale N            pixel size, default 3
+      planter --no-labels          hide the directory labels
+      planter --pack NAME          use a pack from ~/.config/planter/NAME for this run
 
     A plant blooms while its session works and wilts when it needs you.
     State lives in ~/.claude/planter (override with CLAUDE_PLANTER_DIR).
@@ -482,6 +558,11 @@ let activePack = PackLoader.resolve(name: flagValue("--pack") ?? Store.loadPackN
 
 if let path = flagValue("--preview") {
     writePreview(to: path, pack: activePack)
+    exit(0)
+}
+
+if let path = flagValue("--export-pack") {
+    exportPack(to: path, pack: activePack)
     exit(0)
 }
 
