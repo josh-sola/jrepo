@@ -87,6 +87,11 @@ private enum BackgroundSessions {
             .appendingPathComponent(".claude/sessions")
     }
 
+    private static var jobsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/jobs")
+    }
+
     static func current() -> Snapshot {
         fromSessionsDir() ?? Snapshot(backgroundIDs: fromAgentsCLI())
     }
@@ -94,7 +99,7 @@ private enum BackgroundSessions {
     private struct Record {
         var sessionID: String
         var kind: String
-        var status: String?
+        var jobID: String?
         var cwd: String?
         var name: String?
     }
@@ -117,7 +122,7 @@ private enum BackgroundSessions {
             sawRecord = true
             records.append(Record(
                 sessionID: sessionID, kind: kind,
-                status: json["status"] as? String,
+                jobID: json["jobId"] as? String,
                 cwd: json["cwd"] as? String,
                 name: json["name"] as? String
             ))
@@ -128,7 +133,7 @@ private enum BackgroundSessions {
         let interactive = records.filter { $0.kind == "interactive" }
 
         var attribution: [String: Int] = [:]
-        for job in records where job.kind == "bg" && job.status == "busy" {
+        for job in records where job.kind == "bg" && isWorking(job.jobID) {
             guard let cwd = job.cwd, let name = job.name else { continue }
             let owners = interactive.filter { $0.cwd == cwd && $0.name == name }
             // A dispatch has no explicit parent link, so cwd+name is a guess.
@@ -139,6 +144,21 @@ private enum BackgroundSessions {
         }
 
         return Snapshot(backgroundIDs: backgroundIDs, attribution: attribution)
+    }
+
+    /// An untouched state file is no longer evidence of what a job is doing, so
+    /// its age counts as much as its value.
+    private static func isWorking(_ jobID: String?) -> Bool {
+        guard let jobID else { return false }
+        let url = jobsDir.appendingPathComponent(jobID).appendingPathComponent("state.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let state = json["state"] as? String,
+              state == "working",
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let modified = attrs[.modificationDate] as? Date
+        else { return false }
+        return Date().timeIntervalSince(modified) <= staleAgentSeconds
     }
 
     private static let ttl: Double = 5
