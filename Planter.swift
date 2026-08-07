@@ -75,21 +75,17 @@ private let colorSlots: [String: Int] = [
 /// --json` only stands in when that directory is missing or unreadable, and it
 /// misses sessions whose job record was never written.
 private enum BackgroundSessions {
-    /// Which sessions to hide as their own plants, plus how many busy
-    /// background sessions to credit to each interactive one instead.
+    /// Which sessions to hide as their own plants, plus which interactive session
+    /// owns each one's work. Whether that work is running is decided elsewhere,
+    /// from the background session's own state file.
     struct Snapshot {
         var backgroundIDs: Set<String> = []
-        var attribution: [String: Int] = [:]
+        var owners: [String: String] = [:]
     }
 
     private static var sessionsDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/sessions")
-    }
-
-    private static var jobsDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/jobs")
     }
 
     static func current() -> Snapshot {
@@ -132,39 +128,18 @@ private enum BackgroundSessions {
         let backgroundIDs = Set(records.filter { $0.kind == "bg" }.map(\.sessionID))
         let interactive = records.filter { $0.kind == "interactive" }
 
-        var attribution: [String: Int] = [:]
-        for job in records where job.kind == "bg" && isWorking(job.jobID) {
+        var owners: [String: String] = [:]
+        for job in records where job.kind == "bg" {
             guard let cwd = job.cwd, let name = job.name else { continue }
-            let owners = interactive.filter { $0.cwd == cwd && $0.name == name }
+            let matches = interactive.filter { $0.cwd == cwd && $0.name == name }
             // A dispatch has no explicit parent link, so cwd+name is a guess.
             // Crediting it when more than one interactive session matches
             // could hang a bud on a plant that never started this work.
-            guard owners.count == 1 else { continue }
-            attribution[owners[0].sessionID, default: 0] += 1
+            guard matches.count == 1 else { continue }
+            owners[job.sessionID] = matches[0].sessionID
         }
 
-        return Snapshot(backgroundIDs: backgroundIDs, attribution: attribution)
-    }
-
-    /// An untouched state file is no longer evidence of what a job is doing, so
-    /// its age counts as much as its value.
-    private static func isWorking(_ jobID: String?) -> Bool {
-        guard let jobID else { return false }
-        let url = jobsDir.appendingPathComponent(jobID).appendingPathComponent("state.json")
-        guard let data = try? Data(contentsOf: url),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let modified = attrs[.modificationDate] as? Date
-        else { return false }
-
-        // A job that fanned out reports "done" when its own turn ends, while its
-        // agents keep running. Only the in-flight count falls back to zero once the
-        // work really stops — `fan` and `tempo` both linger and would bloom for good.
-        let running = (json["state"] as? String) == "working"
-        let inFlight = (json["inFlight"] as? [String: Any])?["tasks"] as? Int ?? 0
-        guard running || inFlight > 0 else { return false }
-
-        return Date().timeIntervalSince(modified) <= staleAgentSeconds
+        return Snapshot(backgroundIDs: backgroundIDs, owners: owners)
     }
 
     private static let ttl: Double = 5
@@ -247,7 +222,8 @@ enum Store {
 
         let now = Date().timeIntervalSince1970
         let sessions = BackgroundSessions.current()
-        var plants: [Plant] = []
+
+        var records: [(sessionID: String, json: [String: Any])] = []
         for name in names where name.hasSuffix(".json") && !reservedFiles.contains(name) {
             let url = dir.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url),
@@ -259,11 +235,26 @@ enum Store {
                 try? fm.removeItem(at: url)
                 continue
             }
+            records.append((sessionID, json))
+        }
 
-            // A background dispatch rewrites this file on every event same as an
-            // interactive one, so its plant is skipped here rather than deleted.
-            if sessions.backgroundIDs.contains(sessionID) { continue }
+        // The daemon's job file reports "blocked" or "done" while the session is
+        // still taking turns, so the bud follows the same hook that drives every
+        // other plant instead. An untouched file is no longer evidence either way.
+        var attribution: [String: Int] = [:]
+        for record in records where sessions.backgroundIDs.contains(record.sessionID) {
+            guard let owner = sessions.owners[record.sessionID],
+                  (record.json["state"] as? String) == "working",
+                  let updated = record.json["updated_at"] as? Double,
+                  now - updated <= staleAgentSeconds
+            else { continue }
+            attribution[owner, default: 0] += 1
+        }
 
+        var plants: [Plant] = []
+        // A background dispatch rewrites its file on every event same as an
+        // interactive one, so its plant is skipped here rather than deleted.
+        for (sessionID, json) in records where !sessions.backgroundIDs.contains(sessionID) {
             var state = PlantState(raw: (json["state"] as? String) ?? "waiting")
             let updated = (json["updated_at"] as? Double) ?? 0
 
@@ -281,7 +272,7 @@ enum Store {
             let agentsAt = (json["agents_at"] as? Double) ?? 0
             if agents > 0, agentsAt > 0, now - agentsAt > staleAgentSeconds { agents = 0 }
 
-            let attributed = sessions.attribution[sessionID] ?? 0
+            let attributed = attribution[sessionID] ?? 0
             agents += attributed
             // Buds only draw in the working pose, so a waiting plant with
             // attributed work must switch to it or the bud never shows. A
