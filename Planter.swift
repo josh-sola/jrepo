@@ -318,10 +318,20 @@ enum Store {
     }
 
     static func saveShowLabels(_ show: Bool) {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["show_labels": show])
-        else { return }
+        // Merged rather than replaced: the pack name lives in this file too, and
+        // only a hand edit puts it there.
+        var prefs = loadPrefs()
+        prefs["show_labels"] = show
+        guard let data = try? JSONSerialization.data(withJSONObject: prefs) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: prefsFile)
+    }
+
+    private static func loadPrefs() -> [String: Any] {
+        guard let data = try? Data(contentsOf: prefsFile),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return [:] }
+        return json
     }
 
     /// The globally configured pack name, nil if none is set. `--pack` overrides
