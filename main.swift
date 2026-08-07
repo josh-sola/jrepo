@@ -45,12 +45,20 @@ final class PlanterView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// A scattering pack starts each plant somewhere else in its cycle, so a row of
+    /// them never moves as one. The seed is a raw hash and can be negative, and a
+    /// negative frame index would crash rather than wrap.
+    private func poseFrame(_ plant: Plant, of count: Int) -> Int {
+        guard layout.pack.phase == .scatter else { return frameIndex % count }
+        return (frameIndex + plant.phaseSeed % count + count) % count
+    }
+
     private func image(for plant: Plant) -> NSImage {
         let level = plant.state == .working
             ? min(plant.agents, maxWorkingLevel)
             : min(max(plant.waitStage, 0), maxWiltLevel)
         let frames = layout.pack.frames(state: plant.state, level: level)
-        let index = frameIndex % frames.count
+        let index = poseFrame(plant, of: frames.count)
         let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(level)"
         if let cached = imageCache[key] { return cached }
         let img = layout.pack.image(rows: frames[index], hue: plant.hue)
@@ -449,7 +457,10 @@ private func hueField(_ hue: PaletteHue) -> String {
 /// Double's default description is the shortest string that reads back to the
 /// exact same value, which is what a round-trip through pack.conf needs.
 private func packConf(_ pack: Pack) -> String {
-    var lines = ["size = \(pack.width) \(pack.height)", ""]
+    var lines = ["size = \(pack.width) \(pack.height)"]
+    if let scale = pack.scale { lines.append("scale = \(Double(scale))") }
+    if pack.phase != .sync { lines.append("phase = \(pack.phase.rawValue)") }
+    lines.append("")
     for glyph in pack.glyphs.keys.sorted() {
         let c = pack.glyphs[glyph]!
         lines.append("\(glyph) = \(hueField(c.hue)) \(Double(c.saturation)) \(Double(c.brightness)) \(Double(c.alpha))")

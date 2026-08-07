@@ -284,6 +284,19 @@ Leave it out and the plants are drawn at the default 3, same as the built-in art
 Whole numbers are safest: on a display that isn't Retina, a fractional scale
 lands pixels on half-points and the art comes out visibly uneven.
 
+By default every plant shows the same frame at the same moment, so motion across
+the whole row reads as one thing. An optional `phase` breaks them apart:
+
+```
+phase = scatter
+```
+
+Each plant then starts its cycle at its own point in the frames, taken from its
+session id, so it keeps that point for the session's whole life instead of
+jumping when a neighbour appears. Scatter art that has no reason to agree — a row
+of lava lamps in lockstep looks like one lamp copied — and leave it out for art
+whose animation is the message, like the plants' sway.
+
 Nothing here knows what your art depicts, which is the point. The built-in pack
 puts `session` on the petals and the pot and leaves the leaves green, but a
 candle pack can put `session` on the flame and fix the wax instead.

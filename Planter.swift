@@ -26,6 +26,10 @@ struct Plant {
     var state: PlantState
     var createdAt: Double
     var hue: CGFloat = 0
+    /// Where this plant starts its frame cycle. Taken from the session id rather
+    /// than drawn at random, so a plant keeps its place for its whole life instead
+    /// of jumping whenever a neighbour appears or the row is reordered.
+    var phaseSeed: Int = 0
     /// An explicit colour name from the launcher, e.g. "red". Reserved ahead of
     /// hash-derived hues so a collision can never steal a requested colour.
     var color: String? = nil
@@ -286,6 +290,7 @@ enum Store {
                 waitStage: wiltStage(waitingSince: since, now: now),
                 state: state,
                 createdAt: (json["created_at"] as? Double) ?? 0,
+                phaseSeed: stableHash(sessionID),
                 color: json["color"] as? String,
                 tab: json["tab"] as? Int
             ))

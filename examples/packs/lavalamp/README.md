@@ -15,6 +15,10 @@ The art is 40x32 with `scale = 2`, so it carries four times the detail of the
 built-in plants while drawing about the same size on screen. Whole-number scales
 only, unless you know the row lands on a Retina display.
 
+`phase = scatter` starts each lamp at its own frame, so a row of them never
+circulates as one. Nothing about a lamp says it should agree with the lamp beside
+it, and in lockstep they read as one lamp drawn several times.
+
 Two blobs circulate at opposite phases. Their rise and fall is eased so they
 crawl at the wide bottom of the glass and run at the narrow top, which is also
 what drops the point where they pass each other down into the lower half. Lava

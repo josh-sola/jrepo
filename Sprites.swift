@@ -14,6 +14,16 @@ struct GlyphColor {
     let alpha: CGFloat
 }
 
+/// Whether a pack's plants all show the same frame at the same moment.
+enum FramePhase: String {
+    /// Every plant in step. Motion across the whole row reads as one signal,
+    /// which is what a pack wants when the animation is the message.
+    case sync
+    /// Each plant starts its cycle somewhere else. A row of things that have no
+    /// reason to agree — lamps, candles, clocks — looks wrong in lockstep.
+    case scatter
+}
+
 /// A pose key is "<state>-<level>", e.g. "working-1"; level means subagent
 /// count for `working` and wilt stage otherwise.
 struct Pack {
@@ -31,14 +41,16 @@ struct Pack {
     /// half the pixel size to come out the same size on screen, and only the pack
     /// knows that. Nil leaves the caller's own scale alone.
     let scale: CGFloat?
+    let phase: FramePhase
 
     init(width: Int, height: Int, glyphs: [Character: GlyphColor],
-         poses: [String: [[String]]], scale: CGFloat? = nil) {
+         poses: [String: [[String]]], scale: CGFloat? = nil, phase: FramePhase = .sync) {
         self.width = width
         self.height = height
         self.glyphs = glyphs
         self.poses = poses
         self.scale = scale
+        self.phase = phase
         (inkMinX, inkWidth) = Pack.ink(width: width, poses: poses)
     }
 
@@ -352,6 +364,7 @@ enum PackLoadError: Error, CustomStringConvertible {
     case sizeMissing
     case sizeInvalid(String)
     case scaleInvalid(String)
+    case phaseInvalid(String)
     case paletteLine(String)
     case dotPaletted
     case dirUnreadable
@@ -369,6 +382,7 @@ enum PackLoadError: Error, CustomStringConvertible {
         case .sizeMissing: return "pack.conf has no size"
         case .sizeInvalid(let line): return "pack.conf has an invalid size: \(line)"
         case .scaleInvalid(let line): return "pack.conf has an invalid scale: \(line)"
+        case .phaseInvalid(let line): return "pack.conf has an invalid phase: \(line)"
         case .paletteLine(let line): return "pack.conf has an invalid palette line: \(line)"
         case .dotPaletted: return "pack.conf gives '.' a palette entry"
         case .dirUnreadable: return "has no readable pack directory"
@@ -425,17 +439,29 @@ enum PackLoader {
         guard let text = try? String(contentsOf: dir.appendingPathComponent("pack.conf"), encoding: .utf8)
         else { throw PackLoadError.configMissing }
 
-        let (width, height, glyphs, scale) = try parseConf(text)
-        let poses = try loadPoses(dir: dir, width: width, height: height, glyphs: glyphs)
-        return Pack(width: width, height: height, glyphs: glyphs, poses: poses, scale: scale)
+        let conf = try parseConf(text)
+        let poses = try loadPoses(dir: dir, width: conf.width, height: conf.height, glyphs: conf.glyphs)
+        return Pack(
+            width: conf.width, height: conf.height, glyphs: conf.glyphs,
+            poses: poses, scale: conf.scale, phase: conf.phase
+        )
     }
 
     // MARK: pack.conf
 
-    private static func parseConf(_ text: String) throws -> (Int, Int, [Character: GlyphColor], CGFloat?) {
+    private struct Conf {
+        var width: Int
+        var height: Int
+        var glyphs: [Character: GlyphColor]
+        var scale: CGFloat?
+        var phase: FramePhase
+    }
+
+    private static func parseConf(_ text: String) throws -> Conf {
         var width: Int?
         var height: Int?
         var scale: CGFloat?
+        var phase: FramePhase = .sync
         var glyphs: [Character: GlyphColor] = [:]
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -447,7 +473,8 @@ enum PackLoader {
             // A palette line is recognized by shape, not by a leading '#', so a
             // glyph literally named '#' can still be given a colour.
             guard sides.count == 2,
-                  sides[0] == "size" || sides[0] == "scale" || sides[0].count == 1
+                  sides[0] == "size" || sides[0] == "scale" || sides[0] == "phase"
+                      || sides[0].count == 1
             else {
                 if line.hasPrefix("#") { continue }
                 throw PackLoadError.paletteLine(line)
@@ -464,6 +491,12 @@ enum PackLoader {
             if key == "scale" {
                 guard let n = Double(value), n > 0 else { throw PackLoadError.scaleInvalid(line) }
                 scale = CGFloat(n)
+                continue
+            }
+
+            if key == "phase" {
+                guard let parsed = FramePhase(rawValue: value) else { throw PackLoadError.phaseInvalid(line) }
+                phase = parsed
                 continue
             }
 
@@ -489,7 +522,7 @@ enum PackLoader {
         }
 
         guard let w = width, let h = height else { throw PackLoadError.sizeMissing }
-        return (w, h, glyphs, scale)
+        return Conf(width: w, height: h, glyphs: glyphs, scale: scale, phase: phase)
     }
 
     private static func parseHue(_ field: String) -> PaletteHue? {
