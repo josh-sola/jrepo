@@ -71,6 +71,94 @@ private let colorSlots: [String: Int] = [
     "cyan": 4, "blue": 5, "purple": 6, "pink": 7,
 ]
 
+/// `~/.claude/sessions` is the authority whenever it answers; `claude agents
+/// --json` only stands in when that directory is missing or unreadable, and it
+/// misses sessions whose job record was never written.
+private enum BackgroundSessions {
+    private static var sessionsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions")
+    }
+
+    static func current() -> Set<String> {
+        fromSessionsDir() ?? fromAgentsCLI()
+    }
+
+    /// nil means the directory itself could not answer, so the caller should
+    /// fall back rather than treat silence as "nothing is background".
+    private static func fromSessionsDir() -> Set<String>? {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: sessionsDir.path) else { return nil }
+
+        var ids = Set<String>()
+        var sawRecord = false
+        for name in names where name.hasSuffix(".json") {
+            let url = sessionsDir.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let sessionID = json["sessionId"] as? String,
+                  let kind = json["kind"] as? String
+            else { continue }
+            sawRecord = true
+            if kind == "bg" { ids.insert(sessionID) }
+        }
+        return sawRecord ? ids : nil
+    }
+
+    private static let ttl: Double = 5
+    private static let timeout: Double = 2
+
+    private static var cached: Set<String> = []
+    private static var cachedAt: Double = 0
+
+    private static func fromAgentsCLI() -> Set<String> {
+        let now = Date().timeIntervalSince1970
+        if now - cachedAt < ttl { return cached }
+        cachedAt = now
+        cached = fetchFromAgentsCLI()
+        return cached
+    }
+
+    /// Fails open: a missing command, a timeout, or unexpected output all give
+    /// an empty set, because a blank overlay is worse than the plants this
+    /// hides.
+    private static func fetchFromAgentsCLI() -> Set<String> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["claude", "agents", "--json"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+
+        guard (try? process.run()) != nil else { return [] }
+
+        // Read on another thread so a hung `claude` can be given up on instead
+        // of blocking the draw loop indefinitely.
+        let done = DispatchSemaphore(value: 0)
+        var data = Data()
+        DispatchQueue.global(qos: .utility).async {
+            data = stdout.fileHandleForReading.readDataToEndOfFile()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success else {
+            process.terminate()
+            return []
+        }
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0,
+              let raw = try? JSONSerialization.jsonObject(with: data),
+              let records = raw as? [[String: Any]]
+        else { return [] }
+
+        var ids = Set<String>()
+        for record in records where record["kind"] as? String == "background" {
+            if let sessionID = record["sessionId"] as? String { ids.insert(sessionID) }
+        }
+        return ids
+    }
+}
+
 enum Store {
     static var dir: URL = {
         if let override = ProcessInfo.processInfo.environment["CLAUDE_PLANTER_DIR"] {
@@ -96,6 +184,7 @@ enum Store {
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
 
         let now = Date().timeIntervalSince1970
+        let backgroundSessions = BackgroundSessions.current()
         var plants: [Plant] = []
         for name in names where name.hasSuffix(".json") && !reservedFiles.contains(name) {
             let url = dir.appendingPathComponent(name)
@@ -108,6 +197,10 @@ enum Store {
                 try? fm.removeItem(at: url)
                 continue
             }
+
+            // A background dispatch rewrites this file on every event same as an
+            // interactive one, so its plant is skipped here rather than deleted.
+            if backgroundSessions.contains(sessionID) { continue }
 
             let state = PlantState(raw: (json["state"] as? String) ?? "waiting")
             let updated = (json["updated_at"] as? Double) ?? 0
