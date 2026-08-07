@@ -153,11 +153,17 @@ private enum BackgroundSessions {
         let url = jobsDir.appendingPathComponent(jobID).appendingPathComponent("state.json")
         guard let data = try? Data(contentsOf: url),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let state = json["state"] as? String,
-              state == "working",
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let modified = attrs[.modificationDate] as? Date
         else { return false }
+
+        // A job that fanned out reports "done" when its own turn ends, while its
+        // agents keep running. Only the in-flight count falls back to zero once the
+        // work really stops — `fan` and `tempo` both linger and would bloom for good.
+        let running = (json["state"] as? String) == "working"
+        let inFlight = (json["inFlight"] as? [String: Any])?["tasks"] as? Int ?? 0
+        guard running || inFlight > 0 else { return false }
+
         return Date().timeIntervalSince(modified) <= staleAgentSeconds
     }
 
