@@ -298,9 +298,13 @@ waiting-0     waiting-1     waiting-2      fresh, past 2 minutes, past 10
 attention-0   attention-1   attention-2    blocked, at each of those ages
 ```
 
-All nine are required. Planter decides which one to draw and when — a pack
-supplies the art and nothing else, so it cannot add a fourth wilt stage or raise
-the two-bud cap.
+The three level-`0` poses are required. Levels `1` and `2` fall back to the `0`
+of their own state, so a pack that doesn't count subagents, or doesn't want to
+grade its wilt, can ship three poses instead of nine. Nothing stands in for a
+missing level `0`: a pack has to say what blocked looks like.
+
+Planter decides which pose to draw and when — a pack supplies the art and
+nothing else, so it cannot add a fourth wilt stage or raise the two-bud cap.
 
 A pose is one static frame at `waiting-0.txt`, or several at `waiting-0-a.txt`,
 `waiting-0-b.txt`, and so on, cycled in filename order. Any pose can animate;
@@ -319,7 +323,8 @@ built-in art and prints one line saying which check it was:
 
 - `pack.conf` missing, unparseable, or without a valid `size`
 - a palette entry for `.`
-- any of the nine poses missing, or both a bare and a suffixed file for one
+- any level-`0` pose missing, or both a bare and a suffixed file for one
+- a frame file no pose uses, which is how a misspelt name is caught
 - a frame with the wrong number of rows, or a row past the declared width
 - a glyph in the art with no palette entry
 

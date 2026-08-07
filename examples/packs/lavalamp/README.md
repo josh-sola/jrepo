@@ -24,9 +24,8 @@ Waiting drains both pools and drops the pale core, so a still frame of waiting
 never looks like a still frame of working. That matters because the three wilt
 stages are the same art at three depths, and motion is the only other cue.
 
-## Why so many files
+## Why there is no working-1 or working-2
 
-The three `working-*` levels are byte-identical. This pack spends the whole
-glass on one signal — working or not — rather than showing how many subagents
-are running, but a pack has to supply all nine poses, so the same twenty frames
-are stored three times.
+This pack spends the whole glass on one signal — working or not — rather than
+showing how many subagents are running. Those two poses fall back to
+`working-0`, so leaving them out draws the same lamp whatever is running.

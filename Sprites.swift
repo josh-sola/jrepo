@@ -357,6 +357,7 @@ enum PackLoadError: Error, CustomStringConvertible {
     case dirUnreadable
     case poseMissing(String)
     case poseConflict(String)
+    case strayFrame(String)
     case frameUnreadable(String)
     case rowCount(String, expected: Int, found: Int)
     case rowTooLong(String)
@@ -373,6 +374,7 @@ enum PackLoadError: Error, CustomStringConvertible {
         case .dirUnreadable: return "has no readable pack directory"
         case .poseMissing(let pose): return "is missing pose \(pose)"
         case .poseConflict(let pose): return "has both a bare and suffixed file for pose \(pose)"
+        case .strayFrame(let file): return "has a frame file no pose uses: \(file)"
         case .frameUnreadable(let file): return "has no readable frame \(file)"
         case .rowCount(let file, let expected, let found):
             return "\(file) has \(found) rows, expected \(expected)"
@@ -512,6 +514,7 @@ enum PackLoader {
         let frameFiles = Set(entries.filter { $0.hasSuffix(".txt") })
 
         var poses: [String: [[String]]] = [:]
+        var claimed: Set<String> = []
         for state in PlantState.allCases {
             for level in levels {
                 let pose = "\(state.rawValue)-\(level)"
@@ -523,11 +526,27 @@ enum PackLoader {
                 case (true, true): files = [bare]
                 case (false, false): files = suffixed
                 case (true, false): throw PackLoadError.poseConflict(pose)
-                case (false, true): throw PackLoadError.poseMissing(pose)
+                case (false, true):
+                    // Level 0 is the state itself and has to be drawn — nothing can
+                    // stand in for "blocked on you". The levels above it are only
+                    // gradations within that state, so a pack that doesn't count
+                    // subagents or grade its wilt can leave them out and get level 0.
+                    guard level > 0, let base = poses["\(state.rawValue)-0"] else {
+                        throw PackLoadError.poseMissing(pose)
+                    }
+                    poses[pose] = base
+                    continue
                 }
 
+                claimed.formUnion(files)
                 poses[pose] = try files.map { try loadFrame(dir.appendingPathComponent($0), width: width, height: height) }
             }
+        }
+
+        // Falling back on an absent pose would otherwise swallow a misspelt frame
+        // name, handing back a pack that quietly draws the wrong art.
+        if let stray = frameFiles.subtracting(claimed).sorted().first {
+            throw PackLoadError.strayFrame(stray)
         }
 
         try validate(poses: poses, glyphs: glyphs)
