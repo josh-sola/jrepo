@@ -200,7 +200,8 @@ A launcher that starts a `claude` process can set three environment variables
 on it, and the hook reads them straight off the environment rather than
 remembering them, so nothing can drift:
 `PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
-`purple`, `pink`) fixes its colour instead of hashing the session id,
+`purple`, `pink`) fixes its colour instead of hashing the session id, and is
+given exactly as asked even if another plant already has it,
 `PLANTER_LABEL` fixes its name instead of the label-hook or directory basename,
 and `PLANTER_TAB_INDEX` (a 1-based position) sets its place in the row instead
 of sorting by creation time. Any of the three left unset falls back to today's

@@ -387,8 +387,11 @@ enum Store {
 
     /// Assigns hues in creation order, regardless of how `plants` is ordered when
     /// called — display order changes (a ⌘-drag, an explicit tab) must never
-    /// recolour a plant. Explicit `color` requests are reserved first, so a
-    /// hash-derived collision can only ever probe around them, never take one.
+    /// recolour a plant. A requested colour is given exactly as asked, even when
+    /// another session already has it: a launcher that names a colour means it, and
+    /// two red terminals should show two red plants. Only the hash-derived hues
+    /// move aside on a collision, and they move around the requests, never take
+    /// one.
     private static func assignHues(_ plants: inout [Plant]) {
         let byCreation = plants.indices.sorted {
             (plants[$0].createdAt, plants[$0].sessionID) <
@@ -399,12 +402,7 @@ enum Store {
         var reserved = Set<Int>()
 
         for i in byCreation {
-            guard let name = plants[i].color, var slot = colorSlots[name] else { continue }
-            var tries = 0
-            while taken.contains(slot) && tries < plantHues.count {
-                slot = (slot + 1) % plantHues.count
-                tries += 1
-            }
+            guard let name = plants[i].color, let slot = colorSlots[name] else { continue }
             taken.insert(slot)
             reserved.insert(i)
             plants[i].hue = plantHues[slot]
