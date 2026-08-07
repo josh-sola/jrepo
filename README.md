@@ -261,6 +261,20 @@ Saturation, brightness and alpha run 0 to 1, and alpha defaults to 1. `#` starts
 a comment, except when the line is the palette entry for the `#` glyph itself
 (`# = …`). `.` is always transparent and cannot be given a colour.
 
+An optional `scale` says how many points one of your pixels is drawn at, and it
+is how a pack changes its resolution without changing its size on screen. A pack
+drawn at twice the detail asks for half the pixel size:
+
+```
+size  = 40 32
+scale = 2
+```
+
+Leave it out and the plants are drawn at the default 3, same as the built-in art.
+`--scale` still overrides it for a run, so you can blow a pack up to look at it.
+Whole numbers are safest: on a display that isn't Retina, a fractional scale
+lands pixels on half-points and the art comes out visibly uneven.
+
 Nothing here knows what your art depicts, which is the point. The built-in pack
 puts `session` on the petals and the pot and leaves the leaves green, but a
 candle pack can put `session` on the flame and fix the wax instead.

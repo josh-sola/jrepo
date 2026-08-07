@@ -26,12 +26,19 @@ struct Pack {
     /// don't hold its plants apart.
     let inkMinX: Int
     let inkWidth: Int
+    /// How many points one of this pack's pixels is drawn at. Resolution belongs to
+    /// the art rather than to the viewer: a pack drawn at twice the detail wants
+    /// half the pixel size to come out the same size on screen, and only the pack
+    /// knows that. Nil leaves the caller's own scale alone.
+    let scale: CGFloat?
 
-    init(width: Int, height: Int, glyphs: [Character: GlyphColor], poses: [String: [[String]]]) {
+    init(width: Int, height: Int, glyphs: [Character: GlyphColor],
+         poses: [String: [[String]]], scale: CGFloat? = nil) {
         self.width = width
         self.height = height
         self.glyphs = glyphs
         self.poses = poses
+        self.scale = scale
         (inkMinX, inkWidth) = Pack.ink(width: width, poses: poses)
     }
 
@@ -344,6 +351,7 @@ enum PackLoadError: Error, CustomStringConvertible {
     case configMissing
     case sizeMissing
     case sizeInvalid(String)
+    case scaleInvalid(String)
     case paletteLine(String)
     case dotPaletted
     case dirUnreadable
@@ -359,6 +367,7 @@ enum PackLoadError: Error, CustomStringConvertible {
         case .configMissing: return "has no readable pack.conf"
         case .sizeMissing: return "pack.conf has no size"
         case .sizeInvalid(let line): return "pack.conf has an invalid size: \(line)"
+        case .scaleInvalid(let line): return "pack.conf has an invalid scale: \(line)"
         case .paletteLine(let line): return "pack.conf has an invalid palette line: \(line)"
         case .dotPaletted: return "pack.conf gives '.' a palette entry"
         case .dirUnreadable: return "has no readable pack directory"
@@ -414,16 +423,17 @@ enum PackLoader {
         guard let text = try? String(contentsOf: dir.appendingPathComponent("pack.conf"), encoding: .utf8)
         else { throw PackLoadError.configMissing }
 
-        let (width, height, glyphs) = try parseConf(text)
+        let (width, height, glyphs, scale) = try parseConf(text)
         let poses = try loadPoses(dir: dir, width: width, height: height, glyphs: glyphs)
-        return Pack(width: width, height: height, glyphs: glyphs, poses: poses)
+        return Pack(width: width, height: height, glyphs: glyphs, poses: poses, scale: scale)
     }
 
     // MARK: pack.conf
 
-    private static func parseConf(_ text: String) throws -> (Int, Int, [Character: GlyphColor]) {
+    private static func parseConf(_ text: String) throws -> (Int, Int, [Character: GlyphColor], CGFloat?) {
         var width: Int?
         var height: Int?
+        var scale: CGFloat?
         var glyphs: [Character: GlyphColor] = [:]
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -434,7 +444,9 @@ enum PackLoader {
 
             // A palette line is recognized by shape, not by a leading '#', so a
             // glyph literally named '#' can still be given a colour.
-            guard sides.count == 2, sides[0] == "size" || sides[0].count == 1 else {
+            guard sides.count == 2,
+                  sides[0] == "size" || sides[0] == "scale" || sides[0].count == 1
+            else {
                 if line.hasPrefix("#") { continue }
                 throw PackLoadError.paletteLine(line)
             }
@@ -444,6 +456,12 @@ enum PackLoader {
                 let dims = value.split(separator: " ").compactMap { Int($0) }
                 guard dims.count == 2, dims[0] > 0, dims[1] > 0 else { throw PackLoadError.sizeInvalid(line) }
                 (width, height) = (dims[0], dims[1])
+                continue
+            }
+
+            if key == "scale" {
+                guard let n = Double(value), n > 0 else { throw PackLoadError.scaleInvalid(line) }
+                scale = CGFloat(n)
                 continue
             }
 
@@ -469,7 +487,7 @@ enum PackLoader {
         }
 
         guard let w = width, let h = height else { throw PackLoadError.sizeMissing }
-        return (w, h, glyphs)
+        return (w, h, glyphs, scale)
     }
 
     private static func parseHue(_ field: String) -> PaletteHue? {

@@ -567,8 +567,10 @@ if let path = flagValue("--export-pack") {
 }
 
 // --no-labels wins for this run; otherwise the last right-click choice stands.
+// A pack that declares a scale is asking to be drawn at its own resolution, so it
+// outranks the default — but not someone passing --scale to look at it larger.
 let layout = Layout(
-    scale: CGFloat(Double(flagValue("--scale") ?? "") ?? 3),
+    scale: Double(flagValue("--scale") ?? "").map { CGFloat($0) } ?? activePack.scale ?? 3,
     showLabels: args.contains("--no-labels") ? false : (Store.loadShowLabels() ?? true),
     pack: activePack
 )
