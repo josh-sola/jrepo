@@ -5,12 +5,17 @@ import AppKit
 
 // MARK: - Layout
 
+/// A working plant's level is its subagent count; a waiting or alerting one's is
+/// its wilt stage. Planter caps both, so a pack only ever supplies three levels.
+private let maxWorkingLevel = 2
+private let maxWiltLevel = 2
+
 struct Layout {
     var scale: CGFloat
     var showLabels: Bool
 
-    var spriteW: CGFloat { CGFloat(Sprites.width) * scale }
-    var spriteH: CGFloat { CGFloat(Sprites.height) * scale }
+    var spriteW: CGFloat { CGFloat(Pack.builtin.width) * scale }
+    var spriteH: CGFloat { CGFloat(Pack.builtin.height) * scale }
     /// A cell is only as wide as the art inside it, not the padded canvas.
     var plantW: CGFloat { CGFloat(Sprites.inkWidth) * scale }
     var inkInset: CGFloat { CGFloat(Sprites.inkMinX) * scale }
@@ -40,13 +45,14 @@ final class PlanterView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func image(for plant: Plant) -> NSImage {
-        let frames = Sprites.frames(
-            for: plant.state, agents: plant.agents, stage: plant.waitStage
-        )
+        let level = plant.state == .working
+            ? min(plant.agents, maxWorkingLevel)
+            : min(max(plant.waitStage, 0), maxWiltLevel)
+        let frames = Pack.builtin.frames(state: plant.state, level: level)
         let index = frameIndex % frames.count
-        let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(min(plant.agents, Sprites.maxBuds))-\(plant.waitStage)"
+        let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(level)"
         if let cached = imageCache[key] { return cached }
-        let img = Sprites.image(rows: frames[index], hue: plant.hue)
+        let img = Pack.builtin.image(rows: frames[index], hue: plant.hue)
         imageCache[key] = img
         return img
     }
@@ -359,19 +365,20 @@ final class OverlayController: NSObject, NSWindowDelegate {
 /// Renders every frame in every colour to a PNG, over both a dark and a light
 /// background. Used to eyeball the art without starting a session.
 func writePreview(to path: String, scale: CGFloat = 6) {
+    let pack = Pack.builtin
     let frames: [(String, [[String]])] = [
-        ("working", Sprites.frames(for: .working)),
-        ("1 agent", [Sprites.frames(for: .working, agents: 1)[0]]),
-        ("2 agents", [Sprites.frames(for: .working, agents: 2)[0]]),
-        ("waiting", Sprites.frames(for: .waiting)),
-        ("wilt 2min", Sprites.frames(for: .waiting, stage: 1)),
-        ("wilt 10min", Sprites.frames(for: .waiting, stage: 2)),
-        ("attention", Sprites.frames(for: .attention)),
+        ("working", pack.frames(state: .working, level: 0)),
+        ("1 agent", [pack.frames(state: .working, level: 1)[0]]),
+        ("2 agents", [pack.frames(state: .working, level: 2)[0]]),
+        ("waiting", pack.frames(state: .waiting, level: 0)),
+        ("wilt 2min", pack.frames(state: .waiting, level: 1)),
+        ("wilt 10min", pack.frames(state: .waiting, level: 2)),
+        ("attention", pack.frames(state: .attention, level: 0)),
     ]
     let flat = frames.flatMap { name, list in list.enumerated().map { ("\(name)\($0.offset + 1)", $0.element) } }
 
-    let cellW = CGFloat(Sprites.width) * scale
-    let cellH = CGFloat(Sprites.height) * scale + 16
+    let cellW = CGFloat(pack.width) * scale
+    let cellH = CGFloat(pack.height) * scale + 16
     let cols = flat.count
     let rows = plantHues.count
     let panelW = CGFloat(cols) * cellW
@@ -393,12 +400,12 @@ func writePreview(to path: String, scale: CGFloat = 6) {
 
     for (r, hue) in plantHues.enumerated() {
         for (c, entry) in flat.enumerated() {
-            let img = Sprites.image(rows: entry.1, hue: hue)
+            let img = pack.image(rows: entry.1, hue: hue)
             for panel in 0..<2 {
                 let rect = NSRect(
                     x: CGFloat(panel) * panelW + CGFloat(c) * cellW,
                     y: size.height - CGFloat(r + 1) * cellH + 16,
-                    width: cellW, height: CGFloat(Sprites.height) * scale
+                    width: cellW, height: CGFloat(pack.height) * scale
                 )
                 img.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
                 let text = NSAttributedString(string: entry.0, attributes: [
