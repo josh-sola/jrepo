@@ -329,6 +329,12 @@ Frames are one character per pixel, top row first. A row shorter than the
 declared width pads with transparent pixels; a longer one is an error. The row
 count must equal the declared height exactly.
 
+Every plant's cell is as wide as the widest ink any of its poses draws, pooled
+across every frame, so the row never shifts when a plant changes pose. The cost
+is that art sticking out to one side in a single pose — an alert glyph beside the
+plant, say — holds every plant in the row apart, including all the ones not
+drawing it. Keep every pose inside the same columns.
+
 ### When a pack is wrong
 
 A pack is used whole or not at all. If any of these fails, planter draws the

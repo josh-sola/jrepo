@@ -22,7 +22,10 @@ struct Layout {
     var inkInset: CGFloat { CGFloat(pack.inkMinX) * scale }
     var fontSize: CGFloat { max(9, round(scale * 3.2)) }
     var labelH: CGFloat { showLabels ? fontSize + 4 : 0 }
-    var gap: CGFloat { scale * 2 }
+    /// Labels are what need the room: two names with nothing between them run
+    /// together, while art carries its own edges. So the row closes up when the
+    /// labels are off.
+    var gap: CGFloat { showLabels ? scale * 2 : scale }
     var height: CGFloat { spriteH + labelH }
 
     func font() -> NSFont {
