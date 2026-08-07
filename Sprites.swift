@@ -21,6 +21,35 @@ struct Pack {
     let height: Int
     let glyphs: [Character: GlyphColor]
     let poses: [String: [[String]]]
+    /// The columns the art actually uses, across every frame. Plants are laid out
+    /// against this rather than the full canvas, so a pack's transparent margins
+    /// don't hold its plants apart.
+    let inkMinX: Int
+    let inkWidth: Int
+
+    init(width: Int, height: Int, glyphs: [Character: GlyphColor], poses: [String: [[String]]]) {
+        self.width = width
+        self.height = height
+        self.glyphs = glyphs
+        self.poses = poses
+        (inkMinX, inkWidth) = Pack.ink(width: width, poses: poses)
+    }
+
+    private static func ink(width: Int, poses: [String: [[String]]]) -> (Int, Int) {
+        var lo = width, hi = -1
+        for frames in poses.values {
+            for frame in frames {
+                for row in frame {
+                    for (x, ch) in row.enumerated() where ch != "." && x < width {
+                        lo = min(lo, x)
+                        hi = max(hi, x)
+                    }
+                }
+            }
+        }
+        guard hi >= lo else { return (0, width) }
+        return (lo, hi - lo + 1)
+    }
 
     func palette(hue: CGFloat) -> [Character: NSColor] {
         glyphs.mapValues { glyph in
@@ -268,25 +297,6 @@ enum Sprites {
         return poses
     }
 
-    /// The columns the art actually uses, across every frame. Plants are laid out
-    /// against this rather than the full 20 columns, so the transparent margins
-    /// don't hold them apart — which is what made a label-less row look spread out.
-    static let (inkMinX, inkWidth): (Int, Int) = {
-        var lo = width, hi = -1
-        for frames in Pack.builtin.poses.values {
-            for frame in frames {
-                for row in frame {
-                    for (x, ch) in row.enumerated() where ch != "." && x < width {
-                        lo = min(lo, x)
-                        hi = max(hi, x)
-                    }
-                }
-            }
-        }
-        guard hi >= lo else { return (0, width) }
-        return (lo, hi - lo + 1)
-    }()
-
     // MARK: layer maths
 
     private static func composite(_ layers: [[String]]) -> [String] {
@@ -324,4 +334,206 @@ extension Pack {
         width: Sprites.width, height: Sprites.height,
         glyphs: Sprites.glyphs, poses: Sprites.buildPoses()
     )
+}
+
+// MARK: - User packs
+
+/// Why a pack on disk was rejected. Every case names one check from the pack
+/// format; the message is what lands on stderr next to the pack's name.
+enum PackLoadError: Error, CustomStringConvertible {
+    case configMissing
+    case sizeMissing
+    case sizeInvalid(String)
+    case paletteLine(String)
+    case dotPaletted
+    case dirUnreadable
+    case poseMissing(String)
+    case poseConflict(String)
+    case frameUnreadable(String)
+    case rowCount(String, expected: Int, found: Int)
+    case rowTooLong(String)
+    case unmappedGlyph(Character, String)
+
+    var description: String {
+        switch self {
+        case .configMissing: return "has no readable pack.conf"
+        case .sizeMissing: return "pack.conf has no size"
+        case .sizeInvalid(let line): return "pack.conf has an invalid size: \(line)"
+        case .paletteLine(let line): return "pack.conf has an invalid palette line: \(line)"
+        case .dotPaletted: return "pack.conf gives '.' a palette entry"
+        case .dirUnreadable: return "has no readable pack directory"
+        case .poseMissing(let pose): return "is missing pose \(pose)"
+        case .poseConflict(let pose): return "has both a bare and suffixed file for pose \(pose)"
+        case .frameUnreadable(let file): return "has no readable frame \(file)"
+        case .rowCount(let file, let expected, let found):
+            return "\(file) has \(found) rows, expected \(expected)"
+        case .rowTooLong(let file): return "\(file) has a row longer than the declared width"
+        case .unmappedGlyph(let ch, let pose): return "pose \(pose) uses glyph '\(ch)' with no palette entry"
+        }
+    }
+}
+
+/// Resolves the pack a user asked for, loading and validating it from disk.
+/// Any failure at all falls back to `Pack.builtin` in its entirety — a
+/// half-loaded pack must never reach the renderer.
+enum PackLoader {
+    /// The fixed 3x3 pose grid: state × level are planter's, not the pack's.
+    private static let levels = 0...2
+
+    static func resolve(name: String?) -> Pack {
+        guard let name = name, !name.isEmpty else { return .builtin }
+        do {
+            return try load(name: name)
+        } catch let error as PackLoadError {
+            warn(name: name, error.description)
+            return .builtin
+        } catch {
+            warn(name: name, "\(error)")
+            return .builtin
+        }
+    }
+
+    private static func warn(name: String, _ message: String) {
+        FileHandle.standardError.write(
+            "planter: pack \"\(name)\" \(message) — using built-in\n".data(using: .utf8)!
+        )
+    }
+
+    private static func directory(name: String) -> URL {
+        let base: URL
+        if let configHome = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !configHome.isEmpty {
+            base = URL(fileURLWithPath: configHome)
+        } else {
+            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        }
+        return base.appendingPathComponent("planter").appendingPathComponent(name)
+    }
+
+    private static func load(name: String) throws -> Pack {
+        let dir = directory(name: name)
+        guard let text = try? String(contentsOf: dir.appendingPathComponent("pack.conf"), encoding: .utf8)
+        else { throw PackLoadError.configMissing }
+
+        let (width, height, glyphs) = try parseConf(text)
+        let poses = try loadPoses(dir: dir, width: width, height: height, glyphs: glyphs)
+        return Pack(width: width, height: height, glyphs: glyphs, poses: poses)
+    }
+
+    // MARK: pack.conf
+
+    private static func parseConf(_ text: String) throws -> (Int, Int, [Character: GlyphColor]) {
+        var width: Int?
+        var height: Int?
+        var glyphs: [Character: GlyphColor] = [:]
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+
+            let sides = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard sides.count == 2 else { throw PackLoadError.paletteLine(line) }
+            let key = sides[0], value = sides[1]
+
+            if key == "size" {
+                let dims = value.split(separator: " ").compactMap { Int($0) }
+                guard dims.count == 2, dims[0] > 0, dims[1] > 0 else { throw PackLoadError.sizeInvalid(line) }
+                (width, height) = (dims[0], dims[1])
+                continue
+            }
+
+            guard key.count == 1, let glyph = key.first else { throw PackLoadError.paletteLine(line) }
+            if glyph == "." { throw PackLoadError.dotPaletted }
+
+            let fields = value.split(separator: " ").map(String.init)
+            guard fields.count == 3 || fields.count == 4,
+                  let hue = parseHue(fields[0]),
+                  let saturation = Double(fields[1]), let brightness = Double(fields[2])
+            else { throw PackLoadError.paletteLine(line) }
+            let alpha: Double
+            if fields.count == 4 {
+                guard let a = Double(fields[3]) else { throw PackLoadError.paletteLine(line) }
+                alpha = a
+            } else {
+                alpha = 1
+            }
+
+            glyphs[glyph] = GlyphColor(
+                hue: hue, saturation: CGFloat(saturation), brightness: CGFloat(brightness), alpha: CGFloat(alpha)
+            )
+        }
+
+        guard let w = width, let h = height else { throw PackLoadError.sizeMissing }
+        return (w, h, glyphs)
+    }
+
+    private static func parseHue(_ field: String) -> PaletteHue? {
+        if field == "session" { return .session(offset: 0) }
+        if field.hasPrefix("session+"), let offset = Double(field.dropFirst(8)) {
+            return .session(offset: CGFloat(offset))
+        }
+        if field.hasPrefix("session-"), let offset = Double(field.dropFirst(8)) {
+            return .session(offset: -CGFloat(offset))
+        }
+        guard let literal = Double(field) else { return nil }
+        return .literal(CGFloat(literal))
+    }
+
+    // MARK: frame files
+
+    private static func loadPoses(
+        dir: URL, width: Int, height: Int, glyphs: [Character: GlyphColor]
+    ) throws -> [String: [[String]]] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
+        else { throw PackLoadError.dirUnreadable }
+        let frameFiles = Set(entries.filter { $0.hasSuffix(".txt") })
+
+        var poses: [String: [[String]]] = [:]
+        for state in PlantState.allCases {
+            for level in levels {
+                let pose = "\(state.rawValue)-\(level)"
+                let bare = "\(pose).txt"
+                let suffixed = frameFiles.filter { $0.hasPrefix("\(pose)-") }.sorted()
+
+                let files: [String]
+                switch (frameFiles.contains(bare), suffixed.isEmpty) {
+                case (true, true): files = [bare]
+                case (false, false): files = suffixed
+                case (true, false): throw PackLoadError.poseConflict(pose)
+                case (false, true): throw PackLoadError.poseMissing(pose)
+                }
+
+                poses[pose] = try files.map { try loadFrame(dir.appendingPathComponent($0), width: width, height: height) }
+            }
+        }
+
+        try validate(poses: poses, glyphs: glyphs)
+        return poses
+    }
+
+    private static func loadFrame(_ url: URL, width: Int, height: Int) throws -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            throw PackLoadError.frameUnreadable(url.lastPathComponent)
+        }
+        var rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if rows.last == "" { rows.removeLast() }
+        guard rows.count == height else {
+            throw PackLoadError.rowCount(url.lastPathComponent, expected: height, found: rows.count)
+        }
+        return try rows.map { row in
+            guard row.count <= width else { throw PackLoadError.rowTooLong(url.lastPathComponent) }
+            return row.count < width ? row + String(repeating: ".", count: width - row.count) : row
+        }
+    }
+
+    private static func validate(poses: [String: [[String]]], glyphs: [Character: GlyphColor]) throws {
+        for (pose, frames) in poses.sorted(by: { $0.key < $1.key }) {
+            for frame in frames {
+                for row in frame {
+                    for ch in row where ch != "." && glyphs[ch] == nil {
+                        throw PackLoadError.unmappedGlyph(ch, pose)
+                    }
+                }
+            }
+        }
+    }
 }

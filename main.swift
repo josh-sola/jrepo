@@ -13,12 +13,13 @@ private let maxWiltLevel = 2
 struct Layout {
     var scale: CGFloat
     var showLabels: Bool
+    var pack: Pack
 
-    var spriteW: CGFloat { CGFloat(Pack.builtin.width) * scale }
-    var spriteH: CGFloat { CGFloat(Pack.builtin.height) * scale }
+    var spriteW: CGFloat { CGFloat(pack.width) * scale }
+    var spriteH: CGFloat { CGFloat(pack.height) * scale }
     /// A cell is only as wide as the art inside it, not the padded canvas.
-    var plantW: CGFloat { CGFloat(Sprites.inkWidth) * scale }
-    var inkInset: CGFloat { CGFloat(Sprites.inkMinX) * scale }
+    var plantW: CGFloat { CGFloat(pack.inkWidth) * scale }
+    var inkInset: CGFloat { CGFloat(pack.inkMinX) * scale }
     var fontSize: CGFloat { max(9, round(scale * 3.2)) }
     var labelH: CGFloat { showLabels ? fontSize + 4 : 0 }
     var gap: CGFloat { scale * 2 }
@@ -48,11 +49,11 @@ final class PlanterView: NSView {
         let level = plant.state == .working
             ? min(plant.agents, maxWorkingLevel)
             : min(max(plant.waitStage, 0), maxWiltLevel)
-        let frames = Pack.builtin.frames(state: plant.state, level: level)
+        let frames = layout.pack.frames(state: plant.state, level: level)
         let index = frameIndex % frames.count
         let key = "\(plant.state.rawValue)-\(index)-\(plant.hue)-\(level)"
         if let cached = imageCache[key] { return cached }
-        let img = Pack.builtin.image(rows: frames[index], hue: plant.hue)
+        let img = layout.pack.image(rows: frames[index], hue: plant.hue)
         imageCache[key] = img
         return img
     }
@@ -364,8 +365,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
 /// Renders every frame in every colour to a PNG, over both a dark and a light
 /// background. Used to eyeball the art without starting a session.
-func writePreview(to path: String, scale: CGFloat = 6) {
-    let pack = Pack.builtin
+func writePreview(to path: String, pack: Pack, scale: CGFloat = 6) {
     let frames: [(String, [[String]])] = [
         ("working", pack.frames(state: .working, level: 0)),
         ("1 agent", [pack.frames(state: .working, level: 1)[0]]),
@@ -461,6 +461,7 @@ if args.contains("--help") || args.contains("-h") {
       planter --preview FILE  render all frames and colours to a PNG
       planter --scale N       pixel size, default 3
       planter --no-labels     hide the directory labels
+      planter --pack NAME     use a pack from ~/.config/planter/NAME for this run
 
     A plant blooms while its session works and wilts when it needs you.
     State lives in ~/.claude/planter (override with CLAUDE_PLANTER_DIR).
@@ -476,15 +477,19 @@ if args.contains("--list") {
     exit(0)
 }
 
+// --pack wins for this run; otherwise the pack named in prefs.json stands.
+let activePack = PackLoader.resolve(name: flagValue("--pack") ?? Store.loadPackName())
+
 if let path = flagValue("--preview") {
-    writePreview(to: path)
+    writePreview(to: path, pack: activePack)
     exit(0)
 }
 
 // --no-labels wins for this run; otherwise the last right-click choice stands.
 let layout = Layout(
     scale: CGFloat(Double(flagValue("--scale") ?? "") ?? 3),
-    showLabels: args.contains("--no-labels") ? false : (Store.loadShowLabels() ?? true)
+    showLabels: args.contains("--no-labels") ? false : (Store.loadShowLabels() ?? true),
+    pack: activePack
 )
 
 let app = NSApplication.shared

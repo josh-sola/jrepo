@@ -1,6 +1,6 @@
 import AppKit
 
-enum PlantState: String {
+enum PlantState: String, CaseIterable {
     /// Claude is doing something, including waiting on a subagent.
     case working
     /// Claude finished its turn: your move.
@@ -322,6 +322,15 @@ enum Store {
         else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: prefsFile)
+    }
+
+    /// The globally configured pack name, nil if none is set. `--pack` overrides
+    /// this for a single run without touching the file.
+    static func loadPackName() -> String? {
+        guard let data = try? Data(contentsOf: prefsFile),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return json["pack"] as? String
     }
 
     static func loadOrder() -> [String] {
