@@ -428,10 +428,16 @@ enum PackLoader {
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            guard !line.isEmpty else { continue }
 
             let sides = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            guard sides.count == 2 else { throw PackLoadError.paletteLine(line) }
+
+            // A palette line is recognized by shape, not by a leading '#', so a
+            // glyph literally named '#' can still be given a colour.
+            guard sides.count == 2, sides[0] == "size" || sides[0].count == 1 else {
+                if line.hasPrefix("#") { continue }
+                throw PackLoadError.paletteLine(line)
+            }
             let key = sides[0], value = sides[1]
 
             if key == "size" {
@@ -441,7 +447,7 @@ enum PackLoader {
                 continue
             }
 
-            guard key.count == 1, let glyph = key.first else { throw PackLoadError.paletteLine(line) }
+            guard let glyph = key.first else { throw PackLoadError.paletteLine(line) }
             if glyph == "." { throw PackLoadError.dotPaletted }
 
             let fields = value.split(separator: " ").map(String.init)

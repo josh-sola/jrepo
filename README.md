@@ -258,7 +258,8 @@ for an accent that stays in relation to it. A plain number is a fixed hue, the
 same in every plant.
 
 Saturation, brightness and alpha run 0 to 1, and alpha defaults to 1. `#` starts
-a comment. `.` is always transparent and cannot be given a colour.
+a comment, except when the line is the palette entry for the `#` glyph itself
+(`# = …`). `.` is always transparent and cannot be given a colour.
 
 Nothing here knows what your art depicts, which is the point. The built-in pack
 puts `session` on the petals and the pot and leaves the leaves green, but a
