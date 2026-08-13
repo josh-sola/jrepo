@@ -1082,7 +1082,7 @@ fn gc_verdict(
             "provisioning failed; read its log, then remove it with `wt rm`".to_string(),
         ));
     }
-    if git::is_dirty(&tree.path)? {
+    if tree.path.exists() && git::is_dirty(&tree.path)? {
         return Ok(GcVerdict::Skip("uncommitted changes".to_string()));
     }
     // `gt create` can move a tree onto a new branch without updating the
@@ -1581,6 +1581,80 @@ mod tests {
                 "unexpected reason: {reason}"
             ),
             GcVerdict::Reap { .. } => panic!("an unlanded commit must not be reaped"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gc_reaps_a_tree_whose_path_no_longer_exists() {
+        let dir = std::env::temp_dir().join(format!("wt-tree-gc-gone-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        let git_cmd = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git_cmd(&["init", "-q", "-b", "master"], &base);
+        git_cmd(&["config", "user.email", "t@t"], &base);
+        git_cmd(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git_cmd(&["add", "-A"], &base);
+        git_cmd(&["commit", "-qm", "init"], &base);
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&base)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
+        git_cmd(&["branch", "a"], &base);
+
+        let repo = Repo {
+            base: base.clone(),
+            last_fetch: Some(Utc::now()),
+        };
+        let repo_config = config::RepoConfig {
+            trunk: "master".into(),
+            branch_prefix: "josh/".into(),
+            spares: 1,
+            env: Default::default(),
+            steps: Vec::new(),
+        };
+        let tree = Tree {
+            id: Uuid::now_v7(),
+            repo: "r".into(),
+            name: "tree-a".into(),
+            branch: "a".into(),
+            path: dir.join("tree-a-never-created"),
+            created: Utc::now(),
+            state: TreeState::Ready,
+            step_label: None,
+            step_index: None,
+            step_total: None,
+            log_path: None,
+            provision_pid: None,
+            parent_branch: None,
+            spare: false,
+        };
+        let mut store = store::Store::default();
+        store.repos.insert("r".to_string(), repo.clone());
+        store.trees = vec![tree.clone()];
+
+        match gc_verdict(&store, &repo, &repo_config, &tree).unwrap() {
+            GcVerdict::Reap { delete_branch } => {
+                assert!(delete_branch, "no Graphite children here to keep it for")
+            }
+            GcVerdict::Skip(reason) => panic!("unexpected skip: {reason}"),
         }
 
         fs::remove_dir_all(&dir).ok();

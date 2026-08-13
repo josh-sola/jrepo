@@ -64,7 +64,12 @@ fn query_json(git_common_dir: &Path, sql: &str) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // `sqlite3 -json` prints nothing at all for a zero-row result, not `[]`.
+    if stdout.trim().is_empty() {
+        return Ok("[]".to_string());
+    }
+    Ok(stdout)
 }
 
 #[derive(Debug, Deserialize)]
@@ -485,6 +490,16 @@ mod tests {
             "CREATE TABLE branch_metadata (branch_name TEXT);",
         );
         assert!(!available(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn graph_is_empty_not_an_error_when_branch_metadata_has_the_right_schema_but_no_rows() {
+        let dir = temp_common_dir();
+        make_db(&dir, &[]);
+        assert!(available(&dir));
+        let g = graph(&dir).unwrap();
+        assert_eq!(g.branch_names().count(), 0);
         fs::remove_dir_all(&dir).ok();
     }
 
