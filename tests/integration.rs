@@ -4,7 +4,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 use uuid::Uuid;
@@ -230,26 +230,75 @@ fn clone_tree(src: &Path, dst: &Path) {
     );
 }
 
-/// The pristine fixture every test copies, built at most once per run.
+/// The pristine fixture every test copies, built at most once per run and
+/// rebuilt if the cached copy no longer checks out.
 ///
 /// Staged under a unique name and renamed into place so two runs racing
 /// here cannot observe a half-built template; the loser discards its own
 /// copy and uses the winner's.
 fn fixture_template() -> &'static Path {
     static TEMPLATE: OnceLock<PathBuf> = OnceLock::new();
-    TEMPLATE.get_or_init(|| {
-        let final_path = std::env::temp_dir().join("wt-cli-it-template");
-        if final_path.join("work").join(".git").is_dir() {
-            return final_path;
-        }
-        let staging = std::env::temp_dir().join(format!("wt-cli-it-staging-{}", Uuid::now_v7()));
-        std::fs::create_dir_all(&staging).expect("create template staging dir");
-        build_fixture_repo(&staging);
-        if std::fs::rename(&staging, &final_path).is_err() {
-            std::fs::remove_dir_all(&staging).ok();
-        }
-        final_path
-    })
+    TEMPLATE
+        .get_or_init(|| ensure_fixture_template(&std::env::temp_dir().join("wt-cli-it-template")))
+}
+
+/// Returns `final_path` holding a usable template, rebuilding it there if it
+/// is missing or broken.
+///
+/// The OS can prune files out of a long-idle temp cache while leaving its
+/// directories in place, so a directory-existence check cannot prove the
+/// template usable; only a real git read on it can.
+fn ensure_fixture_template(final_path: &Path) -> PathBuf {
+    if template_is_valid(final_path) {
+        return final_path.to_path_buf();
+    }
+    let parent = final_path
+        .parent()
+        .expect("template path must have a parent");
+    let name = final_path
+        .file_name()
+        .expect("template path must have a name");
+    // Moved aside under a unique name and deleted from there, not in place:
+    // a concurrent run mid-`cp` from the template keeps its inode either way.
+    let stale = parent.join(format!(
+        "{}-stale-{}",
+        name.to_string_lossy(),
+        Uuid::now_v7()
+    ));
+    if std::fs::rename(final_path, &stale).is_ok() {
+        std::fs::remove_dir_all(&stale).ok();
+    }
+    let staging = parent.join(format!("wt-cli-it-staging-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&staging).expect("create template staging dir");
+    build_fixture_repo(&staging);
+    if std::fs::rename(&staging, final_path).is_err() {
+        std::fs::remove_dir_all(&staging).ok();
+    }
+    final_path.to_path_buf()
+}
+
+/// Whether both halves `fixture_repo` copies out of the template — the bare
+/// `origin.git` and the `work` clone — are git repos that can actually be
+/// read, not just directories that exist.
+fn template_is_valid(template_path: &Path) -> bool {
+    head_resolves(&template_path.join("origin.git")) && head_resolves(&template_path.join("work"))
+}
+
+fn head_resolves(repo: &Path) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            &repo.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ])
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn build_fixture_repo(dir: &Path) -> PathBuf {
@@ -3733,5 +3782,63 @@ fn doctor_reports_nothing_about_a_detached_spare() {
     assert!(
         !stdout.contains("unregistered worktree"),
         "the spare's own worktree must be recognized, not flagged as unregistered: {stdout}"
+    );
+}
+
+/// Deletes every regular file under `dir`, leaving its directory tree in
+/// place — reproducing what the OS temp-file pruner does to a long-idle
+/// cache.
+fn delete_regular_files(dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().expect("file type");
+        if file_type.is_dir() {
+            delete_regular_files(&path);
+        } else {
+            std::fs::remove_file(&path).expect("remove file");
+        }
+    }
+}
+
+#[test]
+fn fixture_template_rebuilds_after_files_are_pruned_from_it() {
+    // A private path, not the shared `fixture_template()` one: the suite
+    // runs in parallel, so purging the shared template would break every
+    // other test mid-run.
+    let tmp = unique_dir("template-purge");
+    let template_path = tmp.join("template");
+
+    ensure_fixture_template(&template_path);
+    assert!(template_is_valid(&template_path));
+
+    delete_regular_files(&template_path.join("work"));
+    assert!(
+        !template_is_valid(&template_path),
+        "a hollow work dir must fail validation even with an intact origin.git"
+    );
+    ensure_fixture_template(&template_path);
+    assert!(template_is_valid(&template_path));
+
+    delete_regular_files(&template_path.join("origin.git"));
+    assert!(
+        !template_is_valid(&template_path),
+        "a hollow origin.git must fail validation even with an intact work dir"
+    );
+    ensure_fixture_template(&template_path);
+    assert!(template_is_valid(&template_path));
+
+    delete_regular_files(&template_path);
+    assert!(!template_is_valid(&template_path));
+
+    let rebuilt = ensure_fixture_template(&template_path);
+    assert!(template_is_valid(&rebuilt));
+
+    let work = tmp.join("work");
+    clone_tree(&rebuilt.join("work"), &work);
+    let head = git_rev_parse(&work, "HEAD");
+    assert_eq!(
+        head.len(),
+        40,
+        "rebuilt template's work dir has no resolvable HEAD: {head:?}"
     );
 }
