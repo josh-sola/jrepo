@@ -9,6 +9,7 @@ set -euo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bin_dir="$HOME/.local/bin"
 binary="$bin_dir/planter"
+bridge_binary="$bin_dir/planter-codex-bridge"
 hook="$HOME/.claude/hooks/planter-state"
 settings="$HOME/.claude/settings.json"
 
@@ -43,8 +44,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         echo "removed hooks from $settings"
     fi
     "$src/login-item.sh" uninstall >/dev/null 2>&1 || true
-    rm -f "$hook" "$binary"
-    echo "removed $hook and $binary"
+    rm -f "$hook" "$binary" "$bridge_binary"
+    echo "removed $hook, $binary, and $bridge_binary"
     echo "state left in ~/.claude/planter — delete that directory if you want it gone"
     exit 0
 fi
@@ -66,6 +67,8 @@ command -v jq >/dev/null || fail "jq not found — the hook needs it: brew insta
 echo "building planter"
 mkdir -p "$bin_dir"
 swiftc -O -o "$binary" "$src/main.swift" "$src/Planter.swift" "$src/Sprites.swift"
+echo "building planter-codex-bridge"
+swiftc -O -o "$bridge_binary" "$src/PlanterCodexBridge.swift"
 
 echo "installing hook to $hook"
 mkdir -p "$(dirname "$hook")"

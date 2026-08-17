@@ -14,7 +14,10 @@ enum PlantState: String, CaseIterable {
 }
 
 struct Plant {
+    /// Provider-qualified so Claude and Codex session IDs cannot collide.
     var sessionID: String
+    var provider: String = "claude"
+    var rawSessionID: String = ""
     /// The directory or worktree name as recorded by the hook.
     var label: String
     /// What the overlay draws: shortened to keep the row tidy, then made unique.
@@ -202,6 +205,9 @@ private enum BackgroundSessions {
 
 enum Store {
     static var dir: URL = {
+        if let override = ProcessInfo.processInfo.environment["PLANTER_STATE_DIR"] {
+            return URL(fileURLWithPath: override)
+        }
         if let override = ProcessInfo.processInfo.environment["CLAUDE_PLANTER_DIR"] {
             return URL(fileURLWithPath: override)
         }
@@ -225,40 +231,55 @@ enum Store {
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
 
         let now = Date().timeIntervalSince1970
-        let sessions = BackgroundSessions.current()
 
-        var records: [(sessionID: String, json: [String: Any])] = []
+        var records: [(
+            identity: String,
+            provider: String,
+            rawSessionID: String,
+            json: [String: Any]
+        )] = []
         for name in names where name.hasSuffix(".json") && !reservedFiles.contains(name) {
             let url = dir.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url),
                   let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let sessionID = json["session_id"] as? String
+                  let rawSessionID = json["session_id"] as? String
             else { continue }
+
+            let provider = (json["provider"] as? String) ?? "claude"
+            let identity = (json["identity"] as? String) ?? "\(provider):\(rawSessionID)"
 
             if let pid = json["pid"] as? Int, pid > 1, !processAlive(pid) {
                 try? fm.removeItem(at: url)
                 continue
             }
-            records.append((sessionID, json))
+            records.append((identity, provider, rawSessionID, json))
         }
+
+        // Codex records do not exist in Claude's session registry. Avoiding this
+        // lookup for a Codex-only row keeps a missing Claude installation quiet.
+        let sessions = records.contains { $0.provider == "claude" }
+            ? BackgroundSessions.current() : BackgroundSessions.Snapshot()
 
         // The daemon's job file reports "blocked" or "done" while the session is
         // still taking turns, so the bud follows the same hook that drives every
         // other plant instead. An untouched file is no longer evidence either way.
         var attribution: [String: Int] = [:]
-        for record in records where sessions.backgroundIDs.contains(record.sessionID) {
-            guard let owner = sessions.owners[record.sessionID],
+        for record in records
+            where record.provider == "claude"
+                && sessions.backgroundIDs.contains(record.rawSessionID) {
+            guard let owner = sessions.owners[record.rawSessionID],
                   (record.json["state"] as? String) == "working",
                   let updated = record.json["updated_at"] as? Double,
                   now - updated <= staleAgentSeconds
             else { continue }
-            attribution[owner, default: 0] += 1
+            attribution["claude:\(owner)", default: 0] += 1
         }
 
         var plants: [Plant] = []
         // A background dispatch rewrites its file on every event same as an
         // interactive one, so its plant is skipped here rather than deleted.
-        for (sessionID, json) in records where !sessions.backgroundIDs.contains(sessionID) {
+        for (sessionID, provider, rawSessionID, json) in records
+            where provider != "claude" || !sessions.backgroundIDs.contains(rawSessionID) {
             var state = PlantState(raw: (json["state"] as? String) ?? "waiting")
             let updated = (json["updated_at"] as? Double) ?? 0
 
@@ -285,7 +306,9 @@ enum Store {
 
             plants.append(Plant(
                 sessionID: sessionID,
-                label: (json["label"] as? String) ?? "claude",
+                provider: provider,
+                rawSessionID: rawSessionID,
+                label: (json["label"] as? String) ?? provider,
                 agents: agents,
                 waitStage: wiltStage(waitingSince: since, now: now),
                 state: state,
@@ -323,9 +346,15 @@ enum Store {
         for (i, id) in order.enumerated() where rank[id] == nil { rank[id] = i }
 
         plants = plants.enumerated().sorted { a, b in
-            let ra = rank[a.element.sessionID] ?? Int.max
-            let rb = rank[b.element.sessionID] ?? Int.max
-            return ra == rb ? a.offset < b.offset : ra < rb
+            let currentA = rank[a.element.sessionID] ?? Int.max
+            let currentB = rank[b.element.sessionID] ?? Int.max
+            let legacyA = a.element.provider == "claude"
+                ? rank[a.element.rawSessionID] ?? Int.max : Int.max
+            let legacyB = b.element.provider == "claude"
+                ? rank[b.element.rawSessionID] ?? Int.max : Int.max
+            let resolvedA = min(currentA, legacyA)
+            let resolvedB = min(currentB, legacyB)
+            return resolvedA == resolvedB ? a.offset < b.offset : resolvedA < resolvedB
         }.map(\.element)
     }
 
@@ -429,7 +458,11 @@ enum Store {
         var counts: [String: Int] = [:]
         for plant in plants { counts[plant.display, default: 0] += 1 }
         for i in plants.indices where counts[plants[i].display]! > 1 {
-            plants[i].display += "·" + String(plants[i].sessionID.prefix(2))
+            let rawID = plants[i].sessionID.split(separator: ":", maxSplits: 1).last.map(String.init) ?? plants[i].sessionID
+            let suffix = rawID.hasPrefix("thr_")
+                ? String(rawID.dropFirst(4).prefix(4))
+                : String(rawID.prefix(2))
+            plants[i].display += "·" + suffix
         }
     }
 

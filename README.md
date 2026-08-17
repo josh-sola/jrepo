@@ -1,6 +1,6 @@
 # claude-planter
 
-A row of potted plants that floats above your windows, one per Claude Code
+A row of potted plants that floats above your windows, one per coding
 session. Each plant tells you one thing: whether that session is working, or
 waiting for you.
 
@@ -56,7 +56,8 @@ planter                      # start the overlay
 
 Keep the clone: `install.sh` builds from it, and it is where you upgrade from.
 
-`install.sh` builds `~/.local/bin/planter`, installs a hook at
+`install.sh` builds `~/.local/bin/planter` and
+`~/.local/bin/planter-codex-bridge`, installs a hook at
 `~/.claude/hooks/planter-state`, and wires twelve hooks into
 `~/.claude/settings.json` — printing exactly which, and backing the file up
 first. It needs `swiftc` (the Xcode command line tools) and `jq`. Re-running
@@ -213,9 +214,31 @@ creation the `tab` field in the state file is the record. A launcher that moves
 tabs can rewrite that field in another live session's file, and the hook
 carries the new value forward instead of stamping the old one back.
 
-Set `CLAUDE_PLANTER_DIR` to move the state directory. Both the hook and the
-overlay respect it, which is also how to try things out without touching your
-real sessions.
+Set `PLANTER_STATE_DIR` to move the state directory. It takes precedence over
+`CLAUDE_PLANTER_DIR`, which remains supported for existing Claude setups. Both
+the hook and overlay respect either setting, which is also how to try things out
+without touching your real sessions.
+
+## Codex app-server sessions
+
+When Planter is enabled in `wt`, `wt launch` automatically starts interactive
+Codex sessions through `planter-codex-bridge`. The bridge starts
+`codex app-server --listen stdio://`, gives the Codex TUI a private Unix-socket
+endpoint, and writes the same small live-state record as the Claude hook. It
+does not use Codex hooks and does not store prompts, replies, tool input, or
+credentials.
+
+Install this repository so the bridge is on `PATH`, then use `wt launch` as
+usual. Direct `wt codex` commands, explicit Codex `--remote` sessions, and
+non-interactive or administrative Codex commands remain direct. If the bridge
+cannot start, `wt` prints a warning and starts Codex directly.
+
+The bridge inherits `PLANTER_STATE_DIR` (or the legacy
+`CLAUDE_PLANTER_DIR`) and removes its state record when the TUI, owner process,
+or app server exits. Codex currently marks the
+[app-server interface as experimental](https://learn.chatgpt.com/docs/app-server),
+so this integration stays isolated behind the bridge and direct-launch
+fallback.
 
 ## Icon packs
 

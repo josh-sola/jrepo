@@ -25,7 +25,7 @@
 set -uo pipefail
 
 event="${1:-}"
-dir="${CLAUDE_PLANTER_DIR:-$HOME/.claude/planter}"
+dir="${PLANTER_STATE_DIR:-${CLAUDE_PLANTER_DIR:-$HOME/.claude/planter}}"
 
 # The hot path, taken on most tool calls: a tool finished in a session whose plant
 # is already awake, so there is nothing to record. Answered with a single grep,
@@ -33,7 +33,9 @@ dir="${CLAUDE_PLANTER_DIR:-$HOME/.claude/planter}"
 # children; if that ever stops being true, or the id names no awake plant, this
 # falls through to the full path below and stays correct.
 if [[ "$event" == "tool" && -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
-    if grep -q '"state": *"working"' "$dir/$CLAUDE_CODE_SESSION_ID.json" 2>/dev/null; then
+    legacy_file="$dir/$CLAUDE_CODE_SESSION_ID.json"
+    qualified_file="$dir/claude-${CLAUDE_CODE_SESSION_ID//[^[:alnum:]._-]/_}.json"
+    if grep -q '"state": *"working"' "$qualified_file" "$legacy_file" 2>/dev/null; then
         exit 0
     fi
 fi
@@ -52,7 +54,10 @@ IFS=$'\t' read -r sid cwd message ntype < <(
 [[ -n "${sid:-}" ]] || exit 0
 
 mkdir -p "$dir" 2>/dev/null
-file="$dir/$sid.json"
+safe_sid="${sid//[^[:alnum:]._-]/_}"
+file="$dir/claude-$safe_sid.json"
+legacy_file="$dir/$sid.json"
+[[ -f "$file" || ! -f "$legacy_file" ]] || file="$legacy_file"
 dir_hook="$dir/label-hook"
 
 if [[ "$event" == "end" ]]; then
@@ -277,7 +282,7 @@ jq -nc \
     --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
     --argjson since "$since" --argjson agents_at "$agents_at" \
     --argjson color "$color_json" --argjson tab "$tab_json" \
-    '{session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
+    '{provider: "claude", identity: ("claude:" + $sid), session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
       since: $since, agents_at: $agents_at, pid: $pid,
       created_at: $created, updated_at: $now, color: $color, tab: $tab}' \
     >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null

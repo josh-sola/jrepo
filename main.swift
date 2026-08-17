@@ -207,7 +207,7 @@ final class PlanterView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
-        menu.addItem(withTitle: "claude-planter", action: nil, keyEquivalent: "").isEnabled = false
+        menu.addItem(withTitle: "planter", action: nil, keyEquivalent: "").isEnabled = false
         menu.addItem(withTitle: "drag to move · ⌘-drag to reorder", action: nil, keyEquivalent: "")
             .isEnabled = false
         menu.addItem(.separator())
@@ -529,7 +529,8 @@ func printPlants() {
             ? plant.state.rawValue + (plant.agents > 0 ? " +\(plant.agents)" : "")
             : plant.state.rawValue + " \(plant.waitStage)"
         print(pad(plant.label, labelWidth) + pad(state, 14)
-            + String(format: "hue=%.2f  ", Double(plant.hue)) + plant.sessionID)
+            + String(format: "hue=%.2f  ", Double(plant.hue))
+            + plant.provider + "  " + plant.rawSessionID)
     }
 }
 
@@ -542,7 +543,7 @@ func flagValue(_ name: String) -> String? {
 
 if args.contains("--help") || args.contains("-h") {
     print("""
-    planter — a row of pixel plants, one per Claude Code session
+    planter — a row of pixel plants, one per coding session
 
       planter                      run the overlay
       planter --list               print the live sessions as text
@@ -554,7 +555,7 @@ if args.contains("--help") || args.contains("-h") {
       planter --pack NAME          use a pack from ~/.config/planter/NAME for this run
 
     A plant blooms while its session works and wilts when it needs you.
-    State lives in ~/.claude/planter (override with CLAUDE_PLANTER_DIR).
+    State lives in ~/.claude/planter (override with PLANTER_STATE_DIR or CLAUDE_PLANTER_DIR).
 
     Drag a plant to move the row; ⌘-drag to reorder. Right-click for labels,
     order reset, and quit.
