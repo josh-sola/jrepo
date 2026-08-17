@@ -235,8 +235,9 @@ cannot start, `wt` prints a warning and starts Codex directly.
 
 The bridge inherits `PLANTER_STATE_DIR` (or the legacy
 `CLAUDE_PLANTER_DIR`) and removes its state record when the TUI, owner process,
-or app server exits. Codex currently marks the
-[app-server interface as experimental](https://learn.chatgpt.com/docs/app-server),
+or app server exits. Codex initially uses `PLANTER_TAB_INDEX`, then adopts a
+valid `tab` change made in its state file by launchers such as `wt`. Codex
+currently marks the [app-server interface as experimental](https://learn.chatgpt.com/docs/app-server),
 so this integration stays isolated behind the bridge and direct-launch
 fallback.
 

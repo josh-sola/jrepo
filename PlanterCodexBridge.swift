@@ -122,6 +122,7 @@ private final class StateWriter {
 
     private func writeLocked() {
         guard let file, !record.sessionID.isEmpty else { return }
+        adoptExternalTabLocked(from: file)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var json: [String: Any] = [
             "provider": "codex",
@@ -145,6 +146,19 @@ private final class StateWriter {
         json["turn_id"] = record.turnID ?? NSNull()
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
         try? data.write(to: file, options: .atomic)
+    }
+
+    private func adoptExternalTabLocked(from file: URL) {
+        guard let data = try? Data(contentsOf: file),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let state = json as? [String: Any],
+              let tab = state["tab"] as? NSNumber,
+              CFGetTypeID(tab) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(tab)
+        else { return }
+        let index = tab.intValue
+        guard index > 0, tab.compare(NSNumber(value: index)) == .orderedSame else { return }
+        record.tab = index
     }
 
     private func belongsToBoundThread(_ payload: Any) -> Bool {
@@ -616,10 +630,76 @@ private func runSelfTest() -> Never {
         finish("planter-codex-bridge self-test failed: WebSocket upgrade", status: 1)
     }
 
-    let writer = StateWriter(directory: directory, ownerPID: getpid(), environment: [:])
+    let writer = StateWriter(
+        directory: directory,
+        ownerPID: getpid(),
+        environment: ["PLANTER_TAB_INDEX": "7", "PLANTER_LABEL": "self-test"]
+    )
     writer.bindThread("thr_test", threadID: "thr_test")
     let file = directory.appendingPathComponent("codex-thr_test.json")
     let thread: [String: Any] = ["threadId": "thr_test"]
+    guard record(file)?["tab"] as? Int == 7 else {
+        finish("planter-codex-bridge self-test failed: initial tab", status: 1)
+    }
+    try? FileManager.default.removeItem(at: file)
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["tab"] as? Int == 7 else {
+        finish("planter-codex-bridge self-test failed: missing tab state", status: 1)
+    }
+    func writeData(_ data: Data) -> Bool {
+        do {
+            try data.write(to: file, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+    func writeState(_ state: Any) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: state) else { return false }
+        return writeData(data)
+    }
+    guard writeState(["tab": 12, "label": "on-disk-label"]),
+          record(file)?["tab"] as? Int == 12
+    else {
+        finish("planter-codex-bridge self-test failed: external tab setup", status: 1)
+    }
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["tab"] as? Int == 12,
+          record(file)?["label"] as? String == "self-test"
+    else {
+        finish("planter-codex-bridge self-test failed: external tab", status: 1)
+    }
+    let invalidTabs: [Any] = [NSNull(), true, "12", 0, -1, 1.5]
+    for tab in invalidTabs {
+        guard writeState(["tab": tab]) else {
+            finish("planter-codex-bridge self-test failed: invalid tab setup", status: 1)
+        }
+        writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+        guard record(file)?["tab"] as? Int == 12 else {
+            finish("planter-codex-bridge self-test failed: invalid tab", status: 1)
+        }
+    }
+    guard writeState(["label": "no-tab"]) else {
+        finish("planter-codex-bridge self-test failed: missing tab setup", status: 1)
+    }
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["tab"] as? Int == 12 else {
+        finish("planter-codex-bridge self-test failed: missing tab", status: 1)
+    }
+    guard writeState([]) else {
+        finish("planter-codex-bridge self-test failed: non-object tab setup", status: 1)
+    }
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["tab"] as? Int == 12 else {
+        finish("planter-codex-bridge self-test failed: non-object tab", status: 1)
+    }
+    guard writeData(Data("not json".utf8)) else {
+        finish("planter-codex-bridge self-test failed: malformed tab setup", status: 1)
+    }
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["tab"] as? Int == 12 else {
+        finish("planter-codex-bridge self-test failed: malformed tab", status: 1)
+    }
     writer.observe(method: "thread/status/changed", payload: [
         "threadId": "thr_test",
         "status": ["type": "active", "activeFlags": ["waitingOnApproval"]],
