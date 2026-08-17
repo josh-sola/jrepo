@@ -358,6 +358,43 @@ fn run_wt(root: &Path, args: &[&str]) -> Output {
         .expect("spawn wt")
 }
 
+fn run_wt_with_path(root: &Path, cwd: &Path, bin_dir: &Path, args: &[&str]) -> Output {
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.to_path_buf()).chain(
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+    Command::new(wt_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("spawn wt")
+}
+
+fn write_fake_agent(dir: &Path, name: &str, record: &Path) -> PathBuf {
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{{\n  printf 'cwd=%s\\n' \"$PWD\"\n  for arg do printf 'arg=%s\\n' \"$arg\"; done\n  printf 'PLANTER_COLOR=%s\\n' \"${{PLANTER_COLOR-}}\"\n  printf 'PLANTER_LABEL=%s\\n' \"${{PLANTER_LABEL-}}\"\n  printf 'PLANTER_TAB_INDEX=%s\\n' \"${{PLANTER_TAB_INDEX-}}\"\n}} > '{}'\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
 fn assert_success(out: &Output, label: &str) {
     assert!(
         out.status.success(),
@@ -966,7 +1003,8 @@ fn launch_runs_a_hook_only_when_its_feature_block_is_present() {
 
     // No `features` block: the hook the config could have pointed at never runs.
     std::fs::write(&config_path, "version 1\n").unwrap();
-    let out = run_wt_claude_without_claude_on_path(&root, &["launch", "hook target", "myrepo"]);
+    let out =
+        run_wt_without_agents_on_path(&root, &["launch", "hook target", "myrepo", "--claude"]);
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not on PATH"),
         "expected the launch to still reach the claude exec, got: {}",
@@ -979,7 +1017,8 @@ fn launch_runs_a_hook_only_when_its_feature_block_is_present() {
 
     // The same hook, declared under `features`: it runs.
     std::fs::write(&config_path, sentinel_get_position_hook(&sentinel)).unwrap();
-    let out = run_wt_claude_without_claude_on_path(&root, &["launch", "hook target", "myrepo"]);
+    let out =
+        run_wt_without_agents_on_path(&root, &["launch", "hook target", "myrepo", "--claude"]);
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not on PATH"),
         "expected the launch to still reach the claude exec, got: {}",
@@ -988,6 +1027,125 @@ fn launch_runs_a_hook_only_when_its_feature_block_is_present() {
     assert!(
         sentinel.exists(),
         "a hook declared under 'features' should have run"
+    );
+}
+
+fn launch_features_config(planter_sentinel: &Path, terminal_sentinel: &Path) -> String {
+    format!(
+        "version 1\n\nfeatures {{\n    planter {{\n        get-position {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n    terminal {{\n        set-background {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n}}\n",
+        planter_sentinel.display(),
+        terminal_sentinel.display()
+    )
+}
+
+#[test]
+fn launch_defaults_to_codex_without_claude_decoration_or_planter() {
+    let tmp = unique_dir("launch-codex");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "codex target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "codex target"]), "wait");
+    let tree = PathBuf::from(
+        String::from_utf8_lossy(&run_wt(&root, &["path", "codex target"]).stdout).trim(),
+    );
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        launch_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("codex-record");
+    let bin_dir = write_fake_agent(&tmp, "codex", &record);
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "launch",
+            "codex target",
+            "myrepo",
+            "--",
+            "-n",
+            "user label",
+            "/color red",
+        ],
+    );
+    assert_success(&out, "launch codex");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record.contains(&format!("cwd={}", tree.display())),
+        "{record}"
+    );
+    assert!(
+        record.contains("arg=-n\narg=user label\narg=/color red"),
+        "{record}"
+    );
+    assert!(record.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="));
+    assert!(!planter_sentinel.exists(), "Codex must skip planter hooks");
+    assert!(
+        terminal_sentinel.exists(),
+        "Codex should retain terminal hooks"
+    );
+}
+
+#[test]
+fn launch_claude_keeps_its_decoration_and_planter() {
+    let tmp = unique_dir("launch-claude");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "claude target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "claude target"]), "wait");
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        launch_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &record);
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "launch",
+            "claude target",
+            "myrepo",
+            "--claude",
+            "--",
+            "--model",
+            "opus",
+        ],
+    );
+    assert_success(&out, "launch claude");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record.contains("arg=-n\narg=claude target\narg=--model\narg=opus"),
+        "{record}"
+    );
+    assert!(record.contains("arg=/color "), "{record}");
+    assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
+    assert!(record.contains("PLANTER_LABEL=claude target"), "{record}");
+    assert!(planter_sentinel.exists(), "Claude should run planter hooks");
+    assert!(
+        terminal_sentinel.exists(),
+        "Claude should retain terminal hooks"
     );
 }
 
@@ -2016,11 +2174,11 @@ fn status_porcelain(path: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Runs `wt claude` with `PATH` pointed at an empty directory, so resolution
-/// always reaches the same "claude is not on PATH" failure regardless of
-/// whether the host actually has `claude` installed — the assertions below
-/// only care what happened *before* that point.
-fn run_wt_claude_without_claude_on_path(root: &Path, args: &[&str]) -> Output {
+/// Runs an agent command with `PATH` pointed at an empty directory, so
+/// resolution always reaches the same missing-binary failure regardless of
+/// whether the host has either agent installed. The assertions only care what
+/// happened before that point.
+fn run_wt_without_agents_on_path(root: &Path, args: &[&str]) -> Output {
     Command::new(wt_bin())
         .args(args)
         .env("WT_ROOT", root)
@@ -2037,7 +2195,7 @@ fn claude_on_a_bare_repo_name_warns_about_base_then_fails_on_missing_binary() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
 
-    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "myrepo"]);
+    let out = run_wt_without_agents_on_path(&root, &["claude", "myrepo"]);
     assert!(
         !out.status.success(),
         "expected failure with claude off PATH"
@@ -2065,7 +2223,7 @@ fn claude_on_a_tree_selector_skips_the_base_notice() {
     );
     assert_success(&run_wt(&root, &["wait", "claude target"]), "wait");
 
-    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "claude target"]);
+    let out = run_wt_without_agents_on_path(&root, &["claude", "claude target"]);
     assert!(
         !out.status.success(),
         "expected failure with claude off PATH"
@@ -2088,12 +2246,162 @@ fn claude_on_an_unknown_selector_fails_before_touching_path_lookup() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
 
-    let out = run_wt_claude_without_claude_on_path(&root, &["claude", "nope"]);
+    let out = run_wt_without_agents_on_path(&root, &["claude", "nope"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("no tree matches selector"),
         "expected a selector-resolution error, not a PATH error: {stderr}"
+    );
+}
+
+#[test]
+fn codex_resolves_a_tree_or_current_tree_like_claude() {
+    let tmp = unique_dir("codex-target");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    let new = run_wt(&root, &["new", "myrepo", "--name", "codex target"]);
+    assert_success(&new, "new");
+    assert_success(&run_wt(&root, &["wait", "codex target"]), "wait");
+    let tree = PathBuf::from(
+        String::from_utf8_lossy(&new.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    let record = tmp.join("codex-record");
+    let bin_dir = write_fake_agent(&tmp, "codex", &record);
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &["codex", "codex target", "--", "--model", "gpt-5"],
+        ),
+        "codex selector",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(
+        record_text.contains("arg=--model\narg=gpt-5"),
+        "{record_text}"
+    );
+
+    assert_success(
+        &run_wt_with_path(&root, &tree, &bin_dir, &["codex", "--", "resume"]),
+        "codex current tree",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(record_text.contains("arg=resume"), "{record_text}");
+}
+
+#[test]
+fn codex_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
+    let tmp = unique_dir("codex-base");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt_without_agents_on_path(&root, &["codex", "myrepo"]);
+    assert!(
+        !out.status.success(),
+        "expected failure with codex off PATH"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("base is for reading"), "{stderr}");
+    assert!(stderr.contains("`codex` is not on PATH"), "{stderr}");
+    assert!(stderr.contains("`wt codex`"), "{stderr}");
+}
+
+#[test]
+fn new_and_adopt_reject_conflicting_agent_flags() {
+    let tmp = unique_dir("agent-flag-conflict");
+    let root = tmp.join("wt-root");
+
+    for args in [
+        vec!["new", "myrepo", "--name", "target", "--codex", "--claude"],
+        vec!["adopt", "--name", "target", "--codex", "--claude"],
+    ] {
+        let out = run_wt(&root, &args);
+        assert!(
+            !out.status.success(),
+            "expected mutually exclusive flags to fail"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("cannot be used with"), "{stderr}");
+    }
+}
+
+#[test]
+fn new_and_adopt_open_the_selected_agent_with_raw_arguments() {
+    let tmp = unique_dir("new-adopt-agent");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let codex_record = tmp.join("codex-record");
+    let bin_dir = write_fake_agent(&tmp, "codex", &codex_record);
+    let claude_record = tmp.join("claude-record");
+    write_fake_agent(&tmp, "claude", &claude_record);
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &[
+                "new",
+                "myrepo",
+                "--name",
+                "codex new",
+                "--codex",
+                "--",
+                "--model",
+                "gpt-5",
+            ],
+        ),
+        "new --codex",
+    );
+    let record = std::fs::read_to_string(&codex_record).unwrap();
+    assert!(record.contains("arg=--model\narg=gpt-5"), "{record}");
+    assert!(
+        !record.contains("arg=-n") && !record.contains("arg=/color"),
+        "{record}"
+    );
+
+    std::fs::write(base.join("adopt-me.txt"), "uncommitted\n").unwrap();
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &[
+                "adopt",
+                "myrepo",
+                "--name",
+                "claude adopt",
+                "--claude",
+                "--",
+                "--model",
+                "opus",
+            ],
+        ),
+        "adopt --claude",
+    );
+    let record = std::fs::read_to_string(&claude_record).unwrap();
+    assert!(record.contains("arg=--model\narg=opus"), "{record}");
+    assert!(
+        !record.contains("arg=-n") && !record.contains("arg=/color"),
+        "{record}"
     );
 }
 
@@ -2950,12 +3258,12 @@ fn launch_with_no_worktree_offers_the_cwd_repo_first_then_newest_first() {
 
     assert!(
         !out.status.success(),
-        "expected the launch past the picker to fail on the missing claude binary"
+        "expected the launch past the picker to fail on the missing codex binary"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("not on PATH"),
-        "expected the picked tree to reach the claude exec, got: {stderr}"
+        "expected the picked tree to reach the codex exec, got: {stderr}"
     );
 
     let captured = std::fs::read_to_string(&capture).unwrap();

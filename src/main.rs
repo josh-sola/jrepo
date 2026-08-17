@@ -1,4 +1,4 @@
-mod claude;
+mod agent;
 mod color;
 mod config;
 mod context;
@@ -28,6 +28,8 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
+
+use agent::Agent;
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Enriched worktree tooling")]
@@ -66,8 +68,11 @@ enum Command {
         onto: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+        /// Open a `codex` session in the new tree once it exists.
+        #[arg(long, conflicts_with = "claude")]
+        codex: bool,
         /// Open a `claude` session in the new tree once it exists.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "codex")]
         claude: bool,
         #[arg(last = true)]
         args: Vec<String>,
@@ -81,17 +86,21 @@ enum Command {
         branch: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+        /// Open a `codex` session in the new tree once it exists.
+        #[arg(long, conflicts_with = "claude")]
+        codex: bool,
         /// Open a `claude` session in the new tree once it exists.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "codex")]
         claude: bool,
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Open a claude session in a worktree, creating it if needed. A
+    /// Open a codex session in a worktree, creating it if needed. Pass
+    /// --claude to open Claude instead. A
     /// worktree starting with `@` is a scratch session that opens in the
     /// repo's base instead, with nothing created. With no worktree given, an
     /// fzf picker lists the registered trees to choose from. Anything after
-    /// `--` is passed straight to `claude`.
+    /// `--` is passed straight to the selected agent.
     Launch {
         worktree: Option<String>,
         repo: Option<String>,
@@ -105,6 +114,9 @@ enum Command {
         onto: Option<String>,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
+        /// Open Claude instead of Codex.
+        #[arg(long)]
+        claude: bool,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -221,6 +233,13 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Exec `codex` with cwd set to a tree, a repo's base, or the cwd's tree.
+    /// Anything after `--` is passed straight to `codex`.
+    Codex {
+        target: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Runs a tree's provisioning steps; spawned detached by `wt new`.
     #[command(name = "__provision", hide = true)]
     Provision {
@@ -318,6 +337,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             branch,
             onto,
             profile,
+            codex,
             claude,
             args,
         } => {
@@ -332,13 +352,14 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(root, &path, claude, &args)
+            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
         }
         Command::Adopt {
             repo,
             name,
             branch,
             profile,
+            codex,
             claude,
             args,
         } => {
@@ -352,7 +373,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(root, &path, claude, &args)
+            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
         }
         Command::Launch {
             worktree,
@@ -360,6 +381,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             branch,
             onto,
             profile,
+            claude,
             args,
         } => cmd_launch(
             root,
@@ -371,6 +393,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 onto,
                 profile,
             },
+            if claude { Agent::Claude } else { Agent::Codex },
             &args,
         ),
         Command::Ls { repo, all, json } => cmd_ls(root, repo, all, json),
@@ -415,7 +438,8 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             Some(SpareCommand::Refresh { repo }) => cmd_spare_refresh(root, config_path, repo),
             Some(SpareCommand::Drop { repo }) => cmd_spare_drop(root, config_path, repo),
         },
-        Command::Claude { target, args } => claude::exec_claude(root, target, &args),
+        Command::Claude { target, args } => agent::exec_target(root, Agent::Claude, target, &args),
+        Command::Codex { target, args } => agent::exec_target(root, Agent::Codex, target, &args),
         Command::Provision { tree_id, profile } => {
             provision::run(root, config_path, tree_id, profile)
         }
@@ -437,10 +461,15 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
 /// Blocks until provisioning finishes before handing the tree over: a
 /// session that opens mid-install hits a half-built tree, and nobody
 /// remembers to wait by hand. A failed install refuses to open at all.
-fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String]) -> Result<()> {
-    if !claude {
+fn open_if_requested(
+    root: &Path,
+    tree_path: &Path,
+    agent: Option<Agent>,
+    args: &[String],
+) -> Result<()> {
+    let Some(agent) = agent else {
         return Ok(());
-    }
+    };
     let id = store::load(root)?
         .trees
         .iter()
@@ -451,13 +480,18 @@ fn open_if_requested(root: &Path, tree_path: &Path, claude: bool, args: &[String
     eprintln!("waiting for provisioning before opening a session...");
     wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
         format!(
-            "not opening a session; the tree is still at {} — inspect it with `wt status`, then              `wt claude` into it once you know why",
-            tree_path.display()
+            "not opening a session; the tree is still at {} — inspect it with `wt status`, then \
+             `wt {}` into it once you know why",
+            tree_path.display(),
+            agent.executable()
         )
     })?;
 
-    eprintln!("provisioning finished; opening a claude session");
-    claude::exec_at(tree_path, args, &[])
+    eprintln!(
+        "provisioning finished; opening a {} session",
+        agent.executable()
+    );
+    agent::exec_at(agent, tree_path, args, &[])
 }
 
 #[derive(Debug)]
@@ -565,9 +599,9 @@ fn known_repos(store: &store::Store) -> String {
 }
 
 /// Returns the registered tree, whose name can differ from what the user
-/// typed when the match came through the slug. Color and the `-n` label
-/// derive from the returned name so a launch matches what `wt new` produced.
-fn wait_for_tree(root: &Path, id: Uuid) -> Result<store::Tree> {
+/// typed when the match came through the slug. Its name supplies Claude's
+/// launch label and terminal color for either agent.
+fn wait_for_tree(root: &Path, id: Uuid, agent: Agent) -> Result<store::Tree> {
     let pending_name = store::load(root)?
         .trees
         .iter()
@@ -578,11 +612,15 @@ fn wait_for_tree(root: &Path, id: Uuid) -> Result<store::Tree> {
     eprintln!("waiting for provisioning before opening a session...");
     wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
         format!(
-            "not opening a session; inspect '{pending_name}' with `wt status`, then `wt claude` \
-             into it once you know why"
+            "not opening a session; inspect '{pending_name}' with `wt status`, then `wt {}` \
+             into it once you know why",
+            agent.executable()
         )
     })?;
-    eprintln!("provisioning finished; opening a claude session");
+    eprintln!(
+        "provisioning finished; opening a {} session",
+        agent.executable()
+    );
 
     store::load(root)?
         .trees
@@ -599,7 +637,13 @@ struct LaunchArgs {
     profile: Option<Vec<String>>,
 }
 
-fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[String]) -> Result<()> {
+fn cmd_launch(
+    root: &Path,
+    config_path: &Path,
+    launch: LaunchArgs,
+    agent: Agent,
+    args: &[String],
+) -> Result<()> {
     let LaunchArgs {
         worktree,
         repo,
@@ -649,7 +693,7 @@ fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[Strin
             (base, repo, stripped, label)
         }
         LaunchPlan::Existing { id } => {
-            let tree = wait_for_tree(root, id)?;
+            let tree = wait_for_tree(root, id, agent)?;
             (tree.path, tree.repo, tree.name.clone(), tree.name)
         }
         LaunchPlan::New { repo, name } => {
@@ -670,7 +714,7 @@ fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[Strin
                 .find(|t| t.path == path)
                 .map(|t| t.id)
                 .with_context(|| format!("{} is not a registered tree", path.display()))?;
-            let tree = wait_for_tree(root, id)?;
+            let tree = wait_for_tree(root, id, agent)?;
             (tree.path, tree.repo, tree.name.clone(), tree.name)
         }
     };
@@ -683,48 +727,54 @@ fn cmd_launch(root: &Path, config_path: &Path, launch: LaunchArgs, args: &[Strin
         label: &label,
         color_hex: hex,
     };
-    let get_position_hook = config
-        .features
-        .planter
-        .as_ref()
-        .and_then(|p| p.get_position.as_ref());
-    let renumber_peers_hook = config
-        .features
-        .planter
-        .as_ref()
-        .and_then(|p| p.renumber_peers.as_ref());
     let set_background_hook = config
         .features
         .terminal
         .as_ref()
         .and_then(|t| t.set_background.as_ref());
 
-    // The tab probe reads and rewrites tab titles, so it runs before the
-    // background-color write, which must be the last thing that touches
-    // the terminal.
-    let tabs = features::get_position(get_position_hook, &ctx);
-    if let Some(tabs) = &tabs {
-        features::renumber_peers(renumber_peers_hook, tabs, &ctx);
-    }
-    features::set_background(set_background_hook, hex, &ctx);
-
-    let mut env: Vec<(&str, &str)> = Vec::new();
-    let tab_index_str;
-    if config.features.planter.is_some() {
-        env.push(("PLANTER_COLOR", color));
-        env.push(("PLANTER_LABEL", &label));
-        if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
-            tab_index_str = idx.to_string();
-            env.push(("PLANTER_TAB_INDEX", &tab_index_str));
+    if agent == Agent::Claude {
+        let get_position_hook = config
+            .features
+            .planter
+            .as_ref()
+            .and_then(|p| p.get_position.as_ref());
+        let renumber_peers_hook = config
+            .features
+            .planter
+            .as_ref()
+            .and_then(|p| p.renumber_peers.as_ref());
+        let tabs = features::get_position(get_position_hook, &ctx);
+        if let Some(tabs) = &tabs {
+            features::renumber_peers(renumber_peers_hook, tabs, &ctx);
         }
+
+        let mut env = Vec::new();
+        let tab_index_str;
+        if config.features.planter.is_some() {
+            env.push(("PLANTER_COLOR", color));
+            env.push(("PLANTER_LABEL", &label));
+            if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
+                tab_index_str = idx.to_string();
+                env.push(("PLANTER_TAB_INDEX", &tab_index_str));
+            }
+        }
+        features::set_background(set_background_hook, hex, &ctx);
+        return agent::exec_at(
+            agent,
+            &tree_path,
+            &claude_launch_args(&label, args, color),
+            &env,
+        );
     }
 
-    claude::exec_at(&tree_path, &launch_args(&label, args, color), &env)
+    features::set_background(set_background_hook, hex, &ctx);
+    agent::exec_at(agent, &tree_path, args, &[])
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`
 /// launch flag does not set the prompt-bar color.
-fn launch_args(name: &str, passthrough: &[String], color: &str) -> Vec<String> {
+fn claude_launch_args(name: &str, passthrough: &[String], color: &str) -> Vec<String> {
     let mut args = vec!["-n".to_string(), name.to_string()];
     args.extend(passthrough.iter().cloned());
     args.push(format!("/color {color}"));
@@ -1605,8 +1655,8 @@ mod tests {
     }
 
     #[test]
-    fn launch_args_orders_name_flag_passthrough_then_color_last() {
-        let args = launch_args(
+    fn claude_launch_args_orders_name_flag_passthrough_then_color_last() {
+        let args = claude_launch_args(
             "fix login",
             &["--model".to_string(), "opus".to_string()],
             "blue",
