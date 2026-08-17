@@ -61,6 +61,9 @@ if [[ -L "${SKILL_LINK}" ]]; then
   current_target="$(readlink "${SKILL_LINK}")"
   if [[ "${current_target}" == "${REPO_ROOT}/plugin" ]]; then
     echo "    already correct, no-op"
+  elif [[ "${current_target}" == "wt-cli/plugin" || "${current_target}" == */wt-cli/plugin ]]; then
+    ln -sfn "${REPO_ROOT}/plugin" "${SKILL_LINK}"
+    echo "    replaced prior wt-cli symlink"
   else
     echo "    WARNING: ${SKILL_LINK} already exists and points elsewhere (${current_target}) — skipping, not clobbering"
   fi
@@ -78,39 +81,33 @@ fi
 cp "${SETTINGS_FILE}" "${SETTINGS_FILE}.bak"
 
 already_installed() {
-  jq --arg event "$1" --arg needle "wt-cli/hooks/session-context.sh" '
-    [.hooks[$event][]?.hooks[]?.command? // "" | select(contains($needle))] | length > 0
+  jq --arg event "$1" --arg cmd "${HOOK_COMMAND}" '
+    [.hooks[$event][]?.hooks[]?.command? // "" | select(. == $cmd)] | length == 1
   ' "${SETTINGS_FILE}"
 }
 
-if [[ "$(already_installed SessionStart)" == "true" ]]; then
-  echo "    SessionStart hook already installed, no-op"
-else
-  tmp_file="$(mktemp)"
-  jq --arg cmd "${HOOK_COMMAND}" '
-    .hooks.SessionStart = ((.hooks.SessionStart // []) + [
-      {
-        "matcher": "startup|resume|clear|compact",
-        "hooks": [{"type": "command", "command": $cmd}]
-      }
-    ])
-  ' "${SETTINGS_FILE}" > "${tmp_file}"
-  mv "${tmp_file}" "${SETTINGS_FILE}"
-  echo "    SessionStart hook installed"
-fi
+tmp_file="$(mktemp)"
+jq --arg cmd "${HOOK_COMMAND}" '
+  def is_own:
+    (.command // "") | endswith("/wt-cli/hooks/session-context.sh");
 
-if [[ "$(already_installed CwdChanged)" == "true" ]]; then
-  echo "    CwdChanged hook already installed, no-op"
-else
-  tmp_file="$(mktemp)"
-  jq --arg cmd "${HOOK_COMMAND}" '
-    .hooks.CwdChanged = ((.hooks.CwdChanged // []) + [
-      {"hooks": [{"type": "command", "command": $cmd}]}
-    ])
-  ' "${SETTINGS_FILE}" > "${tmp_file}"
-  mv "${tmp_file}" "${SETTINGS_FILE}"
-  echo "    CwdChanged hook installed"
-fi
+  def strip_own:
+    map(.hooks = ((.hooks // []) | map(select(is_own | not))))
+    | map(select((.hooks // []) | length > 0));
+
+  def wire($event; $entry):
+    .hooks[$event] = ((.hooks[$event] // []) | strip_own) + [$entry];
+
+  .hooks //= {}
+  | wire("SessionStart"; {
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [{"type": "command", "command": $cmd}]
+    })
+  | wire("CwdChanged"; {"hooks": [{"type": "command", "command": $cmd}]})
+' "${SETTINGS_FILE}" > "${tmp_file}"
+mv "${tmp_file}" "${SETTINGS_FILE}"
+echo "    SessionStart hook installed: $(already_installed SessionStart)"
+echo "    CwdChanged hook installed: $(already_installed CwdChanged)"
 
 echo "==> Writing the LaunchAgent plist (not loading it)"
 mkdir -p "${LAUNCHAGENTS_DIR}" "${SYNC_LOG_DIR}"

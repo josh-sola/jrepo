@@ -50,8 +50,8 @@ rest still works — check `install.sh`'s output against your own
 ## Install
 
 ```sh
-git clone git@github.com:Sola-Solutions/claude-planter.git
-cd claude-planter
+git clone git@github.com:josh-sola/jrepo.git
+cd jrepo/claude-planter
 ./install.sh
 planter                      # start the overlay
 ./login-item.sh install      # and/or start it at every login
@@ -66,7 +66,7 @@ Keep the clone: `install.sh` builds from it, and it is where you upgrade from.
 first. It needs `swiftc` (the Xcode command line tools) and `jq`. Re-running
 replaces its own hook entries rather than stacking them.
 
-To upgrade:
+To upgrade, from `jrepo/claude-planter`:
 
 ```sh
 git pull && ./install.sh && ./login-item.sh install

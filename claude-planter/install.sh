@@ -130,6 +130,6 @@ esac
 
 echo
 echo "done. start the overlay with:  planter"
-echo "to start it at every login:    ./login-item.sh install"
+echo "to start it at every login:    ${src}/login-item.sh install"
 echo "already-running sessions pick this up on their next turn; restart any"
 echo "session whose plant never appears."
