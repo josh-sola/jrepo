@@ -25,6 +25,7 @@ private final class StateWriter {
     private var record: BridgeRecord
     private var file: URL?
     private var collabIDs = Set<String>()
+    private var pendingRequestIDs = Set<String>()
 
     init(directory: URL, ownerPID: Int32, environment: [String: String]) {
         self.directory = directory
@@ -49,16 +50,26 @@ private final class StateWriter {
         if record.sessionID != sessionID, let file {
             try? FileManager.default.removeItem(at: file)
         }
+        let now = Date().timeIntervalSince1970
         record.sessionID = sessionID
         record.threadID = threadID
+        pendingRequestIDs.removeAll()
+        collabIDs.removeAll()
+        record.agents = 0
+        record.turnID = nil
+        record.turnActive = false
+        record.state = "waiting"
+        record.updatedAt = now
+        record.since = now
         file = directory.appendingPathComponent("codex-\(safeName(sessionID)).json")
         writeLocked()
     }
 
-    func observe(method: String, payload: Any) {
+    func observe(method: String, payload: Any, requestID: String? = nil) {
         lock.lock()
         defer { lock.unlock() }
         guard file != nil else { return }
+        guard belongsToBoundThread(payload) else { return }
         let lower = method.lowercased()
         let now = Date().timeIntervalSince1970
         record.updatedAt = now
@@ -67,60 +78,38 @@ private final class StateWriter {
         if lower == "thread/status/changed",
            let status = dictionary(payload)?["status"] as? [String: Any] {
             let type = (status["type"] as? String)?.lowercased() ?? ""
-            let flags = Set((status["activeFlags"] as? [String] ?? []).map {
-                $0.lowercased()
-            })
-            if flags.contains("waitingonapproval") || flags.contains("waitingonuserinput") {
-                record.state = "attention"
-                record.since = now
-            } else if type.contains("error") || type.contains("fail") {
-                record.state = "attention"
-                record.turnActive = false
-                record.since = now
-            } else if type.contains("active") || type.contains("working") {
-                record.state = "working"
+            if type.contains("active") || type.contains("working") {
                 record.turnActive = true
-                record.since = 0
             } else {
                 record.turnActive = false
-                record.state = record.agents > 0 ? "working" : "waiting"
-                record.since = now
             }
-        } else if lower == "serverrequest/resolved" || lower == "serverrequest.resolved" {
-            record.state = record.turnActive || record.agents > 0 ? "working" : "waiting"
-            record.since = record.state == "working" ? 0 : now
+            deriveStateLocked(now: now)
+        } else if lower == "serverrequest/resolved" {
+            if let resolvedID = identifier(for: ["requestId", "request_id"], in: payload) {
+                pendingRequestIDs.remove(resolvedID)
+            }
+            deriveStateLocked(now: now)
+        } else if isUserFacingRequest(lower, payload: payload), let requestID, !requestID.isEmpty {
+            pendingRequestIDs.insert(requestID)
+            deriveStateLocked(now: now)
         } else if let item = dictionary(payload)?["item"] as? [String: Any],
                   (item["type"] as? String) == "collabToolCall" {
             let id = item["id"] as? String ?? ""
-            if (lower == "item/started" || lower == "item.started"), !id.isEmpty {
+            if lower == "item/started", !id.isEmpty {
                 collabIDs.insert(id)
             }
-            if lower == "item/completed" || lower == "item.completed" {
+            if lower == "item/completed" {
                 collabIDs.remove(id)
             }
             record.agents = min(collabIDs.count, 2)
-            if record.agents > 0 { record.state = "working"; record.since = 0 }
-            else if !record.turnActive { record.state = "waiting"; record.since = now }
-        } else if lower.contains("systemerror") || lower.contains("system/error") || lower.contains("failed") {
-            record.state = "attention"
-            record.turnActive = false
-            record.since = now
-        } else if bool(
-            for: ["waitingOnApproval", "waiting_on_approval", "waitingOnUserInput", "waiting_on_user_input"],
-            in: payload
-        ) || lower.contains("approval") || lower.contains("userinput") || lower.contains("user_input") {
-            record.state = "attention"
-            record.since = now
-        } else if lower.contains("turn/started") || lower.contains("turn.started") || lower.contains("turn/start") {
-            record.state = "working"
+            deriveStateLocked(now: now)
+        } else if lower == "turn/started" {
             record.turnActive = true
-            record.since = 0
-        } else if lower.contains("turn/completed")
-                    || lower.contains("turn/interrupted")
-                    || lower.contains("turn/failed") {
+            deriveStateLocked(now: now)
+        } else if lower == "turn/completed" || lower == "turn/interrupted" || lower == "turn/failed" {
             record.turnActive = false
-            record.state = record.agents > 0 ? "working" : "waiting"
-            record.since = now
+            pendingRequestIDs.removeAll()
+            deriveStateLocked(now: now)
         }
         writeLocked()
     }
@@ -157,6 +146,44 @@ private final class StateWriter {
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
         try? data.write(to: file, options: .atomic)
     }
+
+    private func belongsToBoundThread(_ payload: Any) -> Bool {
+        guard let boundThreadID = record.threadID, let payloadThreadID = threadID(in: payload) else { return true }
+        return boundThreadID == payloadThreadID
+    }
+
+    private func isUserFacingRequest(_ method: String, payload: Any) -> Bool {
+        switch method {
+        case "item/commandexecution/requestapproval",
+             "item/filechange/requestapproval",
+             "item/permissions/requestapproval",
+             "mcpserver/elicitation/request",
+             "applypatchapproval",
+             "execcommandapproval":
+            return true
+        case "item/tool/requestuserinput":
+            return boolValue(for: ["isBlocking", "is_blocking"], in: payload) ?? true
+        default:
+            return false
+        }
+    }
+
+    private func deriveStateLocked(now: Double) {
+        let state: String
+        if !pendingRequestIDs.isEmpty {
+            state = "attention"
+        } else if record.turnActive || record.agents > 0 {
+            state = "working"
+        } else {
+            state = "waiting"
+        }
+        if record.state != state {
+            record.state = state
+            record.since = state == "working" ? 0 : now
+        } else if state == "working" {
+            record.since = 0
+        }
+    }
 }
 
 private func safeName(_ value: String) -> String {
@@ -180,16 +207,39 @@ private func string(for keys: Set<String>, in value: Any) -> String? {
     return nil
 }
 
-private func bool(for keys: Set<String>, in value: Any) -> Bool {
+private func identifier(for keys: Set<String>, in value: Any) -> String? {
     if let dict = dictionary(value) {
         for (key, child) in dict {
-            if keys.contains(key), let value = child as? Bool, value { return true }
-            if bool(for: keys, in: child) { return true }
+            if keys.contains(key), let value = jsonRPCID(child) { return value }
+            if let found = identifier(for: keys, in: child) { return found }
         }
     } else if let values = value as? [Any] {
-        return values.contains { bool(for: keys, in: $0) }
+        for child in values { if let found = identifier(for: keys, in: child) { return found } }
     }
-    return false
+    return nil
+}
+
+private func boolValue(for keys: Set<String>, in value: Any) -> Bool? {
+    if let dict = dictionary(value) {
+        for (key, child) in dict {
+            if keys.contains(key), let value = child as? Bool { return value }
+            if let found = boolValue(for: keys, in: child) { return found }
+        }
+    } else if let values = value as? [Any] {
+        for child in values { if let found = boolValue(for: keys, in: child) { return found } }
+    }
+    return nil
+}
+
+private func threadID(in value: Any) -> String? {
+    if let dict = dictionary(value) {
+        if let id = dict["threadId"] as? String ?? dict["thread_id"] as? String { return id }
+        if let thread = dict["thread"] as? [String: Any], let id = thread["id"] as? String { return id }
+        for child in dict.values { if let found = threadID(in: child) { return found } }
+    } else if let values = value as? [Any] {
+        for child in values { if let found = threadID(in: child) { return found } }
+    }
+    return nil
 }
 
 private func threadIdentity(in value: Any) -> (sessionID: String, threadID: String?)? {
@@ -201,6 +251,15 @@ private func threadIdentity(in value: Any) -> (sessionID: String, threadID: Stri
         for child in dict.values { if let found = threadIdentity(in: child) { return found } }
     } else if let values = value as? [Any] {
         for child in values { if let found = threadIdentity(in: child) { return found } }
+    }
+    return nil
+}
+
+private func jsonRPCID(_ value: Any?) -> String? {
+    guard let value else { return nil }
+    if let value = value as? String { return value }
+    if let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
+        return value.stringValue
     }
     return nil
 }
@@ -370,7 +429,13 @@ private final class WebSocketBridge {
         guard let json = try? JSONSerialization.jsonObject(with: data),
               let dict = json as? [String: Any]
         else { return }
-        if let method = dict["method"] as? String { writer.observe(method: method, payload: dict["params"] as Any) }
+        if let method = dict["method"] as? String {
+            writer.observe(
+                method: method,
+                payload: dict["params"] as Any,
+                requestID: jsonRPCID(dict["id"])
+            )
+        }
         if let id = dict["id"] {
             let key = "\(id)"
             lock.lock(); let request = requestMethods.removeValue(forKey: key); lock.unlock()
@@ -554,25 +619,116 @@ private func runSelfTest() -> Never {
     let writer = StateWriter(directory: directory, ownerPID: getpid(), environment: [:])
     writer.bindThread("thr_test", threadID: "thr_test")
     let file = directory.appendingPathComponent("codex-thr_test.json")
+    let thread: [String: Any] = ["threadId": "thr_test"]
     writer.observe(method: "thread/status/changed", payload: [
-        "status": ["type": "active", "activeFlags": []],
+        "threadId": "thr_test",
+        "status": ["type": "active", "activeFlags": ["waitingOnApproval"]],
     ])
     guard record(file)?["state"] as? String == "working" else {
-        finish("planter-codex-bridge self-test failed: active", status: 1)
+        finish("planter-codex-bridge self-test failed: active flag", status: 1)
     }
-    writer.observe(method: "thread/status/changed", payload: [
-        "status": ["type": "active", "activeFlags": ["waitingOnUserInput"]],
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    writer.observe(method: "item/autoApprovalReview/completed", payload: thread)
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: auto approval review", status: 1)
+    }
+    writer.observe(
+        method: "item/commandExecution/requestApproval",
+        payload: thread,
+        requestID: "request-1"
+    )
+    guard record(file)?["state"] as? String == "attention" else {
+        finish("planter-codex-bridge self-test failed: request approval", status: 1)
+    }
+    writer.observe(method: "item/autoApprovalReview/started", payload: thread)
+    guard record(file)?["state"] as? String == "attention" else {
+        finish("planter-codex-bridge self-test failed: request persistence", status: 1)
+    }
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": "other-request",
     ])
     guard record(file)?["state"] as? String == "attention" else {
-        finish("planter-codex-bridge self-test failed: approval", status: 1)
+        finish("planter-codex-bridge self-test failed: unrelated resolution", status: 1)
     }
-    writer.observe(method: "serverRequest/resolved", payload: [:])
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": "request-1",
+    ])
     guard record(file)?["state"] as? String == "working" else {
-        finish("planter-codex-bridge self-test failed: resolved", status: 1)
+        finish("planter-codex-bridge self-test failed: matching resolution", status: 1)
     }
-    writer.observe(method: "turn/completed", payload: [:])
+    writer.observe(
+        method: "item/permissions/requestApproval",
+        payload: thread,
+        requestID: jsonRPCID(4)
+    )
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": 4,
+    ])
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: numeric resolution", status: 1)
+    }
+    writer.observe(
+        method: "item/fileChange/requestApproval",
+        payload: thread,
+        requestID: "request-2"
+    )
+    writer.observe(
+        method: "mcpServer/elicitation/request",
+        payload: thread,
+        requestID: "request-3"
+    )
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": "request-2",
+    ])
+    guard record(file)?["state"] as? String == "attention" else {
+        finish("planter-codex-bridge self-test failed: concurrent resolution", status: 1)
+    }
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": "request-3",
+    ])
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: concurrent requests", status: 1)
+    }
+    writer.observe(
+        method: "item/tool/requestUserInput",
+        payload: ["threadId": "thr_test", "isBlocking": false],
+        requestID: "nonblocking-request"
+    )
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: nonblocking input", status: 1)
+    }
+    writer.observe(
+        method: "item/tool/requestUserInput",
+        payload: ["threadId": "thr_test", "isBlocking": true],
+        requestID: "blocking-input-request"
+    )
+    guard record(file)?["state"] as? String == "attention" else {
+        finish("planter-codex-bridge self-test failed: blocking input", status: 1)
+    }
+    writer.observe(method: "thread/status/changed", payload: [
+        "threadId": "thr_test",
+        "status": ["type": "active", "activeFlags": []],
+    ])
+    guard record(file)?["state"] as? String == "attention" else {
+        finish("planter-codex-bridge self-test failed: status request persistence", status: 1)
+    }
+    writer.observe(method: "serverRequest/resolved", payload: [
+        "threadId": "thr_test", "requestId": "blocking-input-request",
+    ])
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: blocking input resolution", status: 1)
+    }
+    writer.observe(
+        method: "item/permissions/requestApproval",
+        payload: ["threadId": "thr_other"],
+        requestID: "other-thread-request"
+    )
+    guard record(file)?["state"] as? String == "working" else {
+        finish("planter-codex-bridge self-test failed: cross-thread request", status: 1)
+    }
+    writer.observe(method: "turn/failed", payload: thread)
     guard record(file)?["state"] as? String == "waiting" else {
-        finish("planter-codex-bridge self-test failed: completed", status: 1)
+        finish("planter-codex-bridge self-test failed: failed turn", status: 1)
     }
     let collab: [String: Any] = ["item": ["type": "collabToolCall", "id": "agent-1"]]
     writer.observe(method: "item/started", payload: collab)
@@ -584,11 +740,18 @@ private func runSelfTest() -> Never {
     guard record(file)?["agents"] as? Int == 0 else {
         finish("planter-codex-bridge self-test failed: collab completion", status: 1)
     }
+    writer.observe(
+        method: "item/fileChange/requestApproval",
+        payload: thread,
+        requestID: "request-before-rebind"
+    )
     writer.bindThread("thr_rebound", threadID: "thr_rebound")
     let rebound = directory.appendingPathComponent("codex-thr_rebound.json")
     guard !FileManager.default.fileExists(atPath: file.path),
           FileManager.default.fileExists(atPath: rebound.path),
-          record(rebound)?["provider"] as? String == "codex"
+          record(rebound)?["provider"] as? String == "codex",
+          record(rebound)?["state"] as? String == "waiting",
+          record(rebound)?["agents"] as? Int == 0
     else {
         finish("planter-codex-bridge self-test failed: rebind", status: 1)
     }
