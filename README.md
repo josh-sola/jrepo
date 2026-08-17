@@ -28,9 +28,12 @@ Only a real permission prompt raises a `!`, and it appears the moment the dialog
 does. Claude Code also notifies when a session has merely gone quiet; treating that
 as blocking was a false alarm, since the wilt is already saying it.
 
-Every session gets its own colour from a palette of eight, picked by hashing the
-session id, so a plant keeps its variety for its whole life. A launcher that
-already knows better can set `PLANTER_COLOR`, `PLANTER_LABEL`, and
+Every session gets its own colour from a palette of eight. Planter picks new
+automatic colours at random from colours that are not tied for most used by the
+visible plants. If all eight are tied, all eight are eligible. The choice is
+remembered for that session's lifetime, including overlay restarts. A launcher
+that already knows better can set
+`PLANTER_COLOR`, `PLANTER_LABEL`, and
 `PLANTER_TAB_INDEX` on the `claude` process to choose that session's colour,
 name, and place in the row directly, and can rewrite that place later if its
 tabs move — see "How it works" below.
@@ -100,8 +103,8 @@ planter --no-labels     hide the labels, and pack the plants tighter
 planter --pack NAME     draw with a pack from ~/.config/planter/NAME
 ```
 
-Reordering never changes a plant's colour: hues are assigned in creation order,
-before the saved order is applied.
+Reordering never changes a plant's colour. Automatic choices are remembered, and
+new plants are assigned in creation order before the saved order is applied.
 
 ## Labels
 
@@ -201,12 +204,14 @@ A launcher that starts a `claude` process can set three environment variables
 on it, and the hook reads them straight off the environment rather than
 remembering them, so nothing can drift:
 `PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
-`purple`, `pink`) fixes its colour instead of hashing the session id, and is
-given exactly as asked even if another plant already has it,
+`purple`, `pink`) fixes its colour exactly, even if another plant already has
+it. Automatic colours are chosen randomly from palette slots below the current
+largest usage count. If all eight slots are tied, any slot may be chosen. The
+automatic choice stays with the session until it ends,
 `PLANTER_LABEL` fixes its name instead of the label-hook or directory basename,
 and `PLANTER_TAB_INDEX` (a 1-based position) sets its place in the row instead
-of sorting by creation time. Any of the three left unset falls back to today's
-behaviour.
+of sorting by creation time. An unset colour gets an automatic choice. Unset
+labels and positions use their normal defaults.
 
 `PLANTER_TAB_INDEX` is the exception: it only sets the position when the plant
 is created, because a tab index goes stale the moment tabs move. After

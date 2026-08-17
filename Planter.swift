@@ -33,8 +33,6 @@ struct Plant {
     /// than drawn at random, so a plant keeps its place for its whole life instead
     /// of jumping whenever a neighbour appears or the row is reordered.
     var phaseSeed: Int = 0
-    /// An explicit colour name from the launcher, e.g. "red". Reserved ahead of
-    /// hash-derived hues so a collision can never steal a requested colour.
     var color: String? = nil
     /// 1-based row position from the launcher. Sessions without one sort to the
     /// end, in creation order.
@@ -67,12 +65,14 @@ private func wiltStage(waitingSince since: Double, now: Double) -> Int {
     return wiltAfter.filter { age >= $0 }.count
 }
 
-/// Eight widely separated hues. Sessions pick one by hash, so a plant keeps its
-/// colour for its whole life; collisions shift to the next free slot.
+/// Wide separation makes neighbouring plants easy to tell apart at a glance.
 let plantHues: [CGFloat] = [0.02, 0.09, 0.15, 0.33, 0.47, 0.58, 0.72, 0.88]
 
-/// The launcher's palette names, indexed the same as `plantHues` above, so
-/// `PLANTER_COLOR=red` and a hashed slot of 0 land on the same hue.
+/// Names and hues share their index, so saved names map to the intended hue.
+private let colorNames = [
+    "red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink",
+]
+
 private let colorSlots: [String: Int] = [
     "red": 0, "orange": 1, "yellow": 2, "green": 3,
     "cyan": 4, "blue": 5, "purple": 6, "pink": 7,
@@ -218,9 +218,10 @@ enum Store {
     static var positionFile: URL { dir.appendingPathComponent("overlay-position.json") }
     static var orderFile: URL { dir.appendingPathComponent("order.json") }
     static var prefsFile: URL { dir.appendingPathComponent("prefs.json") }
+    static var automaticColorsFile: URL { dir.appendingPathComponent("automatic-colors.json") }
 
     private static var reservedFiles: Set<String> {
-        ["overlay-position.json", "order.json", "prefs.json"]
+        ["overlay-position.json", "order.json", "prefs.json", "automatic-colors.json"]
     }
 
     /// Reads every live plant, oldest session first. Deletes the state files of
@@ -320,10 +321,17 @@ enum Store {
         }
 
         plants.sort { ($0.createdAt, $0.sessionID) < ($1.createdAt, $1.sessionID) }
+        var automaticColors = loadAutomaticColors()
+        let savedAutomaticColors = automaticColors
+        let liveSessionIDs = Set(plants.map(\.sessionID))
+        pruneAutomaticColors(&automaticColors, keeping: liveSessionIDs)
         // Hues are assigned in creation order, before any reordering, so dragging a
         // plant along the row — or a later session claiming an earlier tab — never
         // changes an existing plant's colour.
-        assignHues(&plants)
+        assignHues(&plants, automaticColors: &automaticColors)
+        if automaticColors != savedAutomaticColors {
+            saveAutomaticColors(automaticColors)
+        }
         // Display order: an explicit tab wins, then creation order for anyone
         // without one. applySavedOrder runs after and still has final say — a
         // ⌘-drag overrides everything, including an explicit tab.
@@ -414,38 +422,59 @@ enum Store {
         return errno == EPERM
     }
 
-    /// Assigns hues in creation order, regardless of how `plants` is ordered when
-    /// called — display order changes (a ⌘-drag, an explicit tab) must never
-    /// recolour a plant. A requested colour is given exactly as asked, even when
-    /// another session already has it: a launcher that names a colour means it, and
-    /// two red terminals should show two red plants. Only the hash-derived hues
-    /// move aside on a collision, and they move around the requests, never take
-    /// one.
-    private static func assignHues(_ plants: inout [Plant]) {
+    private static func loadAutomaticColors() -> [String: String] {
+        guard let data = try? Data(contentsOf: automaticColorsFile),
+              let colors = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+        else { return [:] }
+        return colors
+    }
+
+    private static func saveAutomaticColors(_ colors: [String: String]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: colors) else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: automaticColorsFile, options: .atomic)
+    }
+
+    private static func pruneAutomaticColors(
+        _ colors: inout [String: String], keeping liveSessionIDs: Set<String>
+    ) {
+        colors = colors.filter { liveSessionIDs.contains($0.key) && colorSlots[$0.value] != nil }
+    }
+
+    /// Initial assignments use creation order so display order cannot influence them.
+    private static func assignHues(_ plants: inout [Plant], automaticColors: inout [String: String]) {
         let byCreation = plants.indices.sorted {
             (plants[$0].createdAt, plants[$0].sessionID) <
                 (plants[$1].createdAt, plants[$1].sessionID)
         }
 
-        var taken = Set<Int>()
-        var reserved = Set<Int>()
+        var counts = Array(repeating: 0, count: plantHues.count)
 
         for i in byCreation {
-            guard let name = plants[i].color, let slot = colorSlots[name] else { continue }
-            taken.insert(slot)
-            reserved.insert(i)
-            plants[i].hue = plantHues[slot]
+            let sessionID = plants[i].sessionID
+            if let name = plants[i].color, let slot = colorSlots[name] {
+                plants[i].hue = plantHues[slot]
+                counts[slot] += 1
+                automaticColors.removeValue(forKey: sessionID)
+            } else if let name = automaticColors[sessionID], let slot = colorSlots[name] {
+                plants[i].hue = plantHues[slot]
+                counts[slot] += 1
+            }
         }
 
-        for i in byCreation where !reserved.contains(i) {
-            var slot = abs(stableHash(plants[i].sessionID)) % plantHues.count
-            var tries = 0
-            while taken.contains(slot) && tries < plantHues.count {
-                slot = (slot + 1) % plantHues.count
-                tries += 1
+        for i in byCreation {
+            let sessionID = plants[i].sessionID
+            if colorSlots[plants[i].color ?? ""] != nil || colorSlots[automaticColors[sessionID] ?? ""] != nil {
+                continue
             }
-            taken.insert(slot)
+            let slot: Int
+            let maximum = counts.max() ?? 0
+            let eligible = counts.indices.filter { counts[$0] < maximum }
+            let choices = eligible.isEmpty ? Array(counts.indices) : eligible
+            slot = choices.randomElement()!
+            automaticColors[sessionID] = colorNames[slot]
             plants[i].hue = plantHues[slot]
+            counts[slot] += 1
         }
     }
 
@@ -466,7 +495,7 @@ enum Store {
         }
     }
 
-    /// Swift's Hasher is seeded per process, so plants would change colour on every
+    /// Swift's Hasher is seeded per process, so animation phases would jump on every
     /// restart. This one is stable.
     private static func stableHash(_ s: String) -> Int {
         var h = 5381
