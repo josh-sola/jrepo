@@ -19,7 +19,7 @@ test:
 
 # Check shell-script syntax.
 bash:
-    bash -n wt-cli/install.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state
+    bash -n wt-cli/install.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh
 
 # Typecheck and self-test the Swift components.
 swift:
@@ -33,8 +33,8 @@ swift:
     swiftc -O -o "$tmpdir/planter-codex-bridge" claude-planter/PlanterCodexBridge.swift
     "$tmpdir/planter-codex-bridge" --self-test
 
-# Install the repository tools and login item.
 install:
+    ./ghostty/install.sh
     ./wt-cli/install.sh
     ./claude-planter/install.sh
     ./claude-planter/login-item.sh install

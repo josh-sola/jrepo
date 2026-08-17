@@ -6,6 +6,7 @@ Personal projects that share one checkout and one Git history.
 | --- | --- |
 | [wt-cli](wt-cli/) | Git worktree tooling for creating and managing prepared worktrees. |
 | [claude-planter](claude-planter/) | A macOS overlay that shows the state of coding sessions as plants. |
+| [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
 
 ## Validate
 
@@ -26,3 +27,7 @@ git clone git@github.com:josh-sola/jrepo.git
 cd jrepo
 just install
 ```
+
+`just install` also installs the Ghostty shaders. Run it from the primary
+checkout after syncing `main`. The shader installer refuses disposable `wt`
+trees and uncommitted shader sources because it creates absolute symlinks.
