@@ -395,6 +395,20 @@ fn write_fake_agent(dir: &Path, name: &str, record: &Path) -> PathBuf {
     bin_dir
 }
 
+fn write_fake_bridge(bin_dir: &Path, record: &Path, readiness: &str) {
+    let path = bin_dir.join("planter-codex-bridge");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{{\n  printf 'cwd=%s\\n' \"$PWD\"\n  printf 'arg=%s\\n' \"$1\"\n  printf 'owner=%s\\n' \"$2\"\n  printf 'PLANTER_COLOR=%s\\n' \"${{PLANTER_COLOR-}}\"\n  printf 'PLANTER_LABEL=%s\\n' \"${{PLANTER_LABEL-}}\"\n}} > '{}'\nprintf '%s\\n' '{}'\nexec 1>&- 2>&-\nwhile kill -0 \"$2\" 2>/dev/null; do sleep 1; done\n",
+            record.display(),
+            readiness
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn assert_success(out: &Output, label: &str) {
     assert!(
         out.status.success(),
@@ -1061,7 +1075,9 @@ fn launch_defaults_to_codex_without_claude_decoration_or_planter() {
     )
     .unwrap();
     let record = tmp.join("codex-record");
+    let bridge_record = tmp.join("bridge-record");
     let bin_dir = write_fake_agent(&tmp, "codex", &record);
+    write_fake_bridge(&bin_dir, &bridge_record, "unix:///tmp/wt-test.sock");
 
     let out = run_wt_with_path(
         &root,
@@ -1085,15 +1101,76 @@ fn launch_defaults_to_codex_without_claude_decoration_or_planter() {
         "{record}"
     );
     assert!(
-        record.contains("arg=-n\narg=user label\narg=/color red"),
+        record.contains(
+            "arg=--remote\narg=unix:///tmp/wt-test.sock\narg=-n\narg=user label\narg=/color red"
+        ),
         "{record}"
     );
-    assert!(record.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="));
+    assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
+    assert!(record.contains("PLANTER_LABEL=codex target"), "{record}");
+    let bridge_record = std::fs::read_to_string(&bridge_record).unwrap();
+    assert!(bridge_record.contains(&format!("cwd={}", tree.display())));
+    assert!(bridge_record.contains("arg=--owner-pid"));
+    assert!(bridge_record.contains("PLANTER_LABEL=codex target"));
     assert!(!planter_sentinel.exists(), "Codex must skip planter hooks");
     assert!(
         terminal_sentinel.exists(),
         "Codex should retain terminal hooks"
     );
+}
+
+#[test]
+fn launch_codex_falls_back_without_planter_environment_after_invalid_bridge() {
+    let tmp = unique_dir("launch-codex-bridge-fallback");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "fallback target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "fallback target"]), "wait");
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        launch_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("codex-record");
+    let bridge_record = tmp.join("bridge-record");
+    let bin_dir = write_fake_agent(&tmp, "codex", &record);
+    write_fake_bridge(&bin_dir, &bridge_record, "not-a-unix-endpoint");
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "launch",
+            "fallback target",
+            "myrepo",
+            "--",
+            "--model",
+            "gpt-5",
+        ],
+    );
+    assert_success(&out, "launch fallback");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(record.contains("arg=--model\narg=gpt-5"), "{record}");
+    assert!(!record.contains("arg=--remote"), "{record}");
+    assert!(
+        record.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="),
+        "{record}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid readiness endpoint"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(bridge_record.exists(), "bridge should have started");
 }
 
 #[test]

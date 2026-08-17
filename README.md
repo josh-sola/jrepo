@@ -250,10 +250,10 @@ trunk moves. Set `spares 0` on a repo in `config.kdl`, or run
 
 ## Features
 
-`wt launch` can reach outside wt to set a terminal background color. Claude
-launches can also find their tab position and coordinate with claude-planter.
-These opt-in hooks are declared under a `features` block in `config.kdl`.
-Absent block means off:
+`wt launch` can reach outside wt to set a terminal background color. It can
+also connect Claude and interactive Codex launches to Planter. These opt-in
+hooks are declared under a `features` block in `config.kdl`. Absent block
+means off:
 
 ```kdl
 features {
@@ -267,14 +267,22 @@ features {
 }
 ```
 
-- **`planter`** is Claude-only. It integrates with claude-planter, a
-  tab-labeling overlay:
+- **`planter`** integrates with the optional Planter overlay. Claude uses its
+  existing hooks for tab labels and peer renumbering. An interactive
+  `wt launch` Codex session uses `planter-codex-bridge` when that executable
+  is available, so Codex app-server state appears in the same overlay. A
+  missing or failed bridge falls back to direct Codex. Explicit `--remote`
+  endpoints and administrative Codex commands are never changed. Direct
+  `wt codex` remains direct. Codex currently marks its
+  [app-server interface as experimental](https://learn.chatgpt.com/docs/app-server).
+  Claude's hooks provide tab labels and peer renumbering:
   `get-position` finds this session's rank among its terminal's other tabs,
   and `renumber-peers` corrects the other claude-planter sessions whose rank
   a new tab just pushed down a slot. Declaring `planter` also makes `wt
   launch` set `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` in
-  the Claude session's environment. Codex never runs planter hooks or
-  receives `PLANTER_*` environment variables.
+  the Claude session's environment. The Codex bridge receives color and
+  label only; it preserves a caller-provided `PLANTER_STATE_DIR` or
+  `CLAUDE_PLANTER_DIR`.
 - **`terminal`** sets the terminal background: `set-background` writes an
   OSC 11 escape sequence in the session's color. It applies to both Codex
   and Claude launches.

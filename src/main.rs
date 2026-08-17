@@ -769,7 +769,12 @@ fn cmd_launch(
     }
 
     features::set_background(set_background_hook, hex, &ctx);
-    agent::exec_at(agent, &tree_path, args, &[])
+    agent::exec_launch_codex(
+        &tree_path,
+        args,
+        &[("PLANTER_COLOR", color), ("PLANTER_LABEL", &label)],
+        config.features.planter.is_some(),
+    )
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`
