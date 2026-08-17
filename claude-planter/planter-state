@@ -1,0 +1,290 @@
+#!/bin/bash
+# Records one Claude Code session's state for the plants overlay.
+#
+# Reads a hook payload on stdin; the event to record is the first argument:
+#
+#   start        SessionStart     the plant appears
+#   prompt       UserPromptSubmit you gave Claude something to do
+#   tool         PostToolUse      still going (this is what clears a "!" once
+#                and PostToolUseFailure  you have approved a permission prompt;
+#                                 the failure variant matters because a denied or
+#                                 failing call fires only that one)
+#   stop         Stop             Claude's turn ended
+#                and StopFailure   (including when it ended on an API error, which
+#                                 would otherwise leave the plant blooming)
+#   cwd          CwdChanged       the session changed directory: relabel
+#   permission   PermissionRequest a permission dialog is on screen
+#   notify       Notification     a permission prompt, or an idle nudge
+#   agent-start  SubagentStart    a subagent began
+#   agent-stop   SubagentStop     a subagent finished
+#   end          SessionEnd       the plant leaves
+#
+# Runs on every tool call, so it keeps to three jq invocations at most. Never
+# fails and never writes to stdout: a hook that does either can block a prompt
+# or leak text into the session's context.
+set -uo pipefail
+
+event="${1:-}"
+dir="${PLANTER_STATE_DIR:-${CLAUDE_PLANTER_DIR:-$HOME/.claude/planter}}"
+
+# The hot path, taken on most tool calls: a tool finished in a session whose plant
+# is already awake, so there is nothing to record. Answered with a single grep,
+# before spending a jq on the payload. Claude Code exports the session id to its
+# children; if that ever stops being true, or the id names no awake plant, this
+# falls through to the full path below and stays correct.
+if [[ "$event" == "tool" && -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    legacy_file="$dir/$CLAUDE_CODE_SESSION_ID.json"
+    qualified_file="$dir/claude-${CLAUDE_CODE_SESSION_ID//[^[:alnum:]._-]/_}.json"
+    if grep -q '"state": *"working"' "$qualified_file" "$legacy_file" 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+# read -d '' takes the whole payload with a builtin, saving a process.
+payload=""
+IFS= read -r -d '' payload || true
+
+# Subagent events report the subagent's own id in .session_id, so prefer the
+# parent's id and record the work against the session you actually see.
+IFS=$'\t' read -r sid cwd message ntype < <(
+    jq -r '[(.parent_session_id // .session_id // ""), (.cwd // ""),
+            (.message // ""), (.notification_type // "")] | @tsv' \
+        <<<"$payload" 2>/dev/null
+)
+[[ -n "${sid:-}" ]] || exit 0
+
+mkdir -p "$dir" 2>/dev/null
+safe_sid="${sid//[^[:alnum:]._-]/_}"
+file="$dir/claude-$safe_sid.json"
+legacy_file="$dir/$sid.json"
+[[ -f "$file" || ! -f "$legacy_file" ]] || file="$legacy_file"
+dir_hook="$dir/label-hook"
+
+if [[ "$event" == "end" ]]; then
+    rm -f "$file"
+    exit 0
+fi
+
+# Same short-circuit as above, for the case where the session id came from the
+# payload rather than the environment.
+if [[ "$event" == "tool" ]]; then
+    grep -q '"state": *"working"' "$file" 2>/dev/null && exit 0
+fi
+
+now="$(date +%s)"
+created="" agents=0 pid="" state="waiting" turn=0 label="" since=0 agents_at=0 tab=""
+
+if [[ -f "$file" ]]; then
+    IFS=$'\t' read -r created agents pid state turn label since agents_at tab < <(
+        jq -r '[(.created_at // "" | tostring), (.agents // 0 | tostring),
+                (.pid // "" | tostring), (.state // "waiting"),
+                (.turn // 0 | tostring), (.label // ""),
+                (.since // 0 | tostring), (.agents_at // 0 | tostring),
+                (.tab // "" | tostring)] | @tsv' \
+            "$file" 2>/dev/null
+    )
+else
+    # Only a real session event may create a plant. A subagent or tool event for an
+    # unknown session means the session predates these hooks; leave it alone
+    # rather than invent a plant for it.
+    case "$event" in
+        tool | cwd | agent-start | agent-stop) exit 0 ;;
+    esac
+fi
+
+# Nothing to record: the plant already looks the way this event would leave it.
+[[ "$event" == "tool" && "$state" == "working" ]] && exit 0
+
+# A launcher that knows a good name for its session hands it over in
+# PLANTER_LABEL, which wins over both the label-hook and the directory
+# fallback below — and since it is re-read from the environment on every
+# event, it stays correct without ever calling the hook.
+if [[ -n "${PLANTER_LABEL:-}" ]]; then
+    label="$PLANTER_LABEL"
+
+# The label is worked out when the plant is created, and again whenever the session
+# actually changes directory. CwdChanged is the signal for that: reading cwd off
+# every event instead would rename the plant constantly, because that field follows
+# the shell rather than the session. A subagent's directory changes carry the
+# subagent's own session id, so they cannot rename the session you are watching.
+elif [[ -z "${label:-}" || "$event" == "cwd" ]]; then
+    if [[ "$event" == "cwd" ]]; then
+        session_dir="${cwd:-$PWD}"
+    else
+        session_dir="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+    fi
+    session_dir="${session_dir%/}"
+    label=""
+
+    # A directory basename is a poor label for worktrees named after a uuid or a
+    # ticket id. If $CLAUDE_PLANTER_DIR/label-hook exists, it gets the session's
+    # directory and may print a better name; anything it prints wins. This runs
+    # once per session, never on the tool path.
+    if [[ -x "$dir_hook" ]]; then
+        label="$("$dir_hook" "$session_dir" 2>/dev/null | head -1)"
+        label="${label//[$'\n\r\t']/}"
+    fi
+
+    [[ -n "$label" ]] || label="${session_dir##*/}"
+fi
+
+[[ "${agents:-}" =~ ^[0-9]+$ ]] || agents=0
+[[ "${since:-}" =~ ^[0-9]+$ ]] || since=0
+[[ "${agents_at:-}" =~ ^[0-9]+$ ]] || agents_at=0
+
+# A SubagentStart whose SubagentStop never arrives — an interrupted or failed
+# agent — would leave the tally stuck above zero for good, and a stuck tally does
+# more than draw a bud that is not there: Stop keeps the plant blooming while it
+# waits for you, which breaks the one thing the plant is for. Nothing on disk says
+# which agents are alive, so the tally is bounded instead: it cannot outlive this
+# long, and a new prompt from you clears it outright.
+stale_agents=1800
+if ((agents > 0 && agents_at > 0 && now - agents_at > stale_agents)); then
+    agents=0
+fi
+
+[[ "${turn:-}" =~ ^[01]$ ]] || turn=0
+[[ "${created:-}" =~ ^[0-9]+$ ]] || created="$now"
+
+# The clock behind a plant's progressive wilt: when this stretch of waiting for
+# you began. Held across an idle nudge, so a nudge cannot reset the wilt.
+start_waiting() {
+    case "$state" in
+    waiting | attention) ((since > 0)) || since="$now" ;;
+    *) since="$now" ;;
+    esac
+}
+
+case "$event" in
+    start)
+        state="waiting"
+        turn=0
+        since="$now"
+        ;;
+    prompt)
+        state="working"
+        turn=1
+        since=0
+        # You driving again is the clearest moment to forgive a stuck tally. The
+        # cost is a background agent that outlives a prompt losing its bud, which
+        # is worth far less than a plant that never wilts again.
+        agents=0
+        ;;
+    tool)
+        state="working"
+        since=0
+        ;;
+    # The dialog is on screen right now. This is the reliable signal: Claude Code
+    # holds notifications back for a few seconds, so a prompt you answer quickly
+    # never produces one, which left the "!" never appearing in practice.
+    # A directory change says nothing about whether Claude is busy, so it updates
+    # the label above and leaves the state alone.
+    cwd) ;;
+    permission)
+        start_waiting
+        state="attention"
+        ;;
+    # A backstop for permission prompts, and the only signal for the other
+    # notification kinds. A session that has merely gone quiet is not blocking, so
+    # it stays wilted rather than raising a "!" — the wilt already says it, and a
+    # "!" for it was a false alarm. notification_type is the documented field;
+    # the message text is the fallback if it is ever absent.
+    notify)
+        start_waiting
+        case "${ntype:-}" in
+        permission_prompt | agent_needs_input | elicitation_dialog) state="attention" ;;
+        idle_prompt) state="waiting" ;;
+        "")
+            case "$message" in
+            *"waiting for your input"*) state="waiting" ;;
+            *) state="attention" ;;
+            esac
+            ;;
+        # Anything else (auth_success, agent_completed, …) is not about you being
+        # needed, so it must not change how the plant looks.
+        *) ;;
+        esac
+        ;;
+    agent-start)
+        agents=$((agents + 1))
+        agents_at="$now"
+        state="working"
+        since=0
+        ;;
+    agent-stop)
+        ((agents > 0)) && agents=$((agents - 1))
+        agents_at="$now"
+        # The last background agent finishing after the turn ended is the moment
+        # the session really becomes your move.
+        if ((agents == 0 && turn == 0)); then
+            state="waiting"
+            start_waiting
+        fi
+        ;;
+    stop)
+        turn=0
+        # A finished turn is only your move if nothing is still running for you.
+        if ((agents > 0)); then
+            state="working"
+        else
+            start_waiting
+            state="waiting"
+        fi
+        ;;
+esac
+
+# Colour, like the label above, comes from the launcher's environment and is
+# re-validated on every write rather than trusted from a prior file — junk here
+# must never reach disk, so an invalid value falls back to a real JSON null,
+# not the string "null".
+color_json="null"
+case "${PLANTER_COLOR:-}" in
+    red | orange | yellow | green | cyan | blue | purple | pink)
+        color_json="\"$PLANTER_COLOR\"" ;;
+esac
+
+# Row position starts from PLANTER_TAB_INDEX too, but it is the one value the
+# environment cannot keep correct: it goes stale as soon as tabs move, and only
+# the launcher sees that happen. So a valid tab already on disk outranks the
+# environment, leaving the launcher free to renumber a session in place. Both
+# sources get the same validation, so junk cannot round-trip.
+tab_json="null"
+if [[ "${tab:-}" =~ ^[1-9][0-9]*$ ]]; then
+    tab_json="$tab"
+elif [[ "${PLANTER_TAB_INDEX:-}" =~ ^[1-9][0-9]*$ ]]; then
+    tab_json="$PLANTER_TAB_INDEX"
+fi
+
+# The claude process that owns this session. The overlay uses it to drop plants
+# whose session died without ever running SessionEnd. Claude Code exports the pid
+# to its children; the walk up the process tree is the fallback if that changes.
+if [[ ! "${pid:-}" =~ ^[0-9]+$ ]] || ((pid == 0)); then
+    pid=0
+    if [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]]; then
+        pid="$CLAUDE_PID"
+    else
+        p="$PPID"
+        for _ in 1 2 3 4 5 6; do
+            [[ -n "$p" && "$p" -gt 1 ]] || break
+            if [[ "$(ps -p "$p" -o comm= 2>/dev/null)" == *claude* ]]; then
+                pid="$p"
+                break
+            fi
+            p="$(ps -p "$p" -o ppid= 2>/dev/null | tr -d ' ')"
+        done
+    fi
+fi
+
+tmp="$file.tmp.$$"
+jq -nc \
+    --arg sid "$sid" --arg label "$label" --arg state "$state" \
+    --argjson agents "$agents" --argjson pid "$pid" \
+    --argjson created "$created" --argjson now "$now" --argjson turn "$turn" \
+    --argjson since "$since" --argjson agents_at "$agents_at" \
+    --argjson color "$color_json" --argjson tab "$tab_json" \
+    '{provider: "claude", identity: ("claude:" + $sid), session_id: $sid, label: $label, state: $state, agents: $agents, turn: $turn,
+      since: $since, agents_at: $agents_at, pid: $pid,
+      created_at: $created, updated_at: $now, color: $color, tab: $tab}' \
+    >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
+rm -f "$tmp" 2>/dev/null
+exit 0

@@ -1,0 +1,28 @@
+#!/bin/bash
+# Example label-hook: name a plant after its git branch when the session is in a
+# worktree, and after the repository otherwise.
+#
+# Install by copying to ~/.claude/planter/label-hook and making it executable.
+# It receives the session's directory as $1 and prints a label, or prints nothing
+# to let planter fall back to the directory's basename. It runs once per session,
+# so it can afford to be slow.
+set -uo pipefail
+
+dir="${1%/}"
+cd "$dir" 2>/dev/null || exit 0
+
+# In a linked worktree the branch is what distinguishes it; in a normal clone the
+# repository name is steadier, because the branch changes under you as you work.
+if [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]]; then
+    exit 0
+fi
+
+common="$(git rev-parse --git-common-dir 2>/dev/null)"
+gitdir="$(git rev-parse --git-dir 2>/dev/null)"
+
+if [[ -n "$common" && "$common" != "$gitdir" ]]; then
+    git rev-parse --abbrev-ref HEAD 2>/dev/null
+else
+    toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
+    [[ -n "$toplevel" ]] && basename "$toplevel"
+fi
