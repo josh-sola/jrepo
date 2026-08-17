@@ -354,6 +354,11 @@ fn run_wt(root: &Path, args: &[&str]) -> Output {
         // children it spawns, so the same quiescing has to reach those too.
         .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
         .output()
         .expect("spawn wt")
 }
@@ -375,6 +380,11 @@ fn run_wt_with_path(root: &Path, cwd: &Path, bin_dir: &Path, args: &[&str]) -> O
         .env("PATH", path)
         .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
         .output()
         .expect("spawn wt")
 }
@@ -400,7 +410,7 @@ fn write_fake_bridge(bin_dir: &Path, record: &Path, readiness: &str) {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\n{{\n  printf 'cwd=%s\\n' \"$PWD\"\n  printf 'arg=%s\\n' \"$1\"\n  printf 'owner=%s\\n' \"$2\"\n  printf 'PLANTER_COLOR=%s\\n' \"${{PLANTER_COLOR-}}\"\n  printf 'PLANTER_LABEL=%s\\n' \"${{PLANTER_LABEL-}}\"\n}} > '{}'\nprintf '%s\\n' '{}'\nexec 1>&- 2>&-\nwhile kill -0 \"$2\" 2>/dev/null; do sleep 1; done\n",
+            "#!/bin/sh\n{{\n  printf 'cwd=%s\\n' \"$PWD\"\n  printf 'arg=%s\\n' \"$1\"\n  printf 'owner=%s\\n' \"$2\"\n  printf 'PLANTER_COLOR=%s\\n' \"${{PLANTER_COLOR-}}\"\n  printf 'PLANTER_LABEL=%s\\n' \"${{PLANTER_LABEL-}}\"\n  printf 'PLANTER_TAB_INDEX=%s\\n' \"${{PLANTER_TAB_INDEX-}}\"\n}} > '{}'\nprintf '%s\\n' '{}'\nexec 1>&- 2>&-\nwhile kill -0 \"$2\" 2>/dev/null; do sleep 1; done\n",
             record.display(),
             readiness
         ),
@@ -607,6 +617,11 @@ fn spawn_wt(root: &Path, args: &[&str]) -> std::process::Child {
         .env("WT_CONFIG", config_path_for(root))
         .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1046,14 +1061,14 @@ fn launch_runs_a_hook_only_when_its_feature_block_is_present() {
 
 fn launch_features_config(planter_sentinel: &Path, terminal_sentinel: &Path) -> String {
     format!(
-        "version 1\n\nfeatures {{\n    planter {{\n        get-position {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n    terminal {{\n        set-background {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n}}\n",
+        "version 1\n\nfeatures {{\n    planter {{\n        get-position {{ cmd \"/bin/sh\" \"-c\" \": > {}; printf 7\" }}\n    }}\n    terminal {{\n        set-background {{ cmd \"/bin/sh\" \"-c\" \": > {}\" }}\n    }}\n}}\n",
         planter_sentinel.display(),
         terminal_sentinel.display()
     )
 }
 
 #[test]
-fn launch_defaults_to_codex_without_claude_decoration_or_planter() {
+fn launch_codex_uses_planter_positioning_without_claude_decoration() {
     let tmp = unique_dir("launch-codex");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
@@ -1108,11 +1123,78 @@ fn launch_defaults_to_codex_without_claude_decoration_or_planter() {
     );
     assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
     assert!(record.contains("PLANTER_LABEL=codex target"), "{record}");
+    assert!(record.contains("PLANTER_TAB_INDEX=7"), "{record}");
     let bridge_record = std::fs::read_to_string(&bridge_record).unwrap();
     assert!(bridge_record.contains(&format!("cwd={}", tree.display())));
     assert!(bridge_record.contains("arg=--owner-pid"));
     assert!(bridge_record.contains("PLANTER_LABEL=codex target"));
-    assert!(!planter_sentinel.exists(), "Codex must skip planter hooks");
+    assert!(
+        bridge_record.contains("PLANTER_TAB_INDEX=7"),
+        "{bridge_record}"
+    );
+    assert!(planter_sentinel.exists(), "Codex should run planter hooks");
+    assert!(
+        terminal_sentinel.exists(),
+        "Codex should retain terminal hooks"
+    );
+}
+
+#[test]
+fn launch_codex_with_explicit_remote_stays_direct() {
+    let tmp = unique_dir("launch-codex-remote");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "remote target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["wait", "remote target"]), "wait");
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        launch_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("codex-record");
+    let bridge_record = tmp.join("bridge-record");
+    let bin_dir = write_fake_agent(&tmp, "codex", &record);
+    write_fake_bridge(&bin_dir, &bridge_record, "unix:///tmp/wt-test.sock");
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "launch",
+            "remote target",
+            "myrepo",
+            "--",
+            "--remote",
+            "unix:///tmp/caller.sock",
+        ],
+    );
+    assert_success(&out, "launch codex with explicit remote");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record.contains("arg=--remote\narg=unix:///tmp/caller.sock"),
+        "{record}"
+    );
+    assert!(
+        record.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="),
+        "{record}"
+    );
+    assert!(
+        !bridge_record.exists(),
+        "explicit --remote must skip the bridge"
+    );
+    assert!(
+        !planter_sentinel.exists(),
+        "explicit --remote must skip planter hooks"
+    );
     assert!(
         terminal_sentinel.exists(),
         "Codex should retain terminal hooks"
@@ -2261,6 +2343,11 @@ fn run_wt_without_agents_on_path(root: &Path, args: &[&str]) -> Output {
         .env("WT_ROOT", root)
         .env("WT_CONFIG", config_path_for(root))
         .env("PATH", "/nonexistent-bin-dir")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
         .output()
         .expect("spawn wt")
 }

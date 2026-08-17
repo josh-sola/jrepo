@@ -61,11 +61,30 @@ fn try_renumber(tabs: &Tabs) -> Result<()> {
 }
 
 fn state_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("CLAUDE_PLANTER_DIR") {
-        return PathBuf::from(p);
+    let planter_state_dir = std::env::var("PLANTER_STATE_DIR").ok();
+    let claude_planter_dir = std::env::var("CLAUDE_PLANTER_DIR").ok();
+    let home = std::env::var("HOME").ok();
+    state_dir_from_vars(
+        planter_state_dir.as_deref(),
+        claude_planter_dir.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn state_dir_from_vars(
+    planter_state_dir: Option<&str>,
+    claude_planter_dir: Option<&str>,
+    home: Option<&str>,
+) -> PathBuf {
+    if let Some(dir) = planter_state_dir {
+        return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".claude").join("planter")
+    if let Some(dir) = claude_planter_dir {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(home.unwrap_or_default())
+        .join(".claude")
+        .join("planter")
 }
 
 /// A `*.json` file that isn't one of the planter's own bookkeeping files —
@@ -222,5 +241,21 @@ mod tests {
         assert!(!is_state_file("overlay-position.json"));
         assert!(!is_state_file("label-hook"));
         assert!(is_state_file("42c054f0-35bb-4624-8f32-40ee8f4fb34a.json"));
+    }
+
+    #[test]
+    fn state_dir_prefers_the_current_variable_then_the_legacy_one() {
+        assert_eq!(
+            state_dir_from_vars(Some("/current"), Some("/legacy"), Some("/home/me")),
+            PathBuf::from("/current")
+        );
+        assert_eq!(
+            state_dir_from_vars(None, Some("/legacy"), Some("/home/me")),
+            PathBuf::from("/legacy")
+        );
+        assert_eq!(
+            state_dir_from_vars(None, None, Some("/home/me")),
+            PathBuf::from("/home/me/.claude/planter")
+        );
     }
 }

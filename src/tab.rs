@@ -18,13 +18,13 @@ pub struct Tabs {
 
 /// Backs `wt __tab-index` (via [`index`]) and the planter renumber (via
 /// [`Tabs::others`]). The caller's own tty is always a candidate, even with
-/// no `claude` running on it yet: `wt launch` calls this *before* exec'ing
-/// claude, so it has to count itself.
+/// no planted session running on it yet: `wt launch` calls this *before*
+/// exec'ing the agent, so it has to count itself.
 pub fn probe() -> Result<Tabs> {
     let my_tty = own_tty()?;
 
     let mut candidates = vec![my_tty.clone()];
-    for tty in claude_ttys()? {
+    for tty in planter_ttys()? {
         if !candidates.contains(&tty) {
             candidates.push(tty);
         }
@@ -184,17 +184,18 @@ fn parse_tty_ppid(text: &str) -> (String, String) {
     )
 }
 
-/// Every tty running a process whose `comm` basename is exactly `claude`.
-fn claude_ttys() -> Result<Vec<String>> {
+/// Every tty running Claude or the Planter Codex bridge, matched by exact
+/// process basename so unplanted Codex sessions do not affect tab ranks.
+fn planter_ttys() -> Result<Vec<String>> {
     let output = Command::new("ps")
         .args(["-Ao", "tty=,comm="])
         .output()
-        .context("running ps for claude ttys")?;
+        .context("running ps for planter ttys")?;
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_claude_ttys(&text))
+    Ok(parse_planter_ttys(&text))
 }
 
-fn parse_claude_ttys(text: &str) -> Vec<String> {
+fn parse_planter_ttys(text: &str) -> Vec<String> {
     let mut ttys = Vec::new();
     for line in text.lines() {
         let mut fields = line.split_whitespace();
@@ -205,7 +206,7 @@ fn parse_claude_ttys(text: &str) -> Vec<String> {
             continue;
         }
         let basename = comm.rsplit('/').next().unwrap_or(comm);
-        if basename == "claude" {
+        if matches!(basename, "claude" | "planter-codex-bridge") {
             let dev = format!("/dev/{tty}");
             if !ttys.contains(&dev) {
                 ttys.push(dev);
@@ -328,12 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_ttys_matches_exact_comm_and_ttys_prefix() {
-        let text =
-            "ttys001 claude\nttys002 zsh\nttys003 /opt/homebrew/bin/claude\nconsole claude\n";
+    fn parse_planter_ttys_matches_exact_session_processes_and_deduplicates() {
+        let text = "ttys001 claude\nttys002 codex\nttys003 /opt/homebrew/bin/claude\nttys004 /opt/bin/planter-codex-bridge\nttys004 planter-codex-bridge\nconsole claude\n";
         assert_eq!(
-            parse_claude_ttys(text),
-            vec!["/dev/ttys001".to_string(), "/dev/ttys003".to_string()]
+            parse_planter_ttys(text),
+            vec![
+                "/dev/ttys001".to_string(),
+                "/dev/ttys003".to_string(),
+                "/dev/ttys004".to_string(),
+            ]
         );
     }
 

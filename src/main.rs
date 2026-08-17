@@ -733,7 +733,12 @@ fn cmd_launch(
         .as_ref()
         .and_then(|t| t.set_background.as_ref());
 
-    if agent == Agent::Claude {
+    let planter_enabled = config.features.planter.is_some();
+    let planter_eligible = agent == Agent::Claude || agent::interactive_codex_args(args);
+    let mut env = Vec::new();
+    let tab_index_str;
+
+    if planter_enabled && planter_eligible {
         let get_position_hook = config
             .features
             .planter
@@ -749,17 +754,17 @@ fn cmd_launch(
             features::renumber_peers(renumber_peers_hook, tabs, &ctx);
         }
 
-        let mut env = Vec::new();
-        let tab_index_str;
-        if config.features.planter.is_some() {
-            env.push(("PLANTER_COLOR", color));
-            env.push(("PLANTER_LABEL", &label));
-            if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
-                tab_index_str = idx.to_string();
-                env.push(("PLANTER_TAB_INDEX", &tab_index_str));
-            }
+        env.push(("PLANTER_COLOR", color));
+        env.push(("PLANTER_LABEL", &label));
+        if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
+            tab_index_str = idx.to_string();
+            env.push(("PLANTER_TAB_INDEX", &tab_index_str));
         }
-        features::set_background(set_background_hook, hex, &ctx);
+    }
+
+    features::set_background(set_background_hook, hex, &ctx);
+
+    if agent == Agent::Claude {
         return agent::exec_at(
             agent,
             &tree_path,
@@ -768,13 +773,7 @@ fn cmd_launch(
         );
     }
 
-    features::set_background(set_background_hook, hex, &ctx);
-    agent::exec_launch_codex(
-        &tree_path,
-        args,
-        &[("PLANTER_COLOR", color), ("PLANTER_LABEL", &label)],
-        config.features.planter.is_some(),
-    )
+    agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`

@@ -267,22 +267,17 @@ features {
 }
 ```
 
-- **`planter`** integrates with the optional Planter overlay. Claude uses its
-  existing hooks for tab labels and peer renumbering. An interactive
-  `wt launch` Codex session uses `planter-codex-bridge` when that executable
-  is available, so Codex app-server state appears in the same overlay. A
-  missing or failed bridge falls back to direct Codex. Explicit `--remote`
-  endpoints and administrative Codex commands are never changed. Direct
-  `wt codex` remains direct. Codex currently marks its
+- **`planter`** integrates with the optional Planter overlay. Interactive
+  `wt launch` sessions for Claude and Codex share tab positioning: `get-position`
+  finds this session's rank, and `renumber-peers` updates planted sessions a
+  new tab pushed down. Codex uses `planter-codex-bridge` when available, so
+  its app-server state appears in the same overlay. A missing or failed bridge
+  falls back to direct Codex; explicit `--remote` endpoints, administrative
+  Codex commands, and direct `wt codex` remain direct. Eligible launches pass
+  `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` to Claude or the
+  Codex bridge. The bridge preserves a caller-provided `PLANTER_STATE_DIR` or
+  `CLAUDE_PLANTER_DIR`. Codex currently marks its
   [app-server interface as experimental](https://learn.chatgpt.com/docs/app-server).
-  Claude's hooks provide tab labels and peer renumbering:
-  `get-position` finds this session's rank among its terminal's other tabs,
-  and `renumber-peers` corrects the other claude-planter sessions whose rank
-  a new tab just pushed down a slot. Declaring `planter` also makes `wt
-  launch` set `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` in
-  the Claude session's environment. The Codex bridge receives color and
-  label only; it preserves a caller-provided `PLANTER_STATE_DIR` or
-  `CLAUDE_PLANTER_DIR`.
 - **`terminal`** sets the terminal background: `set-background` writes an
   OSC 11 escape sequence in the session's color. It applies to both Codex
   and Claude launches.

@@ -152,7 +152,7 @@ pub fn exec_launch_codex(
     Err(err).context("exec'ing codex through planter bridge")
 }
 
-fn interactive_codex_args(args: &[String]) -> bool {
+pub(crate) fn interactive_codex_args(args: &[String]) -> bool {
     if args
         .iter()
         .any(|arg| arg == "--remote" || arg.starts_with("--remote="))
