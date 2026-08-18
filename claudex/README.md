@@ -1,13 +1,14 @@
 # claudex
 
 `claudex` runs Claude Code against a private, local LiteLLM gateway that uses
-your ChatGPT device login. It is an experimental bridge, not an official
+your ChatGPT login. It is an experimental bridge, not an official
 Anthropic, OpenAI, or Claude Code integration. Upstream changes can break it,
 and ChatGPT subscription access may vary by plan and region.
 
-It supports macOS and Linux. You need `uv`, Claude Code, and a ChatGPT account
-that LiteLLM accepts for its ChatGPT provider. It does not support Windows,
-API-key billing, shared gateways, background daemons, or unattended use.
+It supports macOS and Linux. You need `uv`, Claude Code, the Codex CLI, and a
+ChatGPT account that LiteLLM accepts for its ChatGPT provider. It does not
+support Windows, API-key billing, shared gateways, background daemons, or
+unattended use.
 
 ## Install
 
@@ -59,9 +60,18 @@ claudex models
 claudex --model sol -- --help
 ```
 
-`login` starts LiteLLM's ChatGPT device OAuth flow. `doctor` makes no model
-request. Each normal invocation starts one temporary gateway on a random local
-port, runs Claude Code, and removes that gateway when Claude exits.
+`login` starts the Codex CLI's browser login and completes through its local
+callback. It uses a fresh, isolated temporary Codex credential home, then
+imports the result into Claudex's private LiteLLM cache. `doctor` makes no
+model request. Each normal invocation starts one temporary gateway on a random
+local port, runs Claude Code, and removes that gateway when Claude exits.
+
+If your personal or workspace account permits device authentication, the older
+LiteLLM flow remains available explicitly:
+
+```sh
+claudex login --device-code
+```
 
 Run Claude Code as usual by putting its arguments after `claudex`:
 
@@ -119,16 +129,22 @@ resolved result.
 
 `claudex` uses private directories (`0700`) and private files (`0600`). It
 keeps configuration in `~/.config/claudex` and LiteLLM's OAuth state below
-`~/.local/state/claudex/chatgpt`; XDG equivalents are used when set. The
-gateway YAML is temporary, the local bearer key only exists in child-process
-memory, and neither is logged or stored in a command line.
+`~/.local/state/claudex/chatgpt`; XDG equivalents are used when set. Browser
+login gives Codex a temporary, isolated credential home below Claudex's state
+directory and imports only the resulting tokens into that LiteLLM cache. It
+does not read or modify your usual `~/.codex/auth.json`. The gateway YAML is
+temporary, the local bearer key only exists in child-process memory, and
+neither is logged or stored in a command line.
 
 Run `claudex doctor` first if launch fails. It checks the OS, Claude Code,
-LiteLLM version, OAuth state permissions, and the LiteLLM compatibility patch.
-If it reports an open permission, use the exact `chmod` command it prints. If
-the OAuth flow succeeds but launch fails after an upgrade, reinstall this pinned
-package version; the experimental provider and gateway protocol can change
-without notice.
+Codex CLI, LiteLLM version, OAuth state permissions, and the LiteLLM
+compatibility patch. If it reports an open permission, use the exact `chmod`
+command it prints. If browser login reports that Codex is missing, install the
+Codex CLI and try again. If you use `--device-code` and see a workspace policy
+error, ask your workspace admin to enable device authentication or use the
+default browser login. If login succeeds but launch fails after an upgrade,
+reinstall this pinned package version; the experimental provider and gateway
+protocol can change without notice.
 
 Claude Code is configured only through the process environment. `claudex` does
 not modify `~/.claude/settings.json`, and removes an inherited

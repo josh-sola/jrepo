@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -59,7 +60,13 @@ class CliTests(unittest.TestCase):
         with patch.object(cli, "login", return_value=0) as login:
             result = self.runner.invoke(cli.app, ["login"])
         self.assertEqual(result.exit_code, 0, result.output)
-        login.assert_called_once_with()
+        login.assert_called_once_with(device_code=False)
+
+    def test_login_device_code_flag_uses_explicit_legacy_route(self) -> None:
+        with patch.object(cli, "login", return_value=0) as login:
+            result = self.runner.invoke(cli.app, ["login", "--device-code"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        login.assert_called_once_with(device_code=True)
 
     def test_models_subcommand_uses_typer_command(self) -> None:
         settings = ModelSettings()
@@ -139,10 +146,71 @@ class CliTests(unittest.TestCase):
         self.assertIn("gpt-direct", captured["extra_models"])
         run_child.assert_called_once()
 
-    def test_login_uses_isolated_chatgpt_token_dir_and_private_file(self) -> None:
+    def test_browser_login_uses_temporary_codex_home_and_converts_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            normal_home = Path(directory) / "normal-home"
+            normal_auth = normal_home / ".codex" / "auth.json"
+            normal_auth.parent.mkdir(parents=True)
+            normal_auth.write_text('{"tokens": {"access_token": "do-not-use"}}')
+            env = {
+                "HOME": str(normal_home),
+                "XDG_STATE_HOME": directory,
+                "XDG_CONFIG_HOME": directory + "/config",
+                "HTTPS_PROXY": "override-proxy",
+            }
+            observed: dict[str, str] = {}
+
+            def complete_login(command: object, environment: dict[str, str]) -> int:
+                self.assertEqual(command, ["codex", "login"])
+                observed.update({name: environment[name] for name in ("PATH", "SSL_CERT_FILE", "BROWSER", "HTTPS_PROXY", "CODEX_HOME")})
+                codex_home = Path(environment["CODEX_HOME"])
+                self.assertTrue(codex_home.is_relative_to(Path(directory) / "claudex"))
+                self.assertEqual((codex_home / "config.toml").read_text(), 'cli_auth_credentials_store = "file"\n')
+                (codex_home / "auth.json").write_text(
+                    json.dumps(
+                        {
+                            "tokens": {
+                                "access_token": "access",
+                                "refresh_token": "refresh",
+                                "id_token": "id",
+                                "account_id": "account",
+                            }
+                        }
+                    )
+                )
+                return 0
+
+            with patch.dict(os.environ, {"SSL_CERT_FILE": "inherited-cert", "BROWSER": "inherited-browser", "HTTPS_PROXY": "inherited-proxy"}):
+                with patch.object(cli.shutil, "which", return_value="/usr/bin/codex"), patch.object(
+                    cli, "run_child", side_effect=complete_login
+                ):
+                    self.assertEqual(cli.login(env), 0)
+            token = Path(directory) / "claudex" / "chatgpt" / "auth.json"
+            self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(token.read_text()), {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "id_token": "id",
+                "account_id": "account",
+            })
+            self.assertFalse(Path(observed["CODEX_HOME"]).exists())
+            self.assertEqual(normal_auth.read_text(), '{"tokens": {"access_token": "do-not-use"}}')
+            self.assertEqual(observed["PATH"], os.environ["PATH"])
+            self.assertEqual(observed["SSL_CERT_FILE"], "inherited-cert")
+            self.assertEqual(observed["BROWSER"], "inherited-browser")
+            self.assertEqual(observed["HTTPS_PROXY"], "override-proxy")
+
+    def test_device_code_route_stays_available(self) -> None:
+        with patch.object(cli, "browser_login") as browser, patch.object(cli, "device_code_login", return_value=0) as device:
+            self.assertEqual(cli.login(device_code=True), 0)
+        browser.assert_not_called()
+        device.assert_called_once_with(None)
+
+    def test_device_code_login_uses_isolated_chatgpt_token_dir_and_private_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = {"XDG_STATE_HOME": directory, "XDG_CONFIG_HOME": directory + "/config", "HTTPS_PROXY": "override-proxy"}
             from litellm.llms.chatgpt.authenticator import Authenticator
+
             observed: dict[str, str] = {}
 
             def get_access_token(_self: object) -> str:
@@ -155,7 +223,7 @@ class CliTests(unittest.TestCase):
             with patch.dict(os.environ, {"SSL_CERT_FILE": "inherited-cert", "BROWSER": "inherited-browser", "HTTPS_PROXY": "inherited-proxy"}):
                 before = dict(os.environ)
                 with patch.object(Authenticator, "get_access_token", get_access_token):
-                    self.assertEqual(cli.login(env), 0)
+                    self.assertEqual(cli.login(env, device_code=True), 0)
                 self.assertEqual(dict(os.environ), before)
             token = Path(directory) / "claudex" / "chatgpt" / "auth.json"
             self.assertEqual(token.stat().st_mode & 0o777, 0o600)
@@ -163,3 +231,47 @@ class CliTests(unittest.TestCase):
             self.assertEqual(observed["SSL_CERT_FILE"], "inherited-cert")
             self.assertEqual(observed["BROWSER"], "inherited-browser")
             self.assertEqual(observed["HTTPS_PROXY"], "override-proxy")
+
+    def test_browser_login_reports_missing_codex(self) -> None:
+        with patch.object(cli.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "Codex CLI is not on PATH"):
+                cli.browser_login({"PATH": ""})
+
+    def test_browser_login_reports_child_failure_and_cleans_up(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed: dict[str, Path] = {}
+
+            def fail_login(_command: object, environment: dict[str, str]) -> int:
+                observed["home"] = Path(environment["CODEX_HOME"])
+                return 17
+
+            with patch.object(cli.shutil, "which", return_value="/usr/bin/codex"), patch.object(
+                cli, "run_child", side_effect=fail_login
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exited with status 17"):
+                    cli.browser_login({"XDG_STATE_HOME": directory})
+            self.assertFalse(observed["home"].exists())
+
+    def test_browser_login_rejects_malformed_codex_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def malformed_login(_command: object, environment: dict[str, str]) -> int:
+                Path(environment["CODEX_HOME"], "auth.json").write_text('{"tokens": {"access_token": "access"}}')
+                return 0
+
+            with patch.object(cli.shutil, "which", return_value="/usr/bin/codex"), patch.object(
+                cli, "run_child", side_effect=malformed_login
+            ):
+                with self.assertRaisesRegex(RuntimeError, "did not write valid login credentials"):
+                    cli.browser_login({"XDG_STATE_HOME": directory})
+
+    def test_doctor_checks_for_codex_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def which(command: str, path: str | None = None) -> str | None:
+                return "/usr/bin/" + command if command in {"claude", "codex"} else None
+
+            output = StringIO()
+            with patch.object(cli.platform, "system", return_value="Darwin"), patch.object(cli.shutil, "which", side_effect=which), patch.object(
+                cli, "version", return_value="test"
+            ), patch.object(cli, "compatibility_status", return_value=(True, "available")), redirect_stdout(output):
+                self.assertEqual(cli.doctor({"XDG_CONFIG_HOME": directory + "/config", "XDG_STATE_HOME": directory + "/state"}), 1)
+            self.assertIn("OK   codex: /usr/bin/codex", output.getvalue())
