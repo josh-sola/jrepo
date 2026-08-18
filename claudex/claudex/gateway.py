@@ -8,6 +8,23 @@ from .models import ModelSettings
 
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9._/-]+$")
+CLAUDE_ROLE_ALIASES = {
+    "opus": ("claude-opus-*", "claude-*-opus-*"),
+    "sonnet": ("claude-sonnet-*", "claude-*-sonnet-*"),
+    "haiku": ("claude-haiku-*", "claude-*-haiku-*"),
+}
+
+
+def _model_entry(model_name: str, upstream: str) -> list[str]:
+    return [
+        f"  - model_name: {model_name}",
+        "    litellm_params:",
+        f"      model: chatgpt/{upstream}",
+        "      drop_params: true",
+        "      supports_system_message: false",
+        "    model_info:",
+        "      mode: responses",
+    ]
 
 
 def gateway_yaml(
@@ -19,17 +36,10 @@ def gateway_yaml(
         raise ValueError(f"invalid model ID: {invalid[0]!r}")
     lines = ["model_list:"]
     for upstream in unique_models:
-        lines.extend(
-            [
-                f"  - model_name: {upstream}",
-                "    litellm_params:",
-                f"      model: chatgpt/{upstream}",
-                "      drop_params: true",
-                "      supports_system_message: false",
-                "    model_info:",
-                "      mode: responses",
-            ]
-        )
+        lines.extend(_model_entry(upstream, upstream))
+    for role, aliases in CLAUDE_ROLE_ALIASES.items():
+        for alias in aliases:
+            lines.extend(_model_entry(alias, settings.role_model(role)))
     lines.extend(["general_settings:", f"  master_key: os.environ/{master_key_env}"])
     return "\n".join(lines) + "\n"
 

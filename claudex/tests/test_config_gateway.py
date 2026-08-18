@@ -52,6 +52,28 @@ class ConfigAndGatewayTests(unittest.TestCase):
         self.assertTrue(entry["litellm_params"]["drop_params"])
         self.assertEqual(parsed["general_settings"]["master_key"], "os.environ/CLAUDEX_LITELLM_MASTER_KEY")
 
+    def test_gateway_yaml_maps_current_and_legacy_claude_role_aliases(self) -> None:
+        settings = ModelSettings(
+            models={"review": "gpt-review", "strong": "gpt-strong", "fast": "gpt-fast"},
+            roles={"opus": "strong", "sonnet": "review", "haiku": "fast"},
+        )
+        parsed = yaml.safe_load(gateway_yaml(settings))
+        entries = {entry["model_name"]: entry for entry in parsed["model_list"]}
+
+        for alias, upstream in {
+            "claude-opus-*": "gpt-strong",
+            "claude-*-opus-*": "gpt-strong",
+            "claude-sonnet-*": "gpt-review",
+            "claude-*-sonnet-*": "gpt-review",
+            "claude-haiku-*": "gpt-fast",
+            "claude-*-haiku-*": "gpt-fast",
+        }.items():
+            entry = entries[alias]
+            self.assertEqual(entry["litellm_params"]["model"], f"chatgpt/{upstream}")
+            self.assertTrue(entry["litellm_params"]["drop_params"])
+            self.assertFalse(entry["litellm_params"]["supports_system_message"])
+            self.assertEqual(entry["model_info"], {"mode": "responses"})
+
     def test_gateway_rejects_unsafe_model_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid model ID"):
             gateway_yaml(ModelSettings(models={"bad": "good\\ninjected: true"}))
