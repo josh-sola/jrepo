@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
 import sys
+import tempfile
 from contextlib import contextmanager
 from importlib.metadata import version
+from pathlib import Path
 from typing import Annotated
 
 import click
 import typer
 
 from .compat import compatibility_status
-from .config import config_path, is_private, litellm_environment, load_settings, oauth_auth_file, private_file
+from .config import (
+    config_path,
+    is_private,
+    litellm_environment,
+    load_settings,
+    oauth_auth_file,
+    private_directory,
+    private_file,
+    state_dir,
+)
 from .models import ModelSettings
 from .supervisor import ProxySupervisor, run_child
 
@@ -61,10 +73,14 @@ def run(
     return _launch_or_exit(model, list(context.args))
 
 
-@app.command("login", help="Sign in to ChatGPT with device authorization.")
-def login_command() -> int:
+@app.command("login", help="Sign in to ChatGPT in your browser.")
+def login_command(
+    device_code: Annotated[
+        bool, typer.Option("--device-code", help="Use LiteLLM's device authorization flow instead of browser login.")
+    ] = False,
+) -> int:
     try:
-        return login()
+        return login(device_code=device_code)
     except (ValueError, RuntimeError) as error:
         print(f"claudex: {error}", file=sys.stderr)
         raise typer.Exit(2) from error
@@ -120,7 +136,33 @@ def claude_environment(
     return result
 
 
-def login(env: dict[str, str] | None = None) -> int:
+def login(env: dict[str, str] | None = None, device_code: bool = False) -> int:
+    if device_code:
+        return device_code_login(env)
+    return browser_login(env)
+
+
+def browser_login(env: dict[str, str] | None = None) -> int:
+    environment = {**os.environ, **(env or {})}
+    if shutil.which("codex", path=environment.get("PATH")) is None:
+        raise RuntimeError("Codex CLI is not on PATH. Install it, then run 'claudex login' again.")
+    runtime = private_directory(state_dir(environment))
+    print("Starting Codex browser login.")
+    with tempfile.TemporaryDirectory(prefix="codex-login-", dir=runtime) as temporary:
+        codex_home = Path(temporary)
+        _write_private_text(codex_home / "config.toml", 'cli_auth_credentials_store = "file"\n')
+        codex_environment = dict(environment)
+        codex_environment["CODEX_HOME"] = str(codex_home)
+        with private_umask():
+            exit_code = run_child(["codex", "login"], codex_environment)
+        if exit_code != 0:
+            raise RuntimeError(f"Codex login exited with status {exit_code}. Complete the browser sign-in and try again.")
+        record = _litellm_auth_record(_read_codex_tokens(codex_home / "auth.json"))
+        _write_private_json(oauth_auth_file(environment), record)
+    return 0
+
+
+def device_code_login(env: dict[str, str] | None = None) -> int:
     print("Opening LiteLLM's ChatGPT device login. Complete it in your browser.")
     environment = litellm_environment({**os.environ, **(env or {})})
     with applied_environment(environment), private_umask():
@@ -131,6 +173,60 @@ def login(env: dict[str, str] | None = None) -> int:
     if auth.exists():
         private_file(auth)
     return 0
+
+
+def _read_codex_tokens(path: Path) -> dict[str, object]:
+    try:
+        with path.open(encoding="utf-8") as file:
+            auth = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Codex did not write valid login credentials. Try 'claudex login' again.") from error
+    if not isinstance(auth, dict) or not isinstance(tokens := auth.get("tokens"), dict):
+        raise RuntimeError("Codex did not write valid login credentials. Try 'claudex login' again.")
+    return tokens
+
+
+def _litellm_auth_record(tokens: dict[str, object]) -> dict[str, str]:
+    record: dict[str, str] = {}
+    for name in ("access_token", "refresh_token", "id_token"):
+        value = tokens.get(name)
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("Codex did not write valid login credentials. Try 'claudex login' again.")
+        record[name] = value
+    account_id = tokens.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        record["account_id"] = account_id
+    return record
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        file.write(content)
+
+
+def _write_private_json(path: Path, value: dict[str, str]) -> None:
+    private_directory(path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".auth-", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            json.dump(value, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        private_file(path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 @contextmanager
@@ -178,6 +274,11 @@ def doctor(env: dict[str, str] | None = None) -> int:
         print(f"OK   claude: {claude}")
     else:
         failures.append("Claude Code is not on PATH")
+    codex = shutil.which("codex", path=values.get("PATH"))
+    if codex:
+        print(f"OK   codex: {codex}")
+    else:
+        failures.append("Codex CLI is not on PATH; install it before running 'claudex login'")
     try:
         print(f"OK   LiteLLM: {version('litellm')}")
     except ImportError:
