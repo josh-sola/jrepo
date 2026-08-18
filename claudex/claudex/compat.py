@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import inspect
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -21,8 +22,11 @@ def map_system_message_content(messages: list[dict[str, Any]]) -> list[dict[str,
             if next_message["role"] in {"user", "assistant"}:
                 if isinstance(message["content"], list) or isinstance(next_message["content"], list):
                     next_message["content"] = _content_as_blocks(message["content"]) + _content_as_blocks(next_message["content"])
-                else:
-                    next_message["content"] = message["content"] + " " + next_message["content"]
+                elif message["content"] is not None:
+                    if next_message["content"] is None:
+                        next_message["content"] = message["content"]
+                    else:
+                        next_message["content"] = message["content"] + " " + next_message["content"]
             elif next_message["role"] == "system":
                 result.append({"role": "user", "content": message["content"]})
         else:
@@ -33,6 +37,8 @@ def map_system_message_content(messages: list[dict[str, Any]]) -> list[dict[str,
 def _content_as_blocks(content: Any) -> list[Any]:
     if isinstance(content, list):
         return content
+    if content is None:
+        return []
     return [{"type": "text", "text": content}]
 
 
@@ -83,14 +89,8 @@ def _patched_map_system_message_pt(original: Callable[..., Any]) -> Callable[...
 
 
 def _replace_imported_references(original: Callable[..., Any], patched: Callable[..., Any]) -> None:
-    module_names = (
-        "litellm.litellm_core_utils.prompt_templates.factory",
-        "litellm.main",
-    )
-    for module_name in module_names:
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
+    for module_name, module in tuple(sys.modules.items()):
+        if (module_name != "litellm" and not module_name.startswith("litellm.")) or module is None:
             continue
         for name, value in vars(module).items():
             if value is original:

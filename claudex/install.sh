@@ -14,8 +14,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   fi
   if uv tool list | grep -q '^jrepo-claudex '; then
     uv tool uninstall jrepo-claudex
+    echo "Removed the claudex tool. Your ChatGPT login and configuration remain in ~/.config/claudex and ~/.local/state/claudex."
+  else
+    echo "claudex is not installed. Your ChatGPT login and configuration remain in ~/.config/claudex and ~/.local/state/claudex."
   fi
-  echo "Removed the claudex tool. Your ChatGPT login and configuration remain in ~/.config/claudex and ~/.local/state/claudex."
   exit 0
 fi
 

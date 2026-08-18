@@ -122,12 +122,12 @@ def claude_environment(
 
 def login(env: dict[str, str] | None = None) -> int:
     print("Opening LiteLLM's ChatGPT device login. Complete it in your browser.")
-    environment = litellm_environment(env)
+    environment = litellm_environment({**os.environ, **(env or {})})
     with applied_environment(environment), private_umask():
         from litellm.llms.chatgpt.authenticator import Authenticator
 
         Authenticator().get_access_token()
-    auth = oauth_auth_file(env)
+    auth = oauth_auth_file(environment)
     if auth.exists():
         private_file(auth)
     return 0

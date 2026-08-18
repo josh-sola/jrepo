@@ -141,16 +141,25 @@ class CliTests(unittest.TestCase):
 
     def test_login_uses_isolated_chatgpt_token_dir_and_private_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env = {"XDG_STATE_HOME": directory, "XDG_CONFIG_HOME": directory + "/config"}
+            env = {"XDG_STATE_HOME": directory, "XDG_CONFIG_HOME": directory + "/config", "HTTPS_PROXY": "override-proxy"}
             from litellm.llms.chatgpt.authenticator import Authenticator
+            observed: dict[str, str] = {}
 
             def get_access_token(_self: object) -> str:
+                observed.update({name: os.environ[name] for name in ("PATH", "SSL_CERT_FILE", "BROWSER", "HTTPS_PROXY", "CHATGPT_TOKEN_DIR")})
                 path = Path(os.environ["CHATGPT_TOKEN_DIR"]) / "auth.json"
                 path.write_text("{}")
                 path.chmod(0o644)
                 return "token"
 
-            with patch.object(Authenticator, "get_access_token", get_access_token):
-                self.assertEqual(cli.login(env), 0)
+            with patch.dict(os.environ, {"SSL_CERT_FILE": "inherited-cert", "BROWSER": "inherited-browser", "HTTPS_PROXY": "inherited-proxy"}):
+                before = dict(os.environ)
+                with patch.object(Authenticator, "get_access_token", get_access_token):
+                    self.assertEqual(cli.login(env), 0)
+                self.assertEqual(dict(os.environ), before)
             token = Path(directory) / "claudex" / "chatgpt" / "auth.json"
             self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(observed["PATH"], before["PATH"])
+            self.assertEqual(observed["SSL_CERT_FILE"], "inherited-cert")
+            self.assertEqual(observed["BROWSER"], "inherited-browser")
+            self.assertEqual(observed["HTTPS_PROXY"], "override-proxy")
