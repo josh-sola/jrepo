@@ -67,9 +67,22 @@ Run Claude Code as usual by putting its arguments after `claudex`:
 
 ```sh
 claudex
-claudex --model luna -- -p "Summarize this repository"
+claudex -p "Summarize this repository"
+claudex --model luna -p "Summarize this repository"
 claudex --model gpt-5.6-terra -- --resume
 ```
+
+`claudex` reserves `--model` before `--` for its own model choice. Use
+`claudex run -- ...` when a Claude argument looks like a claudex command or
+when you need Claude to receive `--model` itself:
+
+```sh
+claudex run -- --model claude-choice login
+claudex run -- --help
+```
+
+Run `claudex --help` or `claudex run --help` for the command help. The `--`
+separator is not passed to Claude.
 
 The default is `terra`. The built-in aliases and Claude Code role mappings are:
 

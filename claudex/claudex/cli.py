@@ -6,6 +6,10 @@ import shutil
 import sys
 from contextlib import contextmanager
 from importlib.metadata import version
+from typing import Annotated
+
+import click
+import typer
 
 from .compat import compatibility_status
 from .config import config_path, is_private, litellm_environment, load_settings, oauth_auth_file, private_file
@@ -13,51 +17,75 @@ from .models import ModelSettings
 from .supervisor import ProxySupervisor, run_child
 
 
+app = typer.Typer(
+    add_completion=False,
+    help="Run Claude Code through a local ChatGPT-backed gateway.",
+)
+PASSTHROUGH = {"allow_extra_args": True, "ignore_unknown_options": True}
+SUBCOMMANDS = {"run", "login", "models", "doctor"}
+
+
 def main(argv: list[str] | None = None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
+    arguments = _route_arguments(list(sys.argv[1:] if argv is None else argv))
     try:
-        if arguments[:1] == ["login"]:
-            if len(arguments) != 1:
-                raise ValueError("usage: claudex login")
-            return login()
-        if arguments[:1] == ["models"]:
-            if len(arguments) != 1:
-                raise ValueError("usage: claudex models")
-            print_models(load_settings())
-            return 0
-        if arguments[:1] == ["doctor"]:
-            if len(arguments) != 1:
-                raise ValueError("usage: claudex doctor")
-            return doctor()
-        model, claude_args = parse_launch_args(arguments)
+        result = app(args=arguments, prog_name="claudex", standalone_mode=False)
+        return int(result or 0)
+    except click.exceptions.Exit as error:
+        return error.exit_code
+    except click.ClickException as error:
+        error.show()
+        return error.exit_code
+
+
+def _route_arguments(arguments: list[str]) -> list[str]:
+    if not arguments:
+        return ["run"]
+    if arguments[0] in SUBCOMMANDS or arguments[0] == "--help":
+        return arguments
+    return ["run", *arguments]
+
+
+def _launch_or_exit(model: str | None, claude_args: list[str]) -> int:
+    try:
         return launch(model, claude_args)
     except (ValueError, RuntimeError) as error:
         print(f"claudex: {error}", file=sys.stderr)
-        return 2
+        raise typer.Exit(2) from error
 
 
-def parse_launch_args(arguments: list[str]) -> tuple[str | None, list[str]]:
-    model: str | None = None
-    remaining: list[str] = []
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument == "--":
-            remaining.extend(arguments[index + 1 :])
-            break
-        if argument == "--model":
-            index += 1
-            if index >= len(arguments):
-                raise ValueError("--model needs an alias or upstream model ID")
-            model = arguments[index]
-        elif argument.startswith("--model="):
-            model = argument.removeprefix("--model=")
-            if not model:
-                raise ValueError("--model needs an alias or upstream model ID")
-        else:
-            remaining.append(argument)
-        index += 1
-    return model, remaining
+@app.command(context_settings=PASSTHROUGH, help="Run Claude Code and pass through extra arguments.")
+def run(
+    context: typer.Context,
+    model: Annotated[str | None, typer.Option("--model", help="claudex alias or upstream model ID")] = None,
+) -> int:
+    return _launch_or_exit(model, list(context.args))
+
+
+@app.command("login", help="Sign in to ChatGPT with device authorization.")
+def login_command() -> int:
+    try:
+        return login()
+    except (ValueError, RuntimeError) as error:
+        print(f"claudex: {error}", file=sys.stderr)
+        raise typer.Exit(2) from error
+
+
+@app.command(help="Show the configured model aliases and role mappings.")
+def models() -> None:
+    try:
+        print_models(load_settings())
+    except (ValueError, RuntimeError) as error:
+        print(f"claudex: {error}", file=sys.stderr)
+        raise typer.Exit(2) from error
+
+
+@app.command("doctor", help="Check the local setup without making a model request.")
+def doctor_command() -> int:
+    try:
+        return doctor()
+    except (ValueError, RuntimeError) as error:
+        print(f"claudex: {error}", file=sys.stderr)
+        raise typer.Exit(2) from error
 
 
 def launch(model: str | None, claude_args: list[str], env: dict[str, str] | None = None) -> int:

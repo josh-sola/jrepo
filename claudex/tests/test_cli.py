@@ -3,16 +3,104 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
+
+from typer.testing import CliRunner
 
 from claudex import cli
 from claudex.models import ModelSettings
 
 
 class CliTests(unittest.TestCase):
-    def test_forwards_claude_args_after_separator(self) -> None:
-        self.assertEqual(cli.parse_launch_args(["--model", "sol", "--", "-p", "hello"]), ("sol", ["-p", "hello"]))
+    def setUp(self) -> None:
+        self.runner = CliRunner()
+
+    def test_default_launch_forwards_unknown_options_without_separator(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main(["--model", "sol", "-p", "hello", "--verbose"]), 0)
+        launch.assert_called_once_with("sol", ["-p", "hello", "--verbose"])
+
+    def test_default_launch_forwards_positional_first_arguments(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main(["summarize this repo", "--verbose"]), 0)
+        launch.assert_called_once_with(None, ["summarize this repo", "--verbose"])
+
+    def test_default_launch_forwards_separator_arguments_in_order(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main(["--model=gpt-direct", "--", "-p", "hello", "--verbose"]), 0)
+        launch.assert_called_once_with("gpt-direct", ["-p", "hello", "--verbose"])
+
+    def test_separator_starts_an_implicit_run(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main(["--", "--model", "claude-choice"]), 0)
+        launch.assert_called_once_with(None, ["--model", "claude-choice"])
+
+    def test_default_launch_without_arguments(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main([]), 0)
+        launch.assert_called_once_with(None, [])
+
+    def test_explicit_run_preserves_colliding_claude_arguments(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            result = self.runner.invoke(cli.app, ["run", "--", "--model", "claude-choice", "login"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        launch.assert_called_once_with(None, ["--model", "claude-choice", "login"])
+
+    def test_explicit_run_reserves_its_model_option(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            result = self.runner.invoke(cli.app, ["run", "--model", "gpt-direct", "-p", "hello"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        launch.assert_called_once_with("gpt-direct", ["-p", "hello"])
+
+    def test_login_subcommand_uses_typer_command(self) -> None:
+        with patch.object(cli, "login", return_value=0) as login:
+            result = self.runner.invoke(cli.app, ["login"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        login.assert_called_once_with()
+
+    def test_models_subcommand_uses_typer_command(self) -> None:
+        settings = ModelSettings()
+        with patch.object(cli, "load_settings", return_value=settings), patch.object(cli, "print_models") as print_models:
+            result = self.runner.invoke(cli.app, ["models"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        print_models.assert_called_once_with(settings)
+
+    def test_doctor_subcommand_uses_typer_command(self) -> None:
+        with patch.object(cli, "doctor", return_value=0) as doctor:
+            result = self.runner.invoke(cli.app, ["doctor"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        doctor.assert_called_once_with()
+
+    def test_help_is_available_for_app_and_run(self) -> None:
+        run_help = self.runner.invoke(cli.app, ["run", "--help"])
+        self.assertEqual(run_help.exit_code, 0, run_help.output)
+        self.assertIn("--model", run_help.output)
+
+        output = StringIO()
+        with patch.object(cli, "launch") as launch, redirect_stdout(output):
+            self.assertEqual(cli.main(["--help"]), 0)
+        launch.assert_not_called()
+        self.assertIn("login", output.getvalue())
+
+    def test_main_returns_child_exit_status(self) -> None:
+        with patch.object(cli, "launch", return_value=23) as launch:
+            self.assertEqual(cli.main(["-p", "hello"]), 23)
+        launch.assert_called_once_with(None, ["-p", "hello"])
+
+    def test_main_returns_subcommand_exit_status(self) -> None:
+        with patch.object(cli, "doctor", return_value=1) as doctor:
+            self.assertEqual(cli.main(["doctor"]), 1)
+        doctor.assert_called_once_with()
+
+    def test_runtime_error_keeps_concise_error_format(self) -> None:
+        output = StringIO()
+        with patch.object(cli, "launch", side_effect=RuntimeError("Claude Code is not on PATH")):
+            with redirect_stderr(output):
+                self.assertEqual(cli.main(["-p", "hello"]), 2)
+        self.assertEqual(output.getvalue(), "claudex: Claude Code is not on PATH\n")
 
     def test_claude_environment_uses_proxy_origin_and_role_models(self) -> None:
         result = cli.claude_environment({"ANTHROPIC_API_KEY": "old"}, ModelSettings(), "gpt-direct", "http://127.0.0.1:3210", "key")
