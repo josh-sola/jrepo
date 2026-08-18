@@ -7,6 +7,7 @@ Personal projects that share one checkout and one Git history.
 | [wt-cli](wt-cli/) | Git worktree tooling for creating and managing prepared worktrees. |
 | [claude-planter](claude-planter/) | A macOS overlay that shows the state of coding sessions as plants. |
 | [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
+| [claudex](claudex/) | Experimental local ChatGPT gateway for Claude Code. |
 
 ## Validate
 
@@ -17,6 +18,17 @@ just check
 ```
 
 ## Install
+
+Install `claudex` directly with `uv`; no checkout is needed:
+
+```sh
+uv tool install "git+https://github.com/josh-sola/jrepo.git#subdirectory=claudex"
+```
+
+See [claudex](claudex/) for login and use. This does not run the repository's
+other installers.
+
+## Other project installers
 
 Install `wt-cli` from a long-lived checkout. Its installer records absolute
 paths for its Claude hook and plugin symlink, so moving or deleting that
