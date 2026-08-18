@@ -14,7 +14,7 @@
 
 // How far the swirl may pull a pixel away from the plain background colour.
 // At 0 the effect disappears. This is the dial to reach for first.
-const float SWIRL_STRENGTH = 0.16;
+const float SWIRL_STRENGTH = 0.25;
 
 // These set the swirl's own colour before SWIRL_STRENGTH scales it back, so
 // raising them widens the hue range rather than making the effect stronger.
