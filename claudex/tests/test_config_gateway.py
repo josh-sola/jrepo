@@ -39,14 +39,15 @@ class ConfigAndGatewayTests(unittest.TestCase):
         token.chmod(0o600)
         self.assertTrue(is_private(token, 0o600))
 
-    def test_gateway_yaml_has_namespaced_response_models_and_extra_id(self) -> None:
+    def test_gateway_yaml_has_plain_response_models_and_extra_id(self) -> None:
         output = gateway_yaml(ModelSettings(), extra_models=["gpt-custom"])
-        self.assertIn("model_name: claudex/gpt-5.6-terra", output)
-        self.assertIn("model_name: claudex/gpt-custom", output)
+        self.assertIn("model_name: gpt-5.6-terra", output)
+        self.assertIn("model_name: gpt-custom", output)
         self.assertIn("model: chatgpt/gpt-custom", output)
         parsed = yaml.safe_load(output)
-        entry = next(item for item in parsed["model_list"] if item["model_name"] == "claudex/gpt-custom")
+        entry = next(item for item in parsed["model_list"] if item["model_name"] == "gpt-custom")
         self.assertEqual(entry["model_info"], {"mode": "responses"})
+        self.assertEqual(entry["litellm_params"]["model"], "chatgpt/gpt-custom")
         self.assertEqual(entry["litellm_params"]["supports_system_message"], False)
         self.assertTrue(entry["litellm_params"]["drop_params"])
         self.assertEqual(parsed["general_settings"]["master_key"], "os.environ/CLAUDEX_LITELLM_MASTER_KEY")

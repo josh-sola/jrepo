@@ -21,7 +21,7 @@ def gateway_yaml(
     for upstream in unique_models:
         lines.extend(
             [
-                f"  - model_name: claudex/{upstream}",
+                f"  - model_name: {upstream}",
                 "    litellm_params:",
                 f"      model: chatgpt/{upstream}",
                 "      drop_params: true",

@@ -103,11 +103,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "claudex: Claude Code is not on PATH\n")
 
     def test_claude_environment_uses_proxy_origin_and_role_models(self) -> None:
-        result = cli.claude_environment({"ANTHROPIC_API_KEY": "old"}, ModelSettings(), "gpt-direct", "http://127.0.0.1:3210", "key")
+        settings = ModelSettings(
+            models={"sol": "gpt-sol", "terra": "gpt-terra", "luna": "gpt-luna", "review": "gpt-review"},
+            default="terra",
+            roles={"opus": "sol", "sonnet": "review", "haiku": "luna"},
+        )
+        result = cli.claude_environment({"ANTHROPIC_API_KEY": "old"}, settings, "gpt-direct", "http://127.0.0.1:3210", "key")
         self.assertEqual(result["ANTHROPIC_BASE_URL"], "http://127.0.0.1:3210")
         self.assertNotIn("ANTHROPIC_API_KEY", result)
-        self.assertEqual(result["ANTHROPIC_MODEL"], "claudex/gpt-direct")
-        self.assertEqual(result["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claudex/gpt-5.6-sol")
+        self.assertEqual(result["ANTHROPIC_MODEL"], "gpt-direct")
+        self.assertEqual(result["ANTHROPIC_DEFAULT_OPUS_MODEL"], "gpt-sol")
+        self.assertEqual(result["ANTHROPIC_DEFAULT_SONNET_MODEL"], "gpt-review")
+        self.assertEqual(result["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-luna")
+        self.assertNotIn("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", result)
 
     def test_launch_forwards_direct_model_to_gateway(self) -> None:
         captured: dict[str, object] = {}
