@@ -23,12 +23,19 @@ class ConfigAndGatewayTests(unittest.TestCase):
     def test_loads_additive_config_and_resolves_roles(self) -> None:
         path = config_path(self.env)
         private_directory(path.parent)
-        path.write_text('default = "review"\n[models]\nreview = "gpt-5.6-sol"\n[roles]\nsonnet = "review"\n')
+        path.write_text('[models]\nreview = "gpt-5.6-sol"\n[roles]\nsonnet = "review"\n')
         path.chmod(0o600)
         settings = load_settings(self.env)
-        self.assertEqual(settings.resolve(), "gpt-5.6-sol")
+        self.assertEqual(settings.resolve("review"), "gpt-5.6-sol")
         self.assertEqual(settings.role_model("sonnet"), "gpt-5.6-sol")
         self.assertEqual(settings.role_model("haiku"), "gpt-5.6-luna")
+
+    def test_ignores_legacy_default_key(self) -> None:
+        path = config_path(self.env)
+        private_directory(path.parent)
+        path.write_text('default = 7\n')
+        path.chmod(0o600)
+        self.assertEqual(load_settings(self.env), ModelSettings())
 
     def test_runtime_and_token_paths_are_private(self) -> None:
         values = litellm_environment(self.env)

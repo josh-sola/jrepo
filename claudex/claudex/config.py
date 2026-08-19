@@ -47,15 +47,12 @@ def load_settings(env: dict[str, str] | None = None) -> ModelSettings:
         raw = tomllib.load(file)
     models = dict(DEFAULT_MODELS)
     models.update(_string_table(raw.get("models", {}), "models"))
-    default = raw.get("default", "terra")
-    if not isinstance(default, str):
-        raise ValueError("config key 'default' must be a string")
     roles = dict(DEFAULT_ROLES)
     roles.update(_string_table(raw.get("roles", {}), "roles"))
     for role in DEFAULT_ROLES:
         if role not in roles:
             raise ValueError(f"config roles must include '{role}'")
-    return ModelSettings(models=models, default=default, roles=roles)
+    return ModelSettings(models=models, roles=roles)
 
 
 def _string_table(value: object, name: str) -> dict[str, str]:

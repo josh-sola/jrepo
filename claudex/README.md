@@ -1,55 +1,20 @@
 # claudex
 
-`claudex` runs Claude Code against a private, local LiteLLM gateway that uses
-your ChatGPT login. It is an experimental bridge, not an official
-Anthropic, OpenAI, or Claude Code integration. Upstream changes can break it,
-and ChatGPT subscription access may vary by plan and region.
+`claudex` runs Claude Code through a local LiteLLM gateway that uses your
+ChatGPT login. It is a personal, experimental bridge between Claude Code and
+OpenAI models.
 
-It supports macOS and Linux. You need `uv`, Claude Code, the Codex CLI, and a
-ChatGPT account that LiteLLM accepts for its ChatGPT provider. It does not
-support Windows, API-key billing, shared gateways, background daemons, or
-unattended use.
+You need macOS or Linux, `uv`, Claude Code, the Codex CLI, and a ChatGPT
+account that LiteLLM accepts for its ChatGPT provider.
 
 ## Install
-
-The usual coworker install does not need a clone. This is a normal, non-editable
-`uv tool` install, so removing a checkout cannot break the installed tool.
 
 ```sh
 uv tool install "git+https://github.com/josh-sola/jrepo.git#subdirectory=claudex"
 ```
 
-For a private repository or an SSH-based Git setup:
-
-```sh
-uv tool install "git+ssh://git@github.com/josh-sola/jrepo.git#subdirectory=claudex"
-```
-
-To pin an approved release or commit, put the Git reference before the
-subdirectory fragment:
-
-```sh
-uv tool install "git+https://github.com/josh-sola/jrepo.git@<tag-or-commit>#subdirectory=claudex"
-```
-
-If you already cloned this repository, the fallback installer does the same
-non-editable install from that checkout:
-
-```sh
-./claudex/install.sh
-```
-
-Update with the same `uv tool install --reinstall` command that you used to
-install. To remove only the tool, while retaining your login and configuration:
-
-```sh
-uv tool uninstall jrepo-claudex
-```
-
-The clone fallback also supports `./claudex/install.sh --uninstall`.
-
-The installer never edits shell startup files. If `claudex` is not found after
-installing, run `uv tool update-shell` and start a new terminal.
+If the command is not available after installing, run `uv tool update-shell`
+and start a new terminal.
 
 ## First use
 
@@ -60,18 +25,12 @@ claudex models
 claudex --model sol -- --help
 ```
 
-`login` starts the Codex CLI's browser login and completes through its local
-callback. It uses a fresh, isolated temporary Codex credential home, then
-imports the result into Claudex's private LiteLLM cache. `doctor` makes no
-model request. Each normal invocation starts one temporary gateway on a random
-local port, runs Claude Code, and removes that gateway when Claude exits.
+`login` opens the Codex browser sign-in and stores the resulting tokens in
+Claudex's private LiteLLM cache. `doctor` checks the local setup without making
+a model request. Each normal launch starts a temporary local gateway and
+removes it when Claude Code exits.
 
-If your personal or workspace account permits device authentication, the older
-LiteLLM flow remains available explicitly:
-
-```sh
-claudex login --device-code
-```
+## Usage
 
 Run Claude Code as usual by putting its arguments after `claudex`:
 
@@ -82,36 +41,41 @@ claudex --model luna -p "Summarize this repository"
 claudex --model gpt-5.6-terra -- --resume
 ```
 
-`claudex` reserves `--model` before `--` for its own model choice. Use
-`claudex run -- ...` when a Claude argument looks like a claudex command or
-when you need Claude to receive `--model` itself:
+`claudex` reserves `--model` before `--` for its own session-only model
+choice. Use `claudex run -- ...` when Claude Code must receive `--model` or
+when a Claude argument looks like a Claudex command:
 
 ```sh
 claudex run -- --model claude-choice login
 claudex run -- --help
 ```
 
-Run `claudex --help` or `claudex run --help` for the command help. The `--`
-separator is not passed to Claude.
+Run `claudex --help` or `claudex run --help` for command help. The `--`
+separator is not passed to Claude Code.
 
-The default is `terra`. The built-in aliases and Claude Code role mappings are:
+## Models
+
+The built-in aliases and Claude Code role mappings are:
 
 | Alias | OpenAI model | Claude role |
 | --- | --- | --- |
 | `sol` | `gpt-5.6-sol` | Opus |
-| `terra` | `gpt-5.6-terra` | Sonnet and default |
+| `terra` | `gpt-5.6-terra` | Sonnet |
 | `luna` | `gpt-5.6-luna` | Haiku |
 | `spark` | `gpt-5.3-codex-spark` | optional direct selection |
+
+Claude Code owns your saved startup model. Open `/model`, highlight a choice,
+and press `d` to save it. `claudex --model <alias-or-id>` changes the model
+only for that launch. Without that option, Claudex leaves Claude Code's saved
+model and normal model-selection rules in control.
 
 ## Configuration
 
 Optionally create `~/.config/claudex/config.toml` (or
-`$XDG_CONFIG_HOME/claudex/config.toml`). `claudex` never creates or overwrites
+`$XDG_CONFIG_HOME/claudex/config.toml`). Claudex never creates or overwrites
 this file.
 
 ```toml
-default = "terra"
-
 [models]
 review = "gpt-5.6-terra"
 
@@ -123,29 +87,4 @@ haiku = "luna"
 
 Model values may be an alias or an upstream model ID. You may override any
 role; roles you omit keep their built-in mappings. `claudex models` shows the
-resolved result.
-
-## Security and troubleshooting
-
-`claudex` uses private directories (`0700`) and private files (`0600`). It
-keeps configuration in `~/.config/claudex` and LiteLLM's OAuth state below
-`~/.local/state/claudex/chatgpt`; XDG equivalents are used when set. Browser
-login gives Codex a temporary, isolated credential home below Claudex's state
-directory and imports only the resulting tokens into that LiteLLM cache. It
-does not read or modify your usual `~/.codex/auth.json`. The gateway YAML is
-temporary, the local bearer key only exists in child-process memory, and
-neither is logged or stored in a command line.
-
-Run `claudex doctor` first if launch fails. It checks the OS, Claude Code,
-Codex CLI, LiteLLM version, OAuth state permissions, and the LiteLLM
-compatibility patch. If it reports an open permission, use the exact `chmod`
-command it prints. If browser login reports that Codex is missing, install the
-Codex CLI and try again. If you use `--device-code` and see a workspace policy
-error, ask your workspace admin to enable device authentication or use the
-default browser login. If login succeeds but launch fails after an upgrade,
-reinstall this pinned package version; the experimental provider and gateway
-protocol can change without notice.
-
-Claude Code is configured only through the process environment. `claudex` does
-not modify `~/.claude/settings.json`, and removes an inherited
-`ANTHROPIC_API_KEY` for its child process.
+resolved aliases and roles.
