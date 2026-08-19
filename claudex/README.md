@@ -64,11 +64,6 @@ The built-in aliases and Claude Code role mappings are:
 | `luna` | `gpt-5.6-luna` | Haiku |
 | `spark` | `gpt-5.3-codex-spark` | optional direct selection |
 
-Claude Code owns your saved startup model. Open `/model`, highlight a choice,
-and press `d` to save it. `claudex --model <alias-or-id>` changes the model
-only for that launch. Without that option, Claudex leaves Claude Code's saved
-model and normal model-selection rules in control.
-
 ## Configuration
 
 Optionally create `~/.config/claudex/config.toml` (or
