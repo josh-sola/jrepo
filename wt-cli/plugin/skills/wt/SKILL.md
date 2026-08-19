@@ -1,5 +1,6 @@
 ---
-description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, finding an existing one, checking whether background provisioning has finished, or opening a session in one. Triggers on "start a new worktree", "give me a tree for X", "wt new", "is my worktree ready yet", "where do plans live for this tree", "run claude in this worktree". Read before creating a worktree by hand with `git worktree add`.
+name: wt
+description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, finding an existing one, checking whether background provisioning has finished, or opening a Codex, Claude, or Claudex session in one. Read before creating a worktree by hand with `git worktree add`.
 ---
 
 # wt
@@ -20,7 +21,9 @@ the same path they already expect.
 | `wt status [selector] [--json]` | Provisioning state, current step, elapsed time, log path. |
 | `wt wait [selector] [--timeout <secs>]` | Block until a tree is ready or failed. |
 | `wt claude [selector\|repo]` | Open a Claude session with cwd set to a tree, a repo's base, or the current tree. |
-| `wt launch [worktree] [repo] [--onto <sel>]` | Find or create `<worktree>` (in `<repo>` if given, with `--onto` if given), wait for provisioning, and open a colored Claude session in it; `@name` opens a scratch session in the repo's base instead, creating nothing. With no `<worktree>`, opens an fzf picker over the registered trees. |
+| `wt codex [selector\|repo]` | Open a Codex session with cwd set to a tree, a repo's base, or the current tree. |
+| `wt claudex [selector\|repo]` | Open a Claudex session with cwd set to a tree, a repo's base, or the current tree. |
+| `wt launch [worktree] [repo] [--onto <sel>] [--claude\|--claudex]` | Find or create `<worktree>`, wait for provisioning, and open a colored Codex session by default. `--claude` or `--claudex` chooses that agent; `@name` opens a scratch session in base. With no `<worktree>`, opens an fzf picker. |
 | `wt rm <selector> [--force] [--delete-branch] [--reparent-children]` | Remove a tree; refuses if dirty or unpushed. `--delete-branch` also refuses a branch with Graphite children unless `--reparent-children` moves them onto its parent first, or `--force` skips every check. |
 | `wt gc [--repo <r>] [--dry-run]` | Reap trees with no commits ahead of trunk, no dirty files, and no Graphite children on their branch. |
 | `wt sync [<repo>] [--stack]` | Fetch and fast-forward base's trunk; refuses if base is dirty. Also refreshes each repo's hot spare and tops up a missing one, in the background. `--stack` also restacks every Graphite stack with branches in more than one tree. |

@@ -53,6 +53,28 @@ claudex run -- --help
 Run `claudex --help` or `claudex run --help` for command help. The `--`
 separator is not passed to Claude Code.
 
+## With wt
+
+Use `wt` to launch Claudex in a prepared, colored worktree session:
+
+```sh
+wt launch "fix login" monorepo --claudex -- --model sol
+```
+
+That `--model` selects Claudex's OpenAI model. When the `--model` option is
+for Claude Code instead, use a second separator after wt's outer separator.
+wt removes the first one and forwards the second to Claudex:
+
+```sh
+wt launch "fix login" monorepo --claudex -- -- --model claude-choice
+```
+
+For a direct process-replacing launch in a selected tree, use:
+
+```sh
+wt claudex "fix login" -- --model sol
+```
+
 ## Models
 
 The built-in aliases and Claude Code role mappings are:

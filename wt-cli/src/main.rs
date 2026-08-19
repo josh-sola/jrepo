@@ -69,11 +69,14 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
         /// Open a `codex` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "claude")]
+        #[arg(long, conflicts_with_all = ["claude", "claudex"])]
         codex: bool,
         /// Open a `claude` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "codex")]
+        #[arg(long, conflicts_with_all = ["codex", "claudex"])]
         claude: bool,
+        /// Open a `claudex` session in the new tree once it exists.
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        claudex: bool,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -87,16 +90,19 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
         /// Open a `codex` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "claude")]
+        #[arg(long, conflicts_with_all = ["claude", "claudex"])]
         codex: bool,
         /// Open a `claude` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "codex")]
+        #[arg(long, conflicts_with_all = ["codex", "claudex"])]
         claude: bool,
+        /// Open a `claudex` session in the new tree once it exists.
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        claudex: bool,
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Open a codex session in a worktree, creating it if needed. Pass
-    /// --claude to open Claude instead. A
+    /// Open a Codex session in a worktree, creating it if needed. Pass
+    /// --claude or --claudex to choose that agent instead. A
     /// worktree starting with `@` is a scratch session that opens in the
     /// repo's base instead, with nothing created. With no worktree given, an
     /// fzf picker lists the registered trees to choose from. Anything after
@@ -115,8 +121,11 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
         /// Open Claude instead of Codex.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "claudex")]
         claude: bool,
+        /// Open Claudex instead of Codex.
+        #[arg(long, conflicts_with = "claude")]
+        claudex: bool,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -240,6 +249,13 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Exec `claudex` with cwd set to a tree, a repo's base, or the cwd's tree.
+    /// Anything after `--` is passed straight to `claudex`.
+    Claudex {
+        target: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Runs a tree's provisioning steps; spawned detached by `wt new`.
     #[command(name = "__provision", hide = true)]
     Provision {
@@ -339,6 +355,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             profile,
             codex,
             claude,
+            claudex,
             args,
         } => {
             let path = tree::new_tree(
@@ -352,7 +369,12 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
+            open_if_requested(
+                root,
+                &path,
+                Agent::from_flags(codex, claude, claudex),
+                &args,
+            )
         }
         Command::Adopt {
             repo,
@@ -361,6 +383,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             profile,
             codex,
             claude,
+            claudex,
             args,
         } => {
             let path = tree::adopt(
@@ -373,7 +396,12 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                     profiles: profile,
                 },
             )?;
-            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
+            open_if_requested(
+                root,
+                &path,
+                Agent::from_flags(codex, claude, claudex),
+                &args,
+            )
         }
         Command::Launch {
             worktree,
@@ -382,6 +410,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             onto,
             profile,
             claude,
+            claudex,
             args,
         } => cmd_launch(
             root,
@@ -393,7 +422,13 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 onto,
                 profile,
             },
-            if claude { Agent::Claude } else { Agent::Codex },
+            if claude {
+                Agent::Claude
+            } else if claudex {
+                Agent::Claudex
+            } else {
+                Agent::Codex
+            },
             &args,
         ),
         Command::Ls { repo, all, json } => cmd_ls(root, repo, all, json),
@@ -440,6 +475,9 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
         },
         Command::Claude { target, args } => agent::exec_target(root, Agent::Claude, target, &args),
         Command::Codex { target, args } => agent::exec_target(root, Agent::Codex, target, &args),
+        Command::Claudex { target, args } => {
+            agent::exec_target(root, Agent::Claudex, target, &args)
+        }
         Command::Provision { tree_id, profile } => {
             provision::run(root, config_path, tree_id, profile)
         }
@@ -734,7 +772,7 @@ fn cmd_launch(
         .and_then(|t| t.set_background.as_ref());
 
     let planter_enabled = config.features.planter.is_some();
-    let planter_eligible = agent == Agent::Claude || agent::interactive_codex_args(args);
+    let planter_eligible = agent.planter_eligible(args);
     let mut env = Vec::new();
     let tab_index_str;
 
@@ -764,7 +802,7 @@ fn cmd_launch(
 
     features::set_background(set_background_hook, hex, &ctx);
 
-    if agent == Agent::Claude {
+    if agent.uses_claude_launch_contract() {
         return agent::exec_at(
             agent,
             &tree_path,
