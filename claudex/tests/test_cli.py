@@ -34,6 +34,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["--model=gpt-direct", "--", "-p", "hello", "--verbose"]), 0)
         launch.assert_called_once_with("gpt-direct", ["-p", "hello", "--verbose"])
 
+    def test_wt_launch_arguments_keep_the_claudex_model_and_claude_decoration(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(cli.main(["-n", "tree label", "--model", "sol", "/color violet"]), 0)
+        launch.assert_called_once_with("sol", ["-n", "tree label", "/color violet"])
+
+    def test_wt_launch_second_separator_preserves_a_claude_model_option(self) -> None:
+        with patch.object(cli, "launch", return_value=0) as launch:
+            self.assertEqual(
+                cli.main(["-n", "tree label", "--", "--model", "claude-choice", "/color violet"]),
+                0,
+            )
+        launch.assert_called_once_with(
+            None,
+            ["-n", "tree label", "--model", "claude-choice", "/color violet"],
+        )
+
     def test_separator_starts_an_implicit_run(self) -> None:
         with patch.object(cli, "launch", return_value=0) as launch:
             self.assertEqual(cli.main(["--", "--model", "claude-choice"]), 0)
