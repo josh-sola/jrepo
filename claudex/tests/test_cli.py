@@ -75,6 +75,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         print_models.assert_called_once_with(settings)
 
+    def test_models_output_has_no_default_marker(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            cli.print_models(ModelSettings())
+        self.assertNotIn("default", output.getvalue())
+
     def test_doctor_subcommand_uses_typer_command(self) -> None:
         with patch.object(cli, "doctor", return_value=0) as doctor:
             result = self.runner.invoke(cli.app, ["doctor"])
@@ -109,10 +115,9 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.main(["-p", "hello"]), 2)
         self.assertEqual(output.getvalue(), "claudex: Claude Code is not on PATH\n")
 
-    def test_claude_environment_uses_proxy_origin_and_role_models(self) -> None:
+    def test_claude_environment_uses_proxy_origin_role_models_and_explicit_override(self) -> None:
         settings = ModelSettings(
             models={"sol": "gpt-sol", "terra": "gpt-terra", "luna": "gpt-luna", "review": "gpt-review"},
-            default="terra",
             roles={"opus": "sol", "sonnet": "review", "haiku": "luna"},
         )
         result = cli.claude_environment({"ANTHROPIC_API_KEY": "old"}, settings, "gpt-direct", "http://127.0.0.1:3210", "key")
@@ -124,7 +129,69 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-luna")
         self.assertNotIn("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", result)
 
-    def test_launch_forwards_direct_model_to_gateway(self) -> None:
+    def test_claude_environment_implicit_launch_omits_model(self) -> None:
+        result = cli.claude_environment({}, ModelSettings(), None, "http://127.0.0.1:3210", "key")
+        self.assertNotIn("ANTHROPIC_MODEL", result)
+
+    def test_claude_environment_implicit_launch_preserves_inherited_model(self) -> None:
+        result = cli.claude_environment(
+            {"ANTHROPIC_MODEL": "caller-choice"}, ModelSettings(), None, "http://127.0.0.1:3210", "key"
+        )
+        self.assertEqual(result["ANTHROPIC_MODEL"], "caller-choice")
+
+    def test_launch_implicit_model_uses_role_models_without_setting_anthropic_model(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Supervisor:
+            def __init__(self, _settings: ModelSettings, **kwargs: object) -> None:
+                captured.update(kwargs)
+                self.base_url = "http://127.0.0.1:1234"
+                self.token = "test-key"
+
+            def __enter__(self) -> "Supervisor":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                pass
+
+        settings = ModelSettings(
+            models={"sol": "gpt-sol", "terra": "gpt-terra", "luna": "gpt-luna"},
+            roles={"opus": "sol", "sonnet": "terra", "haiku": "luna"},
+        )
+        with patch.object(cli.shutil, "which", return_value="/usr/bin/claude"), patch.object(
+            cli, "load_settings", return_value=settings
+        ), patch.object(cli, "ProxySupervisor", Supervisor), patch.object(cli, "run_child", return_value=23) as run_child:
+            self.assertEqual(cli.launch(None, ["--resume"], env={}), 23)
+        self.assertEqual(captured["extra_models"], ["gpt-sol", "gpt-terra", "gpt-luna"])
+        self.assertNotIn("ANTHROPIC_MODEL", run_child.call_args.args[1])
+
+    def test_launch_resolves_explicit_alias_and_supplies_role_models_to_gateway(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Supervisor:
+            def __init__(self, _settings: ModelSettings, **kwargs: object) -> None:
+                captured.update(kwargs)
+                self.base_url = "http://127.0.0.1:1234"
+                self.token = "test-key"
+
+            def __enter__(self) -> "Supervisor":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                pass
+
+        settings = ModelSettings(
+            models={"sol": "gpt-sol", "terra": "gpt-terra", "luna": "gpt-luna"},
+            roles={"opus": "sol", "sonnet": "terra", "haiku": "luna"},
+        )
+        with patch.object(cli.shutil, "which", return_value="/usr/bin/claude"), patch.object(
+            cli, "load_settings", return_value=settings
+        ), patch.object(cli, "ProxySupervisor", Supervisor), patch.object(cli, "run_child", return_value=23) as run_child:
+            self.assertEqual(cli.launch("sol", ["--resume"]), 23)
+        self.assertEqual(captured["extra_models"], ["gpt-sol", "gpt-terra", "gpt-luna"])
+        self.assertEqual(run_child.call_args.args[1]["ANTHROPIC_MODEL"], "gpt-sol")
+
+    def test_launch_forwards_explicit_direct_model_to_gateway(self) -> None:
         captured: dict[str, object] = {}
 
         class Supervisor:
@@ -144,7 +211,7 @@ class CliTests(unittest.TestCase):
         ) as run_child:
             self.assertEqual(cli.launch("gpt-direct", ["--resume"]), 23)
         self.assertIn("gpt-direct", captured["extra_models"])
-        run_child.assert_called_once()
+        self.assertEqual(run_child.call_args.args[1]["ANTHROPIC_MODEL"], "gpt-direct")
 
     def test_browser_login_uses_temporary_codex_home_and_converts_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

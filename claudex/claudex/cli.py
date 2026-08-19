@@ -108,15 +108,17 @@ def launch(model: str | None, claude_args: list[str], env: dict[str, str] | None
     if shutil.which("claude") is None:
         raise RuntimeError("Claude Code is not on PATH. Install it, then run 'claudex doctor'.")
     settings = load_settings(env)
-    selected = settings.resolve(model)
-    gateway_models = [selected, *(settings.role_model(role) for role in ("opus", "sonnet", "haiku"))]
+    selected = settings.resolve(model) if model is not None else None
+    gateway_models = [*(settings.role_model(role) for role in ("opus", "sonnet", "haiku"))]
+    if selected is not None:
+        gateway_models = list(dict.fromkeys([selected, *gateway_models]))
     with ProxySupervisor(settings, env=env, extra_models=gateway_models) as proxy:
-        claude_env = claude_environment(dict(env or os.environ), settings, selected, proxy.base_url, proxy.token)
+        claude_env = claude_environment(dict(os.environ if env is None else env), settings, selected, proxy.base_url, proxy.token)
         return run_child(["claude", *claude_args], claude_env)
 
 
 def claude_environment(
-    environment: dict[str, str], settings: ModelSettings, selected: str, base_url: str, token: str
+    environment: dict[str, str], settings: ModelSettings, selected: str | None, base_url: str, token: str
 ) -> dict[str, str]:
     result = dict(environment)
     result.pop("ANTHROPIC_API_KEY", None)
@@ -124,7 +126,6 @@ def claude_environment(
         {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_AUTH_TOKEN": token,
-            "ANTHROPIC_MODEL": selected,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": settings.role_model("opus"),
             "ANTHROPIC_DEFAULT_SONNET_MODEL": settings.role_model("sonnet"),
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": settings.role_model("haiku"),
@@ -133,6 +134,8 @@ def claude_environment(
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         }
     )
+    if selected is not None:
+        result["ANTHROPIC_MODEL"] = selected
     return result
 
 
@@ -253,8 +256,7 @@ def private_umask():
 def print_models(settings: ModelSettings) -> None:
     print("Aliases:")
     for alias, upstream in settings.models.items():
-        marker = " (default)" if settings.resolve() == upstream else ""
-        print(f"  {alias:<8} {upstream}{marker}")
+        print(f"  {alias:<8} {upstream}")
     print("Roles:")
     for role in ("opus", "sonnet", "haiku"):
         source = settings.roles[role]
@@ -294,7 +296,7 @@ def doctor(env: dict[str, str] | None = None) -> int:
     elif path.exists():
         print(f"OK   config permissions: {path}")
     else:
-        print(f"OK   config: defaults in use ({path} does not exist)")
+        print(f"OK   config: built-in mappings in use ({path} does not exist)")
     auth = oauth_auth_file(values)
     if auth.exists() and not is_private(auth, 0o600):
         failures.append(f"OAuth token permissions are too open: {auth}; run chmod 600 {auth}")
