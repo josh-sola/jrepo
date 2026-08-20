@@ -8,6 +8,7 @@ Personal projects that share one checkout and one Git history.
 | [claude-planter](claude-planter/) | A macOS overlay that shows the state of coding sessions as plants. |
 | [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
 | [claudex](claudex/) | Experimental local ChatGPT gateway for Claude Code. |
+| [jpi](jpi/) | Personal extensions and skills for Pi. |
 
 ## Validate
 

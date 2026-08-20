@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: fmt clippy test bash swift claudex-check
+check: fmt clippy test bash swift claudex-check jpi-check
 
 # Check Rust formatting.
 fmt:
@@ -24,6 +24,10 @@ bash:
 # Check the standalone claudex package without installing it as a tool.
 claudex-check:
     uv run --project claudex --frozen python -m unittest discover -s claudex/tests -v
+
+# Check the jpi package without installing dependencies.
+jpi-check:
+    npm run test:jpi
 
 # Install claudex only from this checkout.
 claudex-install:
