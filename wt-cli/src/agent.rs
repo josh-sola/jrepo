@@ -47,17 +47,15 @@ const CODEX_ADMIN_COMMANDS: &[&str] = &[
 pub enum Agent {
     Codex,
     Claude,
-    Claudex,
 }
 
 impl Agent {
-    pub fn from_flags(codex: bool, claude: bool, claudex: bool) -> Option<Self> {
-        match (codex, claude, claudex) {
-            (true, false, false) => Some(Self::Codex),
-            (false, true, false) => Some(Self::Claude),
-            (false, false, true) => Some(Self::Claudex),
-            (false, false, false) => None,
-            _ => unreachable!("clap rejects conflicting agent flags"),
+    pub fn from_flags(codex: bool, claude: bool) -> Option<Self> {
+        match (codex, claude) {
+            (true, false) => Some(Self::Codex),
+            (false, true) => Some(Self::Claude),
+            (false, false) => None,
+            (true, true) => unreachable!("clap rejects conflicting agent flags"),
         }
     }
 
@@ -65,16 +63,7 @@ impl Agent {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
-            Self::Claudex => "claudex",
         }
-    }
-
-    pub fn uses_claude_launch_contract(self) -> bool {
-        matches!(self, Self::Claude | Self::Claudex)
-    }
-
-    pub fn planter_eligible(self, args: &[String]) -> bool {
-        self.uses_claude_launch_contract() || interactive_codex_args(args)
     }
 }
 
