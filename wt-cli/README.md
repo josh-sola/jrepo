@@ -60,7 +60,7 @@ wt init <name> --adopt <path> [--branch-prefix <prefix>] [--redetect]
 
 wt new <repo> --name "<short summary>" [--branch <b>] [--onto <sel>]
                                        [--profile node,python]
-                                       [--codex|--claude|--claudex] [-- <agent args>]
+                                       [--codex|--claude] [-- <agent args>]
     # worktree add + registry + shared state + env copy, then return the
     # path in ~2s; provisioning steps run detached in the background.
     # Claims a repo's hot spare when one is ready, returning an
@@ -68,33 +68,28 @@ wt new <repo> --name "<short summary>" [--branch <b>] [--onto <sel>]
     # --onto branches from <sel> instead of origin/<trunk>, joining
     # whatever Graphite stack it belongs to: a wt tree selector (its live
     # branch), a branch name, or a commit-ish.
-    # --codex, --claude, or --claudex waits for provisioning, then opens that agent in
+    # --codex or --claude waits for provisioning, then opens that agent in
     # the tree. Arguments are passed through unchanged:
     #   wt new monorepo --name "fix the thing" --codex -- --model gpt-5
     #   wt new monorepo --name "fix the thing" --claude -- --model opus
-    #   wt new monorepo --name "fix the thing" --claudex -- --model sol
     # Progress prints while it waits. A failed install refuses to open a
     # session and tells you to check `wt status`.
 
 wt launch [worktree] [repo] [--branch <b>] [--onto <sel>] [--profile node,python]
-                             [--claude|--claudex] [-- <agent args>]
+                             [--claude] [-- <agent args>]
     # find <worktree>, creating it in <repo> (like `wt new`, including
     # --onto) if it doesn't exist there, wait for provisioning, then open a
-    # Codex session in it. Codex is the default; --claude or --claudex chooses
-    # that agent instead. <repo> can be omitted if exactly one tree
+    # Codex session in it. Codex is the default; --claude chooses that agent
+    # instead. <repo> can be omitted if exactly one tree
     # matches <worktree>, or the current directory's repo breaks the tie.
     # The session gets a color derived from repo+name — both as Claude's
     # prompt-bar color and the terminal background — so a tab is
     # identifiable at a glance:
     #   wt launch "fix login" monorepo -- --model gpt-5
     #   wt launch "fix login" monorepo --claude -- --model opus
-    #   wt launch "fix login" monorepo --claudex -- --model sol
-    # Claude and Claudex receive a generated label and trailing /color command.
-    # If their arguments already contain a bare prompt, the trailing /color
-    # command may be ignored. Claudex's --model selects its OpenAI model. To
-    # pass a colliding --model to Claude through Claudex, use a second
-    # separator after wt's outer separator:
-    #   wt launch "fix login" monorepo --claudex -- -- --model claude-choice
+    # Claude receives a generated label and trailing /color command.
+    # If its arguments already contain a bare prompt, the trailing /color
+    # command may be ignored.
     #
     # With no <worktree>, an fzf picker lists every registered tree (a
     # preview pane shows its state, age, and commits) and opens whichever
@@ -184,12 +179,12 @@ wt stack [selector] [--json] [--all] [--all-branches]
     # in the repo; --all-branches also shows merged/closed branches, hidden
     # by default; --json for agents.
 
-wt adopt [<repo>] --name "<short summary>" [--codex|--claude|--claudex] [-- <agent args>]
+wt adopt [<repo>] --name "<short summary>" [--codex|--claude] [-- <agent args>]
     # move uncommitted work out of base into a fresh tree, for when you
     # started editing in base by mistake. Refuses on a clean base. If the
     # stash cannot be applied, it stays intact and the command exits
     # non-zero rather than dropping it.
-    # --codex, --claude, and --claudex wait for provisioning, then pass their arguments
+    # --codex and --claude wait for provisioning, then pass their arguments
     # through unchanged.
 
 wt env refresh <selector>
@@ -211,12 +206,6 @@ wt codex [<selector>|<repo>] [-- <codex args>]
     # a selector, bare repo base, or the current tree/base. It warns when
     # targeting base and forwards everything after `--` unchanged:
     #   wt codex monorepo -- --model gpt-5
-
-wt claudex [<selector>|<repo>] [-- <claudex args>]
-    # the direct Claudex analogue of `wt claude`: exec `claudex` with cwd set
-    # to a selector, bare repo base, or the current tree/base. It warns when
-    # targeting base and forwards everything after `--` unchanged:
-    #   wt claudex monorepo -- --model sol
 
 wt go <selector>
 wt cd <selector>
@@ -262,7 +251,7 @@ trunk moves. Set `spares 0` on a repo in `config.kdl`, or run
 ## Features
 
 `wt launch` can reach outside wt to set a terminal background color. It can
-also connect Claude, Claudex, and interactive Codex launches to Planter. These opt-in
+also connect Claude and interactive Codex launches to Planter. These opt-in
 hooks are declared under a `features` block in `config.kdl`. Absent block
 means off:
 
@@ -279,19 +268,19 @@ features {
 ```
 
 - **`planter`** integrates with the optional Planter overlay. Interactive
-  `wt launch` sessions for Claude, Claudex, and Codex share tab positioning: `get-position`
+  `wt launch` sessions for Claude and Codex share tab positioning: `get-position`
   finds this session's rank, and `renumber-peers` updates planted sessions a
   new tab pushed down. Codex uses `planter-codex-bridge` when available, so
   its app-server state appears in the same overlay. A missing or failed bridge
   falls back to direct Codex; explicit `--remote` endpoints, administrative
   Codex commands, and direct `wt codex` remain direct. Eligible launches pass
-  `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` to Claude, Claudex,
+  `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` to Claude
   or the Codex bridge. The bridge preserves a caller-provided `PLANTER_STATE_DIR` or
   `CLAUDE_PLANTER_DIR`. Codex currently marks its
   [app-server interface as experimental](https://learn.chatgpt.com/docs/app-server).
 - **`terminal`** sets the terminal background: `set-background` writes an
-  OSC 11 escape sequence in the session's color. It applies to Codex, Claude,
-  and Claudex launches.
+  OSC 11 escape sequence in the session's color. It applies to Codex and
+  Claude launches.
 
 Each hook takes exactly one of a `builtin` (one of wt's own
 implementations) or a `cmd` (your own command, run with `WT_TREE_PATH`,

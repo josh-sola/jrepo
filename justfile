@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: fmt clippy test bash swift claudex-check
+check: fmt clippy test bash swift
 
 # Check Rust formatting.
 fmt:
@@ -19,15 +19,7 @@ test:
 
 # Check shell-script syntax.
 bash:
-    bash -n wt-cli/install.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh claudex/install.sh
-
-# Check the standalone claudex package without installing it as a tool.
-claudex-check:
-    uv run --project claudex --frozen python -m unittest discover -s claudex/tests -v
-
-# Install claudex only from this checkout.
-claudex-install:
-    ./claudex/install.sh
+    bash -n wt-cli/install.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh
 
 # Typecheck and self-test the Swift components.
 swift:
