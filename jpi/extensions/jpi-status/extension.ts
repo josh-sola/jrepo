@@ -1,3 +1,15 @@
+import {
+  createDefaultStatusLineConfig,
+  getStatusLineConfigPath,
+  loadStatusLineConfig,
+  type ReadTextFile,
+  type StatusLineConfig,
+} from "./config.ts";
+import {
+  createCustomStatusPayload,
+  CustomStatusController,
+  type IntervalScheduler,
+} from "./custom.ts";
 import { loadRepositoryMetadata, type ExecCommand, type RepositoryMetadata } from "./data.ts";
 import { renderFooter, type WidthHelpers } from "./render.ts";
 
@@ -11,8 +23,21 @@ type FooterData = {
 type FooterContext = {
   mode: string;
   cwd: string;
-  model?: { id?: string; name?: string };
-  getContextUsage(): { percent: number | null } | undefined;
+  model?: {
+    id?: string;
+    name?: string;
+    provider?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+  };
+  thinkingLevel?: string;
+  isIdle?(): boolean;
+  getContextUsage(): {
+    tokens?: number | null;
+    contextWindow?: number | null;
+    percent: number | null;
+  } | undefined;
   ui: {
     notify(message: string, level?: "info" | "warning" | "error"): void;
     setFooter(factory: ((
@@ -23,14 +48,16 @@ type FooterContext = {
   };
 };
 
-type Scheduler = {
-  setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>;
-  clearInterval(timer: ReturnType<typeof setInterval>): void;
-};
+type Scheduler = IntervalScheduler;
 
 export type StatusExtension = {
-  onSessionStart(event: unknown, context: FooterContext): void;
+  onSessionStart(event: unknown, context: FooterContext): Promise<void>;
   onCommand(args: string, context: FooterContext): Promise<void>;
+};
+
+export type StatusConfigDependencies = {
+  configPath?: string;
+  readTextFile?: ReadTextFile;
 };
 
 type ControllerOptions = {
@@ -114,26 +141,70 @@ export function createStatusExtension(
   exec: ExecCommand,
   helpers: WidthHelpers,
   scheduler: Scheduler = { setInterval, clearInterval },
+  configDependencies: StatusConfigDependencies = {},
 ): StatusExtension {
+  const configPath = configDependencies.configPath ?? getStatusLineConfigPath();
   let activeController: RepositoryMetadataController | undefined;
+  let activeCustomController: CustomStatusController | undefined;
+  let statusLineConfig: StatusLineConfig = createDefaultStatusLineConfig();
+  let requestFooterRender: (() => void) | undefined;
+
+  const reloadConfig = async (context: FooterContext, announce: boolean): Promise<void> => {
+    const result = await loadStatusLineConfig(configPath, configDependencies.readTextFile);
+    statusLineConfig = result.config;
+    if (activeCustomController) {
+      await activeCustomController.updateFormat(statusLineConfig.format);
+    } else if (announce) {
+      requestFooterRender?.();
+    }
+
+    if (result.problem) {
+      context.ui.notify(
+        `Could not load jpi-status config at ${configPath}: ${result.problem}. Using the default config.`,
+        "warning",
+      );
+      return;
+    }
+
+    if (announce) context.ui.notify("jpi-status config reloaded.", "info");
+  };
 
   return {
-    onSessionStart(_event, context) {
+    async onSessionStart(_event, context) {
       if (context.mode !== "tui") return;
+      await reloadConfig(context, false);
       context.ui.setFooter((tui, _theme, footerData) => {
+        const renderFooterNow = () => tui.requestRender();
         let controller: RepositoryMetadataController;
         controller = new RepositoryMetadataController({
           exec,
           cwd: context.cwd,
-          requestRender: () => tui.requestRender(),
+          requestRender: renderFooterNow,
           onBranchChange: (callback) => footerData.onBranchChange(callback),
           scheduler,
           onDispose: () => {
             if (activeController === controller) activeController = undefined;
+            if (requestFooterRender === renderFooterNow) requestFooterRender = undefined;
           },
         });
+        const customController = new CustomStatusController({
+          exec,
+          format: statusLineConfig.format,
+          configPath,
+          getPayload: () => createCustomStatusPayload(
+            context,
+            controller.metadata,
+            footerData.getExtensionStatuses(),
+          ),
+          requestRender: renderFooterNow,
+          notify: (message, level) => context.ui.notify(message, level),
+          scheduler,
+        });
         activeController = controller;
+        activeCustomController = customController;
+        requestFooterRender = renderFooterNow;
         controller.start();
+        void customController.start();
 
         return {
           invalidate() {},
@@ -144,9 +215,15 @@ export function createStatusExtension(
               contextPercent: percent === null ? undefined : percent,
               repository: controller.metadata,
               statuses: footerData.getExtensionStatuses(),
+              customOutputs: customController.outputs,
+              config: statusLineConfig,
             }, width, helpers);
           },
-          dispose: () => controller.dispose(),
+          dispose: () => {
+            customController.dispose();
+            if (activeCustomController === customController) activeCustomController = undefined;
+            controller.dispose();
+          },
         };
       });
     },
@@ -169,7 +246,11 @@ export function createStatusExtension(
         context.ui.notify("jpi-status metadata refresh requested.", "info");
         return;
       }
-      context.ui.notify("Usage: /jpi-status [status|refresh]", "warning");
+      if (action === "reload") {
+        await reloadConfig(context, true);
+        return;
+      }
+      context.ui.notify("Usage: /jpi-status [status|refresh|reload]", "warning");
     },
   };
 }

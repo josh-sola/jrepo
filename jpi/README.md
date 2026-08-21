@@ -41,23 +41,129 @@ confirms that the extension loaded.
 
 ## Status footer extension
 
-`jpi/extensions/jpi-status/` replaces Pi's built-in footer in TUI sessions. It
-shows:
+`jpi/extensions/jpi-status/` replaces Pi's built-in footer in TUI sessions.
+Its layout is configured through
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/status-line.json`. This is the default:
 
-- the active model and context-window percentage;
-- repository, linked `wt` tree, shortened branch, Graphite pull request, and
-  stack position when available;
-- statuses published by other extensions through `setStatus()`.
+```json
+{
+  "format": [
+    [
+      "@jpi/model",
+      "@jpi/context",
+      "@jpi/repository",
+      "@jpi/worktree",
+      "@jpi/branch",
+      "@jpi/pull-request",
+      "@jpi/stack"
+    ],
+    ["@jpi/slot"]
+  ],
+  "disabledStatuses": []
+}
+```
+
+Each inner `format` array is one line. The footer omits unavailable components
+and lines that become empty. It joins rendered components with ` · `. The local
+component IDs are:
+
+| ID | Content |
+| --- | --- |
+| `@jpi/model` | Active model name |
+| `@jpi/context` | Context-window percentage |
+| `@jpi/repository` | Repository name |
+| `@jpi/worktree` | Linked `wt` tree name |
+| `@jpi/branch` | Shortened branch name |
+| `@jpi/pull-request` | Graphite pull request and draft state |
+| `@jpi/stack` | Graphite stack position |
+| `@jpi/slot` | Published extension statuses, sorted by status ID |
+
+Any other `format` string is an exact, case-sensitive extension `setStatus()`
+ID, such as `auto-review`. A missing extension status is omitted until its
+extension publishes it. The `@jpi/` namespace is reserved; unknown IDs in that
+namespace make the config invalid.
+
+`@jpi/slot` includes every published extension status except IDs listed in
+`disabledStatuses`. An explicit extension ID still renders when it is disabled
+from the slot. The slot also includes explicitly placed statuses, so the same
+status can appear more than once. This filtering only changes the custom footer;
+it does not disable an extension.
+
+### Custom executable components
+
+A component ID in the form `@custom:<path>` displays stdout from an executable:
+
+```json
+{
+  "format": [
+    ["@jpi/model", "@custom:bin/session-status"],
+    ["@jpi/slot"]
+  ]
+}
+```
+
+An absolute path starts at the filesystem root. A relative path starts in the
+directory containing `status-line.json`. Pi invokes the resolved executable
+directly without a shell and uses the current session directory as its working
+directory. Each configured occurrence runs as a separate process, even when the
+same path appears more than once.
+
+The executable receives one argument containing JSON with this shape:
+
+```json
+{
+  "cwd": "/path/to/project",
+  "idle": true,
+  "model": {
+    "id": "model-id",
+    "name": "Model name",
+    "provider": "provider-id",
+    "reasoning": true,
+    "contextWindow": 200000,
+    "maxTokens": 32000
+  },
+  "thinkingLevel": "high",
+  "context": {
+    "tokens": 75000,
+    "contextWindow": 200000,
+    "percent": 37.5
+  },
+  "repository": {
+    "repo": "jrepo",
+    "branch": "feature"
+  },
+  "statuses": {
+    "auto-review": "review: on"
+  }
+}
+```
+
+Unavailable scalar values are `null`. `statuses` includes every published
+extension status, including statuses hidden from `@jpi/slot`, and sorts them by
+ID. Repository fields are omitted when unavailable.
+
+Custom executables run when the footer starts, immediately after a config
+reload, and every 10 seconds after that. They have a 3-second timeout. Empty or
+whitespace-only stdout omits the component. Other stdout is sanitized to one
+line like extension status text;
+ANSI styling is preserved. A timeout, execution error, or nonzero exit hides
+the component and warns once per occurrence and distinct failure. A success or
+config reload resets that warning state.
+
+Both config fields are optional. A missing file or field uses its default
+without warning. Invalid JSON or values produce a warning and restore the full
+default config.
 
 The extension refreshes Git and `wt` metadata at startup, after branch changes,
 and every 10 seconds. Missing Git, `wt`, Graphite, or GitHub-origin data removes
-only the affected segments. It does not show token totals, cost, thinking level,
-or provider rate limits.
+only the affected components. It does not show token totals, cost, thinking
+level, or provider rate limits.
 
 ### Commands
 
 - `/jpi-status status` reports whether this footer component is active.
 - `/jpi-status refresh` requests an immediate repository metadata refresh.
+- `/jpi-status reload` reloads `status-line.json` and rerenders the footer.
 
 Pi has one custom-footer slot. Another extension that calls `setFooter()` later
 replaces this footer. Existing extension statuses remain registered, but the

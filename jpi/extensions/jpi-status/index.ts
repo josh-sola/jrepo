@@ -11,7 +11,7 @@ export default function jpiStatus(pi: ExtensionAPI) {
 
   pi.on("session_start", extension.onSessionStart);
   pi.registerCommand("jpi-status", {
-    description: "Show or refresh the custom footer",
+    description: "Show, refresh, or reload the custom footer",
     handler: extension.onCommand,
   });
 }
