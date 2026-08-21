@@ -712,6 +712,7 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
         "│   ├── gc --",
         "│   └── doctor --",
         "├── llm --",
+        "│   ├── pi --",
         "│   ├── claude --",
         "│   └── codex --",
         "├── go --",
@@ -1021,7 +1022,7 @@ fn new_with_unslugifiable_name_errors_clearly() {
 }
 
 #[test]
-fn go_on_an_unknown_repo_fails_before_touching_claude() {
+fn go_on_an_unknown_repo_fails_before_resolving_the_agent() {
     let tmp = unique_dir("launch-unknown");
     let root = tmp.join("wt-root");
 
@@ -1136,7 +1137,7 @@ fn go_scratch_session_with_branch_errors() {
 }
 
 #[test]
-fn legacy_launch_rewrites_its_positional_repo_end_to_end() {
+fn unflagged_legacy_launch_rewrites_its_repo_and_selects_pi() {
     let tmp = unique_dir("legacy-launch");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
@@ -1153,26 +1154,23 @@ fn legacy_launch_rewrites_its_positional_repo_end_to_end() {
         "tree wait",
     );
 
-    let out = run_wt_without_agents_on_path(
-        &root,
-        &["launch", "legacy launch target", "myrepo", "--claude"],
-    );
+    let out = run_wt_without_agents_on_path(&root, &["launch", "legacy launch target", "myrepo"]);
     assert!(
         !out.status.success(),
-        "expected the missing Claude binary to fail"
+        "expected the missing Pi binary to fail"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("`claude` is not on PATH"), "{stderr}");
+    assert!(stderr.contains("`pi` is not on PATH"), "{stderr}");
 }
 
 #[test]
-fn go_with_repo_creates_only_after_a_real_no_match() {
+fn unflagged_go_creates_after_a_real_no_match_and_selects_pi() {
     let tmp = unique_dir("go-create");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
-    let record = tmp.join("codex-record");
-    let bin_dir = write_fake_agent(&tmp, "codex", &record);
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
 
     let out = run_wt_with_path(
         &root,
@@ -1192,6 +1190,7 @@ fn go_with_repo_creates_only_after_a_real_no_match() {
         .expect("go did not register the new tree");
     let record = std::fs::read_to_string(record).unwrap();
     assert!(record.contains(tree["path"].as_str().unwrap()), "{record}");
+    assert!(record.contains("arg=-n\narg=created by go"), "{record}");
 }
 
 /// A `get-position` hook that just creates a sentinel file — enough to prove
@@ -1263,6 +1262,62 @@ fn go_features_config(planter_sentinel: &Path, terminal_sentinel: &Path) -> Stri
 }
 
 #[test]
+fn go_pi_forwards_name_arguments_and_planter_environment() {
+    let tmp = unique_dir("go-pi-planter");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        go_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "go",
+            "pi target",
+            "--repo",
+            "myrepo",
+            "--pi",
+            "--",
+            "--model",
+            "custom",
+            "-n",
+            "user label",
+        ],
+    );
+    assert_success(&out, "go with Pi");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record.contains("arg=-n\narg=pi target\narg=--model\narg=custom\narg=-n\narg=user label"),
+        "{record}"
+    );
+    assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
+    assert!(record.contains("PLANTER_LABEL=pi target"), "{record}");
+    assert!(record.contains("PLANTER_TAB_INDEX=7"), "{record}");
+    assert!(planter_sentinel.exists(), "Pi should run planter hooks");
+    assert!(
+        terminal_sentinel.exists(),
+        "Pi should retain terminal hooks"
+    );
+}
+
+#[test]
 fn go_codex_uses_planter_positioning_without_claude_decoration() {
     let tmp = unique_dir("launch-codex");
     let base = fixture_repo(&tmp);
@@ -1298,6 +1353,7 @@ fn go_codex_uses_planter_positioning_without_claude_decoration() {
             "codex target",
             "--repo",
             "myrepo",
+            "--codex",
             "--",
             "-n",
             "user label",
@@ -1368,6 +1424,7 @@ fn go_codex_with_explicit_remote_stays_direct() {
             "remote target",
             "--repo",
             "myrepo",
+            "--codex",
             "--",
             "--remote",
             "unix:///tmp/caller.sock",
@@ -1434,6 +1491,7 @@ fn go_codex_falls_back_without_planter_environment_after_invalid_bridge() {
             "fallback target",
             "--repo",
             "myrepo",
+            "--codex",
             "--",
             "--model",
             "gpt-5",
@@ -2651,6 +2709,85 @@ fn claude_on_an_unknown_selector_fails_before_touching_path_lookup() {
 }
 
 #[test]
+fn pi_resolves_a_target_and_forwards_arguments_unchanged() {
+    let tmp = unique_dir("pi-target");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    let new = run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]);
+    assert_success(&new, "new");
+    assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
+    let tree = PathBuf::from(
+        String::from_utf8_lossy(&new.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &[
+                "llm",
+                "pi",
+                "pi target",
+                "--",
+                "--model",
+                "custom",
+                "-n",
+                "caller name",
+            ],
+        ),
+        "pi selector",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(
+        record_text.contains("arg=--model\narg=custom\narg=-n\narg=caller name"),
+        "{record_text}"
+    );
+    assert_eq!(record_text.matches("arg=-n").count(), 1, "{record_text}");
+    assert!(
+        record_text.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="),
+        "{record_text}"
+    );
+
+    assert_success(
+        &run_wt_with_path(&root, &tree, &bin_dir, &["llm", "pi", "--", "resume"]),
+        "pi current tree",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(record_text.contains("arg=resume"), "{record_text}");
+}
+
+#[test]
+fn pi_on_a_bare_repo_names_the_missing_executable() {
+    let tmp = unique_dir("pi-base");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt_without_agents_on_path(&root, &["llm", "pi", "myrepo"]);
+    assert!(!out.status.success(), "expected failure with Pi off PATH");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("base is for reading"), "{stderr}");
+    assert!(stderr.contains("`pi` is not on PATH"), "{stderr}");
+    assert!(stderr.contains("`wt llm pi`"), "{stderr}");
+}
+
+#[test]
 fn codex_resolves_a_tree_or_current_tree_like_claude() {
     let tmp = unique_dir("codex-target");
     let base = fixture_repo(&tmp);
@@ -2719,23 +2856,35 @@ fn codex_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
 }
 
 #[test]
-fn new_and_lift_reject_conflicting_agent_flags() {
+fn go_new_and_lift_reject_every_agent_flag_conflict() {
     let tmp = unique_dir("agent-flag-conflict");
     let root = tmp.join("wt-root");
-
-    for args in [
+    let cases = [
+        vec!["go", "--pi", "--codex"],
+        vec!["go", "--pi", "--claude"],
+        vec!["go", "--codex", "--claude"],
+        vec![
+            "tree", "new", "myrepo", "--name", "target", "--pi", "--codex",
+        ],
+        vec![
+            "tree", "new", "myrepo", "--name", "target", "--pi", "--claude",
+        ],
         vec![
             "tree", "new", "myrepo", "--name", "target", "--codex", "--claude",
         ],
+        vec!["repo", "lift", "--name", "target", "--pi", "--codex"],
+        vec!["repo", "lift", "--name", "target", "--pi", "--claude"],
         vec!["repo", "lift", "--name", "target", "--codex", "--claude"],
-    ] {
+    ];
+
+    for args in cases {
         let out = run_wt(&root, &args);
         assert!(
             !out.status.success(),
-            "expected mutually exclusive flags to fail"
+            "expected mutually exclusive flags to fail for {args:?}"
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("cannot be used with"), "{stderr}");
+        assert!(stderr.contains("cannot be used with"), "{args:?}: {stderr}");
     }
 }
 
@@ -2802,6 +2951,53 @@ fn new_and_lift_open_the_selected_agent_with_raw_arguments() {
         !record.contains("arg=-n") && !record.contains("arg=/color"),
         "{record}"
     );
+}
+
+#[test]
+fn new_and_lift_open_pi_with_raw_arguments() {
+    let tmp = unique_dir("new-lift-pi");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &[
+                "tree", "new", "myrepo", "--name", "pi new", "--pi", "--", "--model", "custom",
+            ],
+        ),
+        "new --pi",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains("arg=--model\narg=custom"),
+        "{record_text}"
+    );
+    assert!(!record_text.contains("arg=-n"), "{record_text}");
+
+    std::fs::write(base.join("pi-lift.txt"), "uncommitted\n").unwrap();
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &[
+                "repo", "lift", "myrepo", "--name", "pi lift", "--pi", "--", "--mode", "text",
+            ],
+        ),
+        "lift --pi",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains("arg=--mode\narg=text"),
+        "{record_text}"
+    );
+    assert!(!record_text.contains("arg=-n"), "{record_text}");
 }
 
 #[test]
@@ -3744,12 +3940,12 @@ fn go_with_no_tree_offers_the_cwd_repo_first_then_newest_first() {
 
     assert!(
         !out.status.success(),
-        "expected go past the picker to fail on the missing Codex binary"
+        "expected go past the picker to fail on the missing Pi binary"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("not on PATH"),
-        "expected the picked tree to reach the codex exec, got: {stderr}"
+        "expected the picked tree to reach the Pi exec, got: {stderr}"
     );
 
     let captured = std::fs::read_to_string(&capture).unwrap();

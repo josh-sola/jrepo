@@ -9,12 +9,12 @@ thing you keep losing track of is which one needs you.
 
 | The plant | The session |
 | --- | --- |
-| **Blooming**, swaying gently | Claude is working |
+| **Blooming**, swaying gently | The coding agent is working |
 | Blooming **with side buds** | Subagents are running — one bud each, up to two |
 | **Wilted**: flower closed, petals on the soil | Its turn ended. Your move |
 | Wilted, **flower dropped** | Waiting more than 2 minutes |
 | **Collapsed** onto the soil | Waiting more than 10 minutes |
-| Wilted **with a `!`** | Blocked on a permission prompt |
+| Wilted **with a `!`** | Blocked on a prompt that needs your input |
 
 Work done by a subagent counts as working, so a session that delegated and is
 waiting on its agents keeps flowering rather than looking idle.
@@ -24,9 +24,9 @@ the thing you actually want to know: which session you have been ignoring longes
 The clock starts when a session becomes your move, and survives an idle
 notification, so nothing resets it but you.
 
-Only a real permission prompt raises a `!`, and it appears the moment the dialog
-does. Claude Code also notifies when a session has merely gone quiet; treating that
-as blocking was a false alarm, since the wilt is already saying it.
+Only a dialog that is waiting for you raises a `!`, and it appears when that
+dialog opens. Claude Code also notifies when a session has merely gone quiet;
+treating that as blocking was a false alarm, since the wilt already says it.
 
 Every session gets its own colour from a palette of eight. Planter picks new
 automatic colours at random from colours that are not tied for most used by the
@@ -34,7 +34,7 @@ visible plants. If all eight are tied, all eight are eligible. The choice is
 remembered for that session's lifetime, including overlay restarts. A launcher
 that already knows better can set
 `PLANTER_COLOR`, `PLANTER_LABEL`, and
-`PLANTER_TAB_INDEX` on the `claude` process to choose that session's colour,
+`PLANTER_TAB_INDEX` on the agent process to choose that session's colour,
 name, and place in the row directly, and can rewrite that place later if its
 tabs move — see "How it works" below.
 
@@ -116,7 +116,7 @@ A directory basename is a poor label if your worktrees are named after a uuid or
 a ticket id. If `~/.claude/planter/label-hook` exists and is executable, it is
 handed the session's directory, and whatever it prints becomes the label. It runs
 once per session, so it can afford to be slow. A `PLANTER_LABEL` set on the
-`claude` process wins over both, and skips running the hook at all. Two examples
+agent process wins over both and skips running the hook. Two examples
 ship in `examples/`:
 
 ```sh
@@ -144,8 +144,10 @@ clean exit and will be restarted — uninstall to stop it for good. Logs go to
 
 ## How it works
 
-Hooks write one small JSON file per session into `~/.claude/planter/`, and the
-overlay watches that directory.
+Claude hooks and the Codex and Pi integrations write one small JSON file per
+session into `~/.claude/planter/`, and the overlay watches that directory.
+
+Claude's hooks map events as follows:
 
 | Hook | Effect on the plant |
 | --- | --- |
@@ -173,9 +175,9 @@ bounded two ways: your next prompt clears it, and it expires after 30 minutes
 without news. The cost is that a background agent outliving a prompt loses its bud,
 which is worth much less than a plant that never wilts again.
 
-**Crashed sessions clean themselves up.** Each file records the pid of its claude
+**Crashed sessions clean themselves up.** Each file records the pid of its agent
 process. The overlay drops any plant whose process is gone, so a session killed
-without a `SessionEnd` never leaves one behind.
+without a final lifecycle event never leaves one behind.
 
 **Labels come from `CwdChanged`, not from every event.** The `cwd` on an ordinary
 hook payload follows the session's *shell*, which wanders into subdirectories and
@@ -200,9 +202,9 @@ nothing else, about 10ms. If you would rather not pay it, delete the `PostToolUs
 entry from `~/.claude/settings.json`; all you lose is that a `!` then stays up
 until the turn ends, instead of clearing when you approve.
 
-A launcher that starts a `claude` process can set three environment variables
-on it, and the hook reads them straight off the environment rather than
-remembering them, so nothing can drift:
+A launcher can set three environment variables on an agent process. Each
+provider integration reads them from the environment rather than remembering
+them, so nothing can drift:
 `PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
 `purple`, `pink`) fixes its colour exactly, even if another plant already has
 it. Automatic colours are chosen randomly from palette slots below the current
@@ -226,15 +228,15 @@ without touching your real sessions.
 
 ## Codex app-server sessions
 
-When Planter is enabled in `wt`, `wt go` automatically starts interactive
-Codex sessions through `planter-codex-bridge`. The bridge starts
+When Planter is enabled in `wt`, `wt go --codex` starts interactive Codex
+sessions through `planter-codex-bridge`. The bridge starts
 `codex app-server --listen stdio://`, gives the Codex TUI a private Unix-socket
 endpoint, and writes the same small live-state record as the Claude hook. It
 does not use Codex hooks and does not store prompts, replies, tool input, or
 credentials.
 
-Install this repository so the bridge is on `PATH`, then use `wt go` as
-usual. Direct `wt llm codex` commands, explicit Codex `--remote` sessions, and
+Install this repository so the bridge is on `PATH`, then use `wt go --codex`.
+Direct `wt llm codex` commands, explicit Codex `--remote` sessions, and
 non-interactive or administrative Codex commands remain direct. If the bridge
 cannot start, `wt` prints a warning and starts Codex directly.
 
@@ -245,6 +247,30 @@ valid `tab` change made in its state file by launchers such as `wt`. Codex
 currently marks the [app-server interface as experimental](https://learn.chatgpt.com/docs/app-server),
 so this integration stays isolated behind the bridge and direct-launch
 fallback.
+
+## Pi sessions
+
+Pi support ships through the `jpi` package in this repository. Install both
+Planter and `jpi`, then start Pi directly or through `wt`:
+
+```sh
+pi install git:github.com/josh-sola/jrepo
+wt go                         # Pi is the default
+wt llm pi "fix login"         # direct launch in a selected tree
+```
+
+The `jpi-planter` extension writes the same provider-neutral state records as
+the Claude hook and Codex bridge. It tracks Pi's main agent, optional
+`pi-subagents` agents, and `pi-background-tasks` work. The
+`ask_user_question` integration raises `!` while its questionnaire is waiting
+for you. Pi does not expose one general event for every possible permission
+prompt, so prompts from integrations without a matching public event remain in
+their normal working state.
+
+A Pi process launched by `wt go` inherits `PLANTER_COLOR`, `PLANTER_LABEL`, and
+`PLANTER_TAB_INDEX`, so its plant shares the same colour and tab ordering as the
+other supported agents. Direct Pi sessions still appear when `jpi` is loaded;
+they use the normal automatic colour, label, and ordering rules.
 
 ## Icon packs
 

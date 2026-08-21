@@ -11,6 +11,6 @@
   },
   "pi": {
     "extensions": ["./jpi/extensions"],
-    "skills": ["./jpi/skills"]
+    "skills": ["./jpi/skills", "./wt-cli/plugin/skills"]
   }
 }

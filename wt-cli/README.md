@@ -49,6 +49,7 @@ wt
 │   ├── gc
 │   └── doctor
 ├── llm
+│   ├── pi
 │   ├── claude
 │   └── codex
 ├── go
@@ -76,16 +77,21 @@ wt tree new monorepo --name "fix login" --codex -- --model gpt-5
 wt tree wait "fix login"
 ```
 
-Open an existing tree, or choose one from the picker:
+Pass `--pi`, `--claude`, or `--codex` to `wt tree new` or `wt repo lift` to
+open that agent after provisioning. With no agent flag, these commands only
+create the tree. Arguments after `--` require one of the three flags.
+
+Open an existing tree in Pi, or choose one from the picker:
 
 ```sh
 wt go "fix login"
 wt go
 ```
 
-Use `wt go <tree> --repo <repo>` to create a named tree when it does not
-already exist. A name beginning with `@` opens a scratch agent session in a
-base checkout without creating a tree.
+Pi is the default. Pass `--pi`, `--claude`, or `--codex` to select an agent
+explicitly. Use `wt go <tree> --repo <repo>` to create a named tree when it
+does not already exist. A name beginning with `@` opens a scratch agent
+session in a base checkout without creating a tree.
 
 Change the current shell's directory:
 
@@ -114,9 +120,15 @@ Work with a Graphite stack or run an agent in a selected tree or base:
 ```sh
 wt gt stack
 wt gt restack "fix login" --dry-run
+wt llm pi "fix login" -- --model custom
 wt llm claude "fix login" -- --model opus
 wt llm codex monorepo -- --model gpt-5
 ```
+
+The `wt llm` commands only resolve the working directory and pass arguments
+through unchanged. `wt go` adds `-n <label>` before Pi arguments so the
+session has the tree or scratch label; a later `-n` from the caller takes
+precedence.
 
 `<TREE>` consistently accepts a tree name, unique name substring, UUID or
 UUID prefix, or branch name. `<TREE_OR_BRANCH>` accepts either a tree or a
@@ -185,15 +197,16 @@ features {
 ```
 
 - `planter` connects sessions launched through `wt go` to the optional
-  Planter overlay. Claude and interactive Codex sessions share tab position;
-  Codex uses `planter-codex-bridge` when available. A missing or failed
-  bridge falls back to direct Codex. Explicit `--remote` endpoints,
+  Planter overlay. Pi, Claude, and interactive Codex sessions share tab
+  position. Codex uses `planter-codex-bridge` when available. A missing or
+  failed bridge falls back to direct Codex. Explicit `--remote` endpoints,
   administrative Codex commands, and direct `wt llm codex` remain direct.
   Eligible sessions receive `PLANTER_COLOR`, `PLANTER_LABEL`, and
   `PLANTER_TAB_INDEX`. The bridge preserves `PLANTER_STATE_DIR` or
   `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background through an OSC 11 escape
-  sequence. It applies to Codex and Claude sessions launched through `wt go`.
+  sequence. It applies to Pi, Claude, and Codex sessions launched through
+  `wt go`.
 
 Each hook is either a wt `builtin` or a `cmd`. Commands receive
 `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, and `WT_COLOR_HEX`, and wt stops

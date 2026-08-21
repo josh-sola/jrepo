@@ -1,11 +1,8 @@
 import AppKit
 
 enum PlantState: String, CaseIterable {
-    /// Claude is doing something, including waiting on a subagent.
     case working
-    /// Claude finished its turn: your move.
     case waiting
-    /// Claude is blocked on a permission prompt or has gone quiet waiting for input.
     case attention
 
     init(raw: String) {
@@ -14,7 +11,7 @@ enum PlantState: String, CaseIterable {
 }
 
 struct Plant {
-    /// Provider-qualified so Claude and Codex session IDs cannot collide.
+    /// Provider-qualified so session IDs from different agents cannot collide.
     var sessionID: String
     var provider: String = "claude"
     var rawSessionID: String = ""
@@ -256,8 +253,8 @@ enum Store {
             records.append((identity, provider, rawSessionID, json))
         }
 
-        // Codex records do not exist in Claude's session registry. Avoiding this
-        // lookup for a Codex-only row keeps a missing Claude installation quiet.
+        // Non-Claude records do not exist in Claude's session registry. Avoiding
+        // this lookup for their rows keeps a missing Claude installation quiet.
         let sessions = records.contains { $0.provider == "claude" }
             ? BackgroundSessions.current() : BackgroundSessions.Snapshot()
 

@@ -1,6 +1,6 @@
 ---
 name: wt
-description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, finding an existing one, checking background provisioning, or opening a Codex or Claude session. Read before creating a worktree by hand with `git worktree add`.
+description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, finding an existing one, checking background provisioning, or opening a Pi, Claude, or Codex session. Read before creating a worktree by hand with `git worktree add`.
 ---
 
 # wt
@@ -15,9 +15,9 @@ commands only. Run `wt help -r` to inspect the full public hierarchy and
 |---|---|
 | `wt repo adopt <REPO> <PATH> [--branch-prefix <PREFIX>] [--redetect]` | Register an existing clone as a repository base. |
 | `wt repo sync [REPO] [--stack]` | Fetch and fast-forward bases. With no repo, sync every registered base. |
-| `wt repo lift [REPO] --name "<SUMMARY>" [--branch <BRANCH>] [--profile <PROFILE,...>] [--codex\|--claude] [-- <AGENT_ARGS>...]` | Move tracked and untracked base edits into a fresh tree. |
+| `wt repo lift [REPO] --name "<SUMMARY>" [--branch <BRANCH>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Move tracked and untracked base edits into a fresh tree. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt repo spare [--repo <REPO>] [--json]` | Show hot-spare status. Use `wt repo spare refresh` or `wt repo spare drop` for actions. |
-| `wt tree new <REPO> --name "<SUMMARY>" [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--codex\|--claude] [-- <AGENT_ARGS>...]` | Create a tree and start provisioning. A ready hot spare may make this immediate. |
+| `wt tree new <REPO> --name "<SUMMARY>" [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Create a tree and start provisioning. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt tree ls [--repo <REPO>] [--all] [--json]` | List registered trees. |
 | `wt tree path <TREE>` | Print a tree's absolute path. |
 | `wt tree name [--path <PATH>]` | Print a tree name for a path, or nothing outside a registered tree. |
@@ -29,9 +29,10 @@ commands only. Run `wt help -r` to inspect the full public hierarchy and
 | `wt gt restack [TREE_OR_BRANCH] [--dry-run]` | Restack a Graphite stack across its trees. |
 | `wt upkeep gc [--repo <REPO>] [--dry-run]` | Reap safe unused trees. |
 | `wt upkeep doctor [--fix]` | Reconcile registry entries with Git worktree metadata. |
-| `wt llm claude [TREE_OR_REPO] [-- <CLAUDE_ARGS>...]` | Run Claude with its working directory set. |
-| `wt llm codex [TREE_OR_REPO] [-- <CODEX_ARGS>...]` | Run Codex with its working directory set. |
-| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--claude] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo`, or open the picker with no tree. |
+| `wt llm pi [TREE_OR_REPO] [-- <PI_ARGS>...]` | Run Pi with its working directory set and pass arguments through unchanged. |
+| `wt llm claude [TREE_OR_REPO] [-- <CLAUDE_ARGS>...]` | Run Claude with its working directory set and pass arguments through unchanged. |
+| `wt llm codex [TREE_OR_REPO] [-- <CODEX_ARGS>...]` | Run Codex with its working directory set and pass arguments through unchanged. |
+| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo`, or open the picker with no tree. Pi is the default. |
 | `wt cd <TREE>` | Change the interactive shell directory through the installed shell function. |
 
 `<TREE>` means a tree name, unique name substring, UUID or UUID prefix, or
@@ -49,6 +50,9 @@ never guess.
   when inspecting them.
 - `wt cd` needs the installed zsh integration. `wt cd --help` is served by
   the binary. `wt go` is an ordinary binary command and works without that
-  shell function.
+  shell function. It adds `-n <label>` before Pi arguments; a later `-n`
+  from the caller takes precedence.
+- Arguments after `--` on `wt tree new` or `wt repo lift` require one of
+  `--pi`, `--claude`, or `--codex`.
 - Legacy flat routes remain hidden for compatibility. Do not use them in new
   instructions, scripts, or examples.

@@ -1,8 +1,5 @@
 import AppKit
 
-// A row of potted pixel plants floating above every other window: one per Claude
-// Code session, blooming while Claude works and wilting when it needs you.
-
 // MARK: - Layout
 
 /// A working plant's level is its subagent count; a waiting or alerting one's is
