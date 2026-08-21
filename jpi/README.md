@@ -39,6 +39,18 @@ just jpi-check
 Start Pi and run `/jpi`. An info notification that says `jpi is loaded.`
 confirms that the extension loaded.
 
+## Terminal tab title extension
+
+`jpi/extensions/jpi-title/` owns the terminal tab title in TUI sessions. The
+title is `<activity indicator> <session indicator>`. It shows `⏹` while idle.
+While the main Pi agent, a pi-subagents agent, or a pi-background-tasks task is
+running, it advances every 80 ms through `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`.
+
+The session indicator uses the Pi session name when set, then the linked `wt`
+tree name, then the current directory name. The pi-subagents and
+pi-background-tasks integrations use their public event-bus APIs and remain
+inactive when those optional extensions are absent.
+
 ## Status footer extension
 
 `jpi/extensions/jpi-status/` replaces Pi's built-in footer in TUI sessions.
