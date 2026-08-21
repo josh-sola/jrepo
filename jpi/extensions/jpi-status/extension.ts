@@ -1,3 +1,10 @@
+import {
+  createDefaultStatusLineConfig,
+  getStatusLineConfigPath,
+  loadStatusLineConfig,
+  type ReadTextFile,
+  type StatusLineConfig,
+} from "./config.ts";
 import { loadRepositoryMetadata, type ExecCommand, type RepositoryMetadata } from "./data.ts";
 import { renderFooter, type WidthHelpers } from "./render.ts";
 
@@ -29,8 +36,13 @@ type Scheduler = {
 };
 
 export type StatusExtension = {
-  onSessionStart(event: unknown, context: FooterContext): void;
+  onSessionStart(event: unknown, context: FooterContext): Promise<void>;
   onCommand(args: string, context: FooterContext): Promise<void>;
+};
+
+export type StatusConfigDependencies = {
+  configPath?: string;
+  readTextFile?: ReadTextFile;
 };
 
 type ControllerOptions = {
@@ -114,25 +126,49 @@ export function createStatusExtension(
   exec: ExecCommand,
   helpers: WidthHelpers,
   scheduler: Scheduler = { setInterval, clearInterval },
+  configDependencies: StatusConfigDependencies = {},
 ): StatusExtension {
+  const configPath = configDependencies.configPath ?? getStatusLineConfigPath();
   let activeController: RepositoryMetadataController | undefined;
+  let statusLineConfig: StatusLineConfig = createDefaultStatusLineConfig();
+  let requestFooterRender: (() => void) | undefined;
+
+  const reloadConfig = async (context: FooterContext, announce: boolean): Promise<void> => {
+    const result = await loadStatusLineConfig(configPath, configDependencies.readTextFile);
+    statusLineConfig = result.config;
+    if (announce) requestFooterRender?.();
+
+    if (result.problem) {
+      context.ui.notify(
+        `Could not load jpi-status config at ${configPath}: ${result.problem}. Using the default config.`,
+        "warning",
+      );
+      return;
+    }
+
+    if (announce) context.ui.notify("jpi-status config reloaded.", "info");
+  };
 
   return {
-    onSessionStart(_event, context) {
+    async onSessionStart(_event, context) {
       if (context.mode !== "tui") return;
+      await reloadConfig(context, false);
       context.ui.setFooter((tui, _theme, footerData) => {
+        const renderFooterNow = () => tui.requestRender();
         let controller: RepositoryMetadataController;
         controller = new RepositoryMetadataController({
           exec,
           cwd: context.cwd,
-          requestRender: () => tui.requestRender(),
+          requestRender: renderFooterNow,
           onBranchChange: (callback) => footerData.onBranchChange(callback),
           scheduler,
           onDispose: () => {
             if (activeController === controller) activeController = undefined;
+            if (requestFooterRender === renderFooterNow) requestFooterRender = undefined;
           },
         });
         activeController = controller;
+        requestFooterRender = renderFooterNow;
         controller.start();
 
         return {
@@ -144,6 +180,7 @@ export function createStatusExtension(
               contextPercent: percent === null ? undefined : percent,
               repository: controller.metadata,
               statuses: footerData.getExtensionStatuses(),
+              config: statusLineConfig,
             }, width, helpers);
           },
           dispose: () => controller.dispose(),
@@ -169,7 +206,11 @@ export function createStatusExtension(
         context.ui.notify("jpi-status metadata refresh requested.", "info");
         return;
       }
-      context.ui.notify("Usage: /jpi-status [status|refresh]", "warning");
+      if (action === "reload") {
+        await reloadConfig(context, true);
+        return;
+      }
+      context.ui.notify("Usage: /jpi-status [status|refresh|reload]", "warning");
     },
   };
 }
