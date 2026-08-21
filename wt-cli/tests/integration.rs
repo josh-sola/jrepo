@@ -1309,74 +1309,6 @@ fn launch_claude_keeps_its_decoration_and_planter() {
 }
 
 #[test]
-fn launch_claudex_uses_claude_decoration_without_the_codex_bridge() {
-    let tmp = unique_dir("launch-claudex");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-    init_repo(&root, "myrepo", &base);
-    assert_success(
-        &run_wt(&root, &["new", "myrepo", "--name", "claudex target"]),
-        "new",
-    );
-    assert_success(&run_wt(&root, &["wait", "claudex target"]), "wait");
-    let tree = PathBuf::from(
-        String::from_utf8_lossy(&run_wt(&root, &["path", "claudex target"]).stdout).trim(),
-    );
-
-    let planter_sentinel = tmp.join("planter-ran");
-    let terminal_sentinel = tmp.join("terminal-ran");
-    std::fs::write(
-        config_path_for(&root),
-        launch_features_config(&planter_sentinel, &terminal_sentinel),
-    )
-    .unwrap();
-    let record = tmp.join("claudex-record");
-    let bridge_record = tmp.join("bridge-record");
-    let bin_dir = write_fake_agent(&tmp, "claudex", &record);
-    write_fake_bridge(&bin_dir, &bridge_record, "unix:///tmp/wt-test.sock");
-
-    let out = run_wt_with_path(
-        &root,
-        &base,
-        &bin_dir,
-        &[
-            "launch",
-            "claudex target",
-            "myrepo",
-            "--claudex",
-            "--",
-            "--model",
-            "sol",
-        ],
-    );
-    assert_success(&out, "launch claudex");
-
-    let record = std::fs::read_to_string(&record).unwrap();
-    assert!(
-        record.contains(&format!("cwd={}", tree.display())),
-        "{record}"
-    );
-    assert!(
-        record.contains("arg=-n\narg=claudex target\narg=--model\narg=sol\narg=/color "),
-        "{record}"
-    );
-    assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
-    assert!(record.contains("PLANTER_LABEL=claudex target"), "{record}");
-    assert!(
-        planter_sentinel.exists(),
-        "Claudex should run planter hooks"
-    );
-    assert!(
-        terminal_sentinel.exists(),
-        "Claudex should retain terminal hooks"
-    );
-    assert!(
-        !bridge_record.exists(),
-        "Claudex must not start the Codex bridge"
-    );
-}
-
-#[test]
 fn name_matches_longest_registered_path_prefix() {
     let tmp = unique_dir("name");
     let base = fixture_repo(&tmp);
@@ -2556,72 +2488,13 @@ fn codex_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
 }
 
 #[test]
-fn claudex_resolves_a_tree_and_forwards_raw_arguments() {
-    let tmp = unique_dir("claudex-target");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-    init_repo(&root, "myrepo", &base);
-    let new = run_wt(&root, &["new", "myrepo", "--name", "claudex target"]);
-    assert_success(&new, "new");
-    assert_success(&run_wt(&root, &["wait", "claudex target"]), "wait");
-    let tree = PathBuf::from(
-        String::from_utf8_lossy(&new.stdout)
-            .lines()
-            .last()
-            .unwrap()
-            .trim(),
-    );
-
-    let record = tmp.join("claudex-record");
-    let bin_dir = write_fake_agent(&tmp, "claudex", &record);
-    assert_success(
-        &run_wt_with_path(
-            &root,
-            &base,
-            &bin_dir,
-            &["claudex", "claudex target", "--", "--model", "sol"],
-        ),
-        "claudex selector",
-    );
-    let record = std::fs::read_to_string(&record).unwrap();
-    assert!(
-        record.contains(&format!("cwd={}", tree.display())),
-        "{record}"
-    );
-    assert!(record.contains("arg=--model\narg=sol"), "{record}");
-}
-
-#[test]
-fn claudex_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
-    let tmp = unique_dir("claudex-base");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-    init_repo(&root, "myrepo", &base);
-
-    let out = run_wt_without_agents_on_path(&root, &["claudex", "myrepo"]);
-    assert!(
-        !out.status.success(),
-        "expected failure with claudex off PATH"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("base is for reading"), "{stderr}");
-    assert!(stderr.contains("`claudex` is not on PATH"), "{stderr}");
-    assert!(stderr.contains("`wt claudex`"), "{stderr}");
-}
-
-#[test]
 fn new_and_adopt_reject_conflicting_agent_flags() {
     let tmp = unique_dir("agent-flag-conflict");
     let root = tmp.join("wt-root");
 
     for args in [
         vec!["new", "myrepo", "--name", "target", "--codex", "--claude"],
-        vec!["new", "myrepo", "--name", "target", "--codex", "--claudex"],
-        vec!["new", "myrepo", "--name", "target", "--claude", "--claudex"],
         vec!["adopt", "--name", "target", "--codex", "--claude"],
-        vec!["adopt", "--name", "target", "--codex", "--claudex"],
-        vec!["adopt", "--name", "target", "--claude", "--claudex"],
-        vec!["launch", "--claude", "--claudex"],
     ] {
         let out = run_wt(&root, &args);
         assert!(
@@ -2693,73 +2566,6 @@ fn new_and_adopt_open_the_selected_agent_with_raw_arguments() {
     assert!(
         !record.contains("arg=-n") && !record.contains("arg=/color"),
         "{record}"
-    );
-}
-
-#[test]
-fn new_and_adopt_open_claudex_with_raw_arguments() {
-    let tmp = unique_dir("new-adopt-claudex");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-    init_repo(&root, "myrepo", &base);
-
-    let record = tmp.join("claudex-record");
-    let bin_dir = write_fake_agent(&tmp, "claudex", &record);
-    assert_success(
-        &run_wt_with_path(
-            &root,
-            &base,
-            &bin_dir,
-            &[
-                "new",
-                "myrepo",
-                "--name",
-                "claudex new",
-                "--claudex",
-                "--",
-                "--model",
-                "sol",
-            ],
-        ),
-        "new --claudex",
-    );
-    let record_text = std::fs::read_to_string(&record).unwrap();
-    assert!(
-        record_text.contains("arg=--model\narg=sol"),
-        "{record_text}"
-    );
-    assert!(
-        !record_text.contains("arg=-n") && !record_text.contains("arg=/color"),
-        "{record_text}"
-    );
-
-    std::fs::write(base.join("adopt-me.txt"), "uncommitted\n").unwrap();
-    assert_success(
-        &run_wt_with_path(
-            &root,
-            &base,
-            &bin_dir,
-            &[
-                "adopt",
-                "myrepo",
-                "--name",
-                "claudex adopt",
-                "--claudex",
-                "--",
-                "--model",
-                "terra",
-            ],
-        ),
-        "adopt --claudex",
-    );
-    let record_text = std::fs::read_to_string(&record).unwrap();
-    assert!(
-        record_text.contains("arg=--model\narg=terra"),
-        "{record_text}"
-    );
-    assert!(
-        !record_text.contains("arg=-n") && !record_text.contains("arg=/color"),
-        "{record_text}"
     );
 }
 
