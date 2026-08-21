@@ -39,6 +39,30 @@ just jpi-check
 Start Pi and run `/jpi`. An info notification that says `jpi is loaded.`
 confirms that the extension loaded.
 
+## Status footer extension
+
+`jpi/extensions/jpi-status/` replaces Pi's built-in footer in TUI sessions. It
+shows:
+
+- the active model and context-window percentage;
+- repository, linked `wt` tree, shortened branch, Graphite pull request, and
+  stack position when available;
+- statuses published by other extensions through `setStatus()`.
+
+The extension refreshes Git and `wt` metadata at startup, after branch changes,
+and every 10 seconds. Missing Git, `wt`, Graphite, or GitHub-origin data removes
+only the affected segments. It does not show token totals, cost, thinking level,
+or provider rate limits.
+
+### Commands
+
+- `/jpi-status status` reports whether this footer component is active.
+- `/jpi-status refresh` requests an immediate repository metadata refresh.
+
+Pi has one custom-footer slot. Another extension that calls `setFooter()` later
+replaces this footer. Existing extension statuses remain registered, but the
+replacement footer decides whether to display them.
+
 ## Auto-review extension
 
 `jpi/extensions/auto-review/` adds an auto-review gate for tool calls.
