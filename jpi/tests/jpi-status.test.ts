@@ -409,8 +409,8 @@ test("configured local components render in line and component order", () => {
   }, 120, widthHelpers);
 
   assert.deepEqual(lines.map(plain), [
-    "stack 2/4 · #42 draft · feature",
-    "Status footer · jrepo · ctx 51% · GPT-5.6 Sol",
+    " stack 2/4 · #42 draft · feature",
+    " Status footer · jrepo · ctx 51% · GPT-5.6 Sol",
   ]);
 });
 
@@ -434,8 +434,8 @@ test("extension IDs and slots follow configured filtering and duplication", () =
     ], ["auto-review"]),
   }, 120, widthHelpers);
   assert.deepEqual(filtered.map(plain), [
-    "review on · z ready",
-    "z ready · review on",
+    " review on · z ready",
+    " z ready · review on",
   ]);
 
   const duplicated = renderFooter({
@@ -443,7 +443,7 @@ test("extension IDs and slots follow configured filtering and duplication", () =
     config: statusLineConfig([["auto-review", "@jpi/slot", "auto-review"]]),
   }, 120, widthHelpers);
   assert.deepEqual(duplicated.map(plain), [
-    "review on · review on · z ready · review on",
+    " review on · review on · z ready · review on",
   ]);
   assert.deepEqual(renderFooter({
     ...snapshot,
@@ -451,7 +451,7 @@ test("extension IDs and slots follow configured filtering and duplication", () =
   }, 120, widthHelpers), []);
 });
 
-test("every rendered footer line respects narrow widths", () => {
+test("every rendered footer line starts with a space and respects narrow widths", () => {
   const lines = renderFooter({
     modelName: "A very long model display name",
     contextPercent: 83,
@@ -467,7 +467,14 @@ test("every rendered footer line respects narrow widths", () => {
   }, 12, widthHelpers);
 
   assert.equal(lines.length, 2);
+  assert.ok(lines.every((line) => plain(line).startsWith(" ")));
   assert.ok(lines.every((line) => widthHelpers.visibleWidth(line) <= 12));
+  assert.deepEqual(renderFooter({
+    modelName: "Model",
+    repository: {},
+    statuses: new Map(),
+    config: statusLineConfig([["@jpi/model"]]),
+  }, 0, widthHelpers), []);
 });
 
 test("custom outputs render by occurrence with sanitization, joining, omission, and width fitting", () => {
@@ -488,11 +495,11 @@ test("custom outputs render by occurrence with sanitization, joining, omission, 
   };
 
   assert.deepEqual(renderFooter(snapshot, 80, widthHelpers).map(plain), [
-    "first value · extension value",
-    "a very long custom value",
+    " first value · extension value",
+    " a very long custom value",
   ]);
   assert.ok(renderFooter(snapshot, 9, widthHelpers).every(
-    (line) => widthHelpers.visibleWidth(line) <= 9,
+    (line) => plain(line).startsWith(" ") && widthHelpers.visibleWidth(line) <= 9,
   ));
 });
 
@@ -696,7 +703,7 @@ test("the extension loads the status layout before installing the footer", async
     ]),
     onBranchChange: () => () => {},
   });
-  assert.deepEqual(component.render(80).map(plain), ["syncing · Test model"]);
+  assert.deepEqual(component.render(80).map(plain), [" syncing · Test model"]);
   component.dispose();
 });
 
@@ -743,12 +750,12 @@ test("reloading status config rerenders valid and fail-default changes", async (
   });
   await new Promise(setImmediate);
   renderRequests = 0;
-  assert.deepEqual(component.render(80).map(plain), ["Test model", "shown"]);
+  assert.deepEqual(component.render(80).map(plain), [" Test model", " shown"]);
 
   configText = '{"format":[["visible","@jpi/model"]],"disabledStatuses":[]}';
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 1);
-  assert.deepEqual(component.render(80).map(plain), ["shown · Test model"]);
+  assert.deepEqual(component.render(80).map(plain), [" shown · Test model"]);
   assert.deepEqual(notifications.at(-1), {
     message: "jpi-status config reloaded.",
     level: "info",
@@ -757,12 +764,12 @@ test("reloading status config rerenders valid and fail-default changes", async (
   configText = '{"format":[["@jpi/model"],["@jpi/slot"]],"disabledStatuses":["hidden"]}';
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 2);
-  assert.deepEqual(component.render(80).map(plain), ["Test model", "shown"]);
+  assert.deepEqual(component.render(80).map(plain), [" Test model", " shown"]);
 
   configText = "{";
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 3);
-  assert.deepEqual(component.render(80).map(plain), ["Test model", "hidden · shown"]);
+  assert.deepEqual(component.render(80).map(plain), [" Test model", " hidden · shown"]);
   assert.equal(notifications.at(-1).level, "warning");
   assert.match(notifications.at(-1).message, /\/config\/status-line\.json.*invalid JSON.*default config/);
   component.dispose();
@@ -825,7 +832,7 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
   assert.equal(oldSignal.aborted, true);
   assert.equal(newCall.command, "/config/new");
   assert.deepEqual(JSON.parse(newCall.args[0]).statuses, { disabled: "included in payload" });
-  assert.deepEqual(component.render(80).map(plain), ["new output"]);
+  assert.deepEqual(component.render(80).map(plain), [" new output"]);
   assert.ok(renderRequests >= 2);
   assert.deepEqual(notifications.at(-1), {
     message: "jpi-status config reloaded.",
@@ -900,8 +907,8 @@ test("the extension installs only in TUI mode and cleans up component resources"
   });
   await new Promise(setImmediate);
   assert.deepEqual(component.render(80).map(plain), [
-    "Test model · ctx 12% · repo · main",
-    "review: enabled",
+    " Test model · ctx 12% · repo · main",
+    " review: enabled",
   ]);
   assert.equal(typeof branchCallback, "function");
 
