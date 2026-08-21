@@ -76,8 +76,8 @@ Its layout is configured through
 ```
 
 Each inner `format` array is one line. The footer omits unavailable components
-and lines that become empty. It joins rendered components with ` · `. The local
-component IDs are:
+and lines that become empty. Each rendered line starts with one space, and the
+footer joins rendered components with ` · `. The local component IDs are:
 
 | ID | Content |
 | --- | --- |

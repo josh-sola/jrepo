@@ -10,6 +10,7 @@ const DIM = `${ESC}2m`;
 const UNDERLINE = `${ESC}4m`;
 const UNDERLINE_OFF = `${ESC}24m`;
 const SEPARATOR = `${DIM} · ${RESET}`;
+const LINE_PREFIX = " ";
 
 export type WidthHelpers = {
   visibleWidth(text: string): number;
@@ -149,10 +150,15 @@ function resolveComponent(
   return formatted ? [formatted] : [];
 }
 
-function fitLine(line: string, width: number, helpers: WidthHelpers): string {
+function fitLine(line: string, width: number, helpers: WidthHelpers): string | undefined {
   const safeWidth = Math.max(0, Math.floor(width));
-  if (helpers.visibleWidth(line) <= safeWidth) return line;
-  return helpers.truncateToWidth(line, safeWidth, `${DIM}...${RESET}`);
+  const prefixWidth = helpers.visibleWidth(LINE_PREFIX);
+  if (safeWidth < prefixWidth) return undefined;
+  const contentWidth = safeWidth - prefixWidth;
+  const content = helpers.visibleWidth(line) <= contentWidth
+    ? line
+    : helpers.truncateToWidth(line, contentWidth, `${DIM}...${RESET}`);
+  return `${LINE_PREFIX}${content}`;
 }
 
 export function renderFooter(snapshot: FooterSnapshot, width: number, helpers: WidthHelpers): string[] {
@@ -163,7 +169,9 @@ export function renderFooter(snapshot: FooterSnapshot, width: number, helpers: W
       resolveComponent(componentId, lineIndex, componentIndex, snapshot)
     ));
     const line = joinSegments(segments);
-    if (line) lines.push(fitLine(line, width, helpers));
+    if (!line) continue;
+    const fittedLine = fitLine(line, width, helpers);
+    if (fittedLine !== undefined) lines.push(fittedLine);
   }
   return lines;
 }
