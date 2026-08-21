@@ -6,8 +6,8 @@ import {
   displayBranch,
   loadRepositoryMetadata,
   parseStackMetadata,
-  posixCksum,
   semanticallyEqual,
+  stringHash,
   shortenBranch,
   worktreeColor,
 } from "../extensions/jpi-status/data.ts";
@@ -54,10 +54,10 @@ test("branch display matches the Claude status line and deduplicates wt names", 
   assert.equal(displayBranch("josh/different-branch", "Pi status line"), "different-branch");
 });
 
-test("worktree colors use the POSIX cksum-compatible palette", () => {
+test("worktree colors use a stable string hash", () => {
   const id = "01a024cd-9793-7761-872b-1116038f4faa";
-  assert.equal(posixCksum(id), 375630404);
-  assert.equal(worktreeColor(id), 226);
+  assert.equal(stringHash(id), 2159015151);
+  assert.equal(worktreeColor(id), 159);
   assert.equal(worktreeColor(id), worktreeColor(id));
 });
 

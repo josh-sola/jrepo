@@ -56,40 +56,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function crcTable(): Uint32Array {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < table.length; index += 1) {
-    let crc = index << 24;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc & 0x80000000) !== 0 ? ((crc << 1) ^ 0x04c11db7) : crc << 1;
-    }
-    table[index] = crc >>> 0;
+export function stringHash(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (Math.imul(hash, 31) + value.charCodeAt(index)) >>> 0;
   }
-  return table;
-}
-
-const POSIX_CKSUM_TABLE = crcTable();
-
-function updateCksum(crc: number, byte: number): number {
-  const index = ((crc >>> 24) ^ byte) & 0xff;
-  return (((crc << 8) >>> 0) ^ POSIX_CKSUM_TABLE[index]!) >>> 0;
-}
-
-export function posixCksum(value: string): number {
-  const bytes = new TextEncoder().encode(value);
-  let crc = 0;
-  for (const byte of bytes) crc = updateCksum(crc, byte);
-
-  let length = bytes.length;
-  while (length > 0) {
-    crc = updateCksum(crc, length & 0xff);
-    length = Math.floor(length / 256);
-  }
-  return (~crc) >>> 0;
+  return hash;
 }
 
 export function worktreeColor(identifier: string): number {
-  return WORKTREE_PALETTE[posixCksum(identifier) % WORKTREE_PALETTE.length]!;
+  return WORKTREE_PALETTE[stringHash(identifier) % WORKTREE_PALETTE.length]!;
 }
 
 export function shortenBranch(branch: string): string {
