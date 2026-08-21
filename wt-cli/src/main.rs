@@ -71,7 +71,7 @@ enum Command {
     },
     /// Open a session in a tree, creating it when requested.
     #[command(
-        long_about = "Open Codex in an existing tree or create one when no match is found with --repo. Claude is selected with --claude.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository.\n\nExamples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go -- --model gpt-5"
+        long_about = "Open Pi in an existing tree or create one when no match is found with --repo. Select another agent with --claude or --codex.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository.\n\nExamples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go --codex -- --model gpt-5"
     )]
     Go(GoArgs),
     /// Change directory to a tree through installed shell integration.
@@ -104,8 +104,8 @@ enum Command {
         #[arg(long)]
         path: Option<PathBuf>,
     },
-    /// Prints this tab's 1-based rank among the Ghostty tabs in the
-    /// caller's own window that are running Claude Code.
+    /// Prints this tab's 1-based rank among planted agent tabs in the
+    /// caller's own Ghostty window.
     #[command(name = "__tab-index", hide = true)]
     TabIndex,
     /// Prints a tree's details for the `wt go` fzf preview window.
@@ -160,8 +160,10 @@ enum RepoCommand {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("agent").args(["codex", "claude"])))]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
 struct LiftArgs {
+    #[arg(long, help = "Open Pi after provisioning.")]
+    pi: bool,
     #[arg(
         value_name = "REPO",
         help = "Repository whose base to lift. Omit only from inside that base."
@@ -307,8 +309,10 @@ enum TreeCommand {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("agent").args(["codex", "claude"])))]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
 struct NewArgs {
+    #[arg(long, help = "Open Pi after provisioning.")]
+    pi: bool,
     #[arg(
         value_name = "REPO",
         help = "Registered repository in which to create the tree."
@@ -430,6 +434,8 @@ enum UpkeepCommand {
 #[derive(Subcommand)]
 #[command(disable_help_subcommand = true)]
 enum LlmCommand {
+    /// Run Pi with its working directory set.
+    Pi(AgentArgs),
     /// Run Claude with its working directory set.
     Claude(AgentArgs),
     /// Run Codex with its working directory set.
@@ -452,6 +458,7 @@ struct AgentArgs {
 }
 
 #[derive(Args)]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
 struct GoArgs {
     #[arg(
         value_name = "TREE",
@@ -483,7 +490,11 @@ struct GoArgs {
         help = "Comma-separated provisioning profiles for a newly created tree."
     )]
     profile: Option<Vec<String>>,
-    #[arg(long, help = "Open Claude instead of Codex.")]
+    #[arg(long, help = "Open Pi (default).")]
+    pi: bool,
+    #[arg(long, help = "Open Codex instead of Pi.")]
+    codex: bool,
+    #[arg(long, help = "Open Claude instead of Pi.")]
     claude: bool,
     #[arg(
         last = true,
@@ -571,7 +582,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             ),
             RepoCommand::Sync { repo, stack } => cmd_sync(root, config_path, repo, stack),
             RepoCommand::Lift(args) => {
-                reject_unselected_agent_args(args.codex, args.claude, &args.args)?;
+                reject_unselected_agent_args(args.pi, args.codex, args.claude, &args.args)?;
                 let path = tree::adopt(
                     root,
                     config_path,
@@ -585,7 +596,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 open_if_requested(
                     root,
                     &path,
-                    Agent::from_flags(args.codex, args.claude),
+                    Agent::from_flags(args.pi, args.codex, args.claude),
                     &args.args,
                 )
             }
@@ -608,7 +619,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
         },
         Command::Tree { command } => match command {
             TreeCommand::New(args) => {
-                reject_unselected_agent_args(args.codex, args.claude, &args.args)?;
+                reject_unselected_agent_args(args.pi, args.codex, args.claude, &args.args)?;
                 let path = tree::new_tree(
                     root,
                     config_path,
@@ -623,7 +634,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 open_if_requested(
                     root,
                     &path,
-                    Agent::from_flags(args.codex, args.claude),
+                    Agent::from_flags(args.pi, args.codex, args.claude),
                     &args.args,
                 )
             }
@@ -668,6 +679,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             UpkeepCommand::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
         },
         Command::Llm { command } => match command {
+            LlmCommand::Pi(args) => agent::exec_target(root, Agent::Pi, args.target, &args.args),
             LlmCommand::Claude(args) => {
                 agent::exec_target(root, Agent::Claude, args.target, &args.args)
             }
@@ -685,11 +697,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 onto: args.onto,
                 profile: args.profile,
             },
-            if args.claude {
-                Agent::Claude
-            } else {
-                Agent::Codex
-            },
+            Agent::from_flags(args.pi, args.codex, args.claude).unwrap_or(Agent::Pi),
             &args.args,
         ),
         Command::Cd { tree } => bail!(
@@ -714,9 +722,14 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
     }
 }
 
-fn reject_unselected_agent_args(codex: bool, claude: bool, args: &[String]) -> Result<()> {
-    if !args.is_empty() && !codex && !claude {
-        bail!("arguments after -- require --codex or --claude");
+fn reject_unselected_agent_args(
+    pi: bool,
+    codex: bool,
+    claude: bool,
+    args: &[String],
+) -> Result<()> {
+    if !args.is_empty() && !pi && !codex && !claude {
+        bail!("arguments after -- require --pi, --codex, or --claude");
     }
     Ok(())
 }
@@ -1212,7 +1225,7 @@ fn cmd_launch(
         .and_then(|t| t.set_background.as_ref());
 
     let planter_enabled = config.features.planter.is_some();
-    let planter_eligible = agent == Agent::Claude || agent::interactive_codex_args(args);
+    let planter_eligible = agent.planter_eligible(args);
     let mut env = Vec::new();
     let tab_index_str;
 
@@ -1242,16 +1255,24 @@ fn cmd_launch(
 
     features::set_background(set_background_hook, hex, &ctx);
 
-    if agent == Agent::Claude {
-        return agent::exec_at(
+    match agent {
+        Agent::Pi => agent::exec_at(agent, &tree_path, &pi_launch_args(&label, args), &env),
+        Agent::Claude => agent::exec_at(
             agent,
             &tree_path,
             &claude_launch_args(&label, args, color),
             &env,
-        );
+        ),
+        Agent::Codex => {
+            agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
+        }
     }
+}
 
-    agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
+fn pi_launch_args(name: &str, passthrough: &[String]) -> Vec<String> {
+    let mut args = vec!["-n".to_string(), name.to_string()];
+    args.extend(passthrough.iter().cloned());
+    args
 }
 
 /// Claude takes the color as a slash-command prompt: the `--agent-color`
@@ -2155,6 +2176,12 @@ mod tests {
     }
 
     #[test]
+    fn pi_launch_args_puts_generated_name_before_passthrough() {
+        let args = pi_launch_args("fix login", &["-n".to_string(), "caller name".to_string()]);
+        assert_eq!(args, vec!["-n", "fix login", "-n", "caller name"]);
+    }
+
+    #[test]
     fn claude_launch_args_orders_name_flag_passthrough_then_color_last() {
         let args = claude_launch_args(
             "fix login",
@@ -2358,6 +2385,7 @@ mod tests {
         assert!(output.contains("│   └── spare -- Show or manage a repository's hot spare"));
         assert!(output.contains("│       ├── refresh"));
         assert!(output.contains("├── tree -- Create, inspect, and remove worktrees"));
+        assert!(output.contains("│   ├── pi -- Run Pi with its working directory set"));
         assert!(
             output.contains(
                 "├── cd -- Change directory to a tree through installed shell integration"
@@ -2467,6 +2495,12 @@ mod tests {
                 "wt", "tree", "new", "repo", "--name", "tree", "--", "--model", "x"
             ])
             .is_err()
+        );
+        assert!(
+            parse(&[
+                "wt", "tree", "new", "repo", "--name", "tree", "--pi", "--", "--model", "x"
+            ])
+            .is_ok()
         );
         assert!(
             parse(&[

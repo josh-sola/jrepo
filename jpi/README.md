@@ -37,7 +37,30 @@ just jpi-check
 ```
 
 Start Pi and run `/jpi`. An info notification that says `jpi is loaded.`
-confirms that the extension loaded.
+confirms that the extension loaded. The package also exposes the existing `wt`
+skill from `wt-cli/plugin/skills`; installation does not copy or move that skill.
+
+## Planter extension
+
+`jpi/extensions/jpi-planter/` adds interactive Pi TUI sessions to the Planter
+overlay. Install Planter separately, then install this package. Pi discovers the
+extension through the package's `jpi/extensions` directory. JSON, print, and RPC
+sessions do not create state records.
+
+The extension writes Planter's provider-neutral records under
+`${PLANTER_STATE_DIR:-${CLAUDE_PLANTER_DIR:-~/.claude/planter}}`. It tracks the
+main Pi run, optional pi-subagents work, and optional pi-background-tasks work.
+The `PLANTER_COLOR`, `PLANTER_LABEL`, and `PLANTER_TAB_INDEX` values set by `wt`
+apply to Pi in the same way as other Planter providers. Direct Pi sessions use
+Planter's normal automatic defaults.
+
+Optional integrations communicate through public event-bus protocols and stay
+inactive when their packages are absent. Background-task starts have no
+broadcast, so the extension polls once per second and may take up to one second
+to show new work. A missing pi-subagents completion expires after 30 minutes.
+The ask-user-question protocol marks its questionnaire as needing attention,
+but Pi has no general event for every permission or input prompt. Prompts from
+other integrations therefore remain in their derived working or waiting state.
 
 ## Terminal tab title extension
 

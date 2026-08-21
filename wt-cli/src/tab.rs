@@ -184,7 +184,7 @@ fn parse_tty_ppid(text: &str) -> (String, String) {
     )
 }
 
-/// Every tty running Claude or the Planter Codex bridge, matched by exact
+/// Every tty running Pi, Claude, or the Planter Codex bridge, matched by exact
 /// process basename so unplanted Codex sessions do not affect tab ranks.
 fn planter_ttys() -> Result<Vec<String>> {
     let output = Command::new("ps")
@@ -206,7 +206,7 @@ fn parse_planter_ttys(text: &str) -> Vec<String> {
             continue;
         }
         let basename = comm.rsplit('/').next().unwrap_or(comm);
-        if matches!(basename, "claude" | "planter-codex-bridge") {
+        if matches!(basename, "pi" | "claude" | "planter-codex-bridge") {
             let dev = format!("/dev/{tty}");
             if !ttys.contains(&dev) {
                 ttys.push(dev);
@@ -330,13 +330,14 @@ mod tests {
 
     #[test]
     fn parse_planter_ttys_matches_exact_session_processes_and_deduplicates() {
-        let text = "ttys001 claude\nttys002 codex\nttys003 /opt/homebrew/bin/claude\nttys004 /opt/bin/planter-codex-bridge\nttys004 planter-codex-bridge\nconsole claude\n";
+        let text = "ttys001 claude\nttys002 codex\nttys003 /opt/homebrew/bin/claude\nttys004 /opt/bin/planter-codex-bridge\nttys004 planter-codex-bridge\nttys005 /opt/bin/pi\nttys006 api\nconsole pi\n";
         assert_eq!(
             parse_planter_ttys(text),
             vec![
                 "/dev/ttys001".to_string(),
                 "/dev/ttys003".to_string(),
                 "/dev/ttys004".to_string(),
+                "/dev/ttys005".to_string(),
             ]
         );
     }

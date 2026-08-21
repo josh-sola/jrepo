@@ -45,24 +45,34 @@ const CODEX_ADMIN_COMMANDS: &[&str] = &[
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Agent {
+    Pi,
     Codex,
     Claude,
 }
 
 impl Agent {
-    pub fn from_flags(codex: bool, claude: bool) -> Option<Self> {
-        match (codex, claude) {
-            (true, false) => Some(Self::Codex),
-            (false, true) => Some(Self::Claude),
-            (false, false) => None,
-            (true, true) => unreachable!("clap rejects conflicting agent flags"),
+    pub fn from_flags(pi: bool, codex: bool, claude: bool) -> Option<Self> {
+        match (pi, codex, claude) {
+            (true, false, false) => Some(Self::Pi),
+            (false, true, false) => Some(Self::Codex),
+            (false, false, true) => Some(Self::Claude),
+            (false, false, false) => None,
+            _ => unreachable!("clap rejects conflicting agent flags"),
         }
     }
 
     pub fn executable(self) -> &'static str {
         match self {
+            Self::Pi => "pi",
             Self::Codex => "codex",
             Self::Claude => "claude",
+        }
+    }
+
+    pub fn planter_eligible(self, args: &[String]) -> bool {
+        match self {
+            Self::Pi | Self::Claude => true,
+            Self::Codex => interactive_codex_args(args),
         }
     }
 }
@@ -288,6 +298,22 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn from_flags_selects_each_agent_or_none() {
+        assert_eq!(Agent::from_flags(true, false, false), Some(Agent::Pi));
+        assert_eq!(Agent::from_flags(false, true, false), Some(Agent::Codex));
+        assert_eq!(Agent::from_flags(false, false, true), Some(Agent::Claude));
+        assert_eq!(Agent::from_flags(false, false, false), None);
+    }
+
+    #[test]
+    fn pi_and_claude_are_always_planter_eligible() {
+        let args = args(&["--remote", "unix:///tmp/codex.sock"]);
+        assert!(Agent::Pi.planter_eligible(&args));
+        assert!(Agent::Claude.planter_eligible(&args));
+        assert!(!Agent::Codex.planter_eligible(&args));
     }
 
     #[test]
