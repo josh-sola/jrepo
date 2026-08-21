@@ -7,6 +7,7 @@ Personal projects that share one checkout and one Git history.
 | [wt-cli](wt-cli/) | Git worktree tooling for creating and managing prepared worktrees. |
 | [claude-planter](claude-planter/) | A macOS overlay that shows the state of coding sessions as plants. |
 | [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
+| [jpi](jpi/) | Personal extensions and skills for Pi. |
 
 ## Validate
 

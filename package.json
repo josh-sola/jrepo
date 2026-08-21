@@ -1,0 +1,16 @@
+{
+  "name": "jpi",
+  "version": "0.1.0",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "scripts": {
+    "test:jpi": "node --test jpi/tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./jpi/extensions"],
+    "skills": ["./jpi/skills"]
+  }
+}
