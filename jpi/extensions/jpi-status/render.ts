@@ -1,4 +1,5 @@
 import type { StatusLineConfig } from "./config.ts";
+import { CUSTOM_COMPONENT_PREFIX, customOccurrenceKey } from "./custom.ts";
 import type { PullRequestMetadata, RepositoryMetadata } from "./data.ts";
 import type { JpiComponentId } from "./layout.ts";
 
@@ -20,6 +21,7 @@ export type FooterSnapshot = {
   contextPercent?: number;
   repository: RepositoryMetadata;
   statuses: ReadonlyMap<string, string>;
+  customOutputs?: ReadonlyMap<string, string>;
   config: StatusLineConfig;
 };
 
@@ -121,7 +123,18 @@ function formatLocalComponent(
   }
 }
 
-function resolveComponent(componentId: string, snapshot: FooterSnapshot): string[] {
+function resolveComponent(
+  componentId: string,
+  lineIndex: number,
+  componentIndex: number,
+  snapshot: FooterSnapshot,
+): string[] {
+  if (componentId.startsWith(CUSTOM_COMPONENT_PREFIX)) {
+    const value = snapshot.customOutputs?.get(customOccurrenceKey(lineIndex, componentIndex));
+    if (value === undefined) return [];
+    const formatted = sanitizeStatusText(value);
+    return formatted ? [formatted] : [];
+  }
   if (componentId === "@jpi/slot") {
     return formatStatusSegments(snapshot.statuses, snapshot.config.disabledStatuses);
   }
@@ -144,8 +157,11 @@ function fitLine(line: string, width: number, helpers: WidthHelpers): string {
 
 export function renderFooter(snapshot: FooterSnapshot, width: number, helpers: WidthHelpers): string[] {
   const lines: string[] = [];
-  for (const configuredLine of snapshot.config.format) {
-    const segments = configuredLine.flatMap((componentId) => resolveComponent(componentId, snapshot));
+  for (let lineIndex = 0; lineIndex < snapshot.config.format.length; lineIndex += 1) {
+    const configuredLine = snapshot.config.format[lineIndex]!;
+    const segments = configuredLine.flatMap((componentId, componentIndex) => (
+      resolveComponent(componentId, lineIndex, componentIndex, snapshot)
+    ));
     const line = joinSegments(segments);
     if (line) lines.push(fitLine(line, width, helpers));
   }

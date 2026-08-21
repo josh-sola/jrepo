@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { CUSTOM_COMPONENT_PREFIX, isCustomComponentId } from "./custom.ts";
 import {
   DEFAULT_STATUS_LINE_FORMAT,
   isJpiComponentId,
@@ -86,6 +87,11 @@ export function parseStatusLineConfigText(rawText: string): StatusLineConfigResu
         if (componentId.startsWith("@jpi/") && !isJpiComponentId(componentId)) {
           return invalidConfig(
             `format[${lineIndex}][${componentIndex}] has unknown reserved ID ${componentId}`,
+          );
+        }
+        if (componentId.startsWith(CUSTOM_COMPONENT_PREFIX) && !isCustomComponentId(componentId)) {
+          return invalidConfig(
+            `format[${lineIndex}][${componentIndex}] has a blank @custom: path`,
           );
         }
         parsedLine.push(componentId);

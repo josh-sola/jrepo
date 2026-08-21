@@ -89,6 +89,67 @@ from the slot. The slot also includes explicitly placed statuses, so the same
 status can appear more than once. This filtering only changes the custom footer;
 it does not disable an extension.
 
+### Custom executable components
+
+A component ID in the form `@custom:<path>` displays stdout from an executable:
+
+```json
+{
+  "format": [
+    ["@jpi/model", "@custom:bin/session-status"],
+    ["@jpi/slot"]
+  ]
+}
+```
+
+An absolute path starts at the filesystem root. A relative path starts in the
+directory containing `status-line.json`. Pi invokes the resolved executable
+directly without a shell and uses the current session directory as its working
+directory. Each configured occurrence runs as a separate process, even when the
+same path appears more than once.
+
+The executable receives one argument containing JSON with this shape:
+
+```json
+{
+  "cwd": "/path/to/project",
+  "idle": true,
+  "model": {
+    "id": "model-id",
+    "name": "Model name",
+    "provider": "provider-id",
+    "reasoning": true,
+    "contextWindow": 200000,
+    "maxTokens": 32000
+  },
+  "thinkingLevel": "high",
+  "context": {
+    "tokens": 75000,
+    "contextWindow": 200000,
+    "percent": 37.5
+  },
+  "repository": {
+    "repo": "jrepo",
+    "branch": "feature"
+  },
+  "statuses": {
+    "auto-review": "review: on"
+  }
+}
+```
+
+Unavailable scalar values are `null`. `statuses` includes every published
+extension status, including statuses hidden from `@jpi/slot`, and sorts them by
+ID. Repository fields are omitted when unavailable.
+
+Custom executables run when the footer starts, immediately after a config
+reload, and every 10 seconds after that. They have a 3-second timeout. Empty or
+whitespace-only stdout omits the component. Other stdout is sanitized to one
+line like extension status text;
+ANSI styling is preserved. A timeout, execution error, or nonzero exit hides
+the component and warns once per occurrence and distinct failure. A success or
+config reload resets that warning state.
+
 Both config fields are optional. A missing file or field uses its default
 without warning. Invalid JSON or values produce a warning and restore the full
 default config.

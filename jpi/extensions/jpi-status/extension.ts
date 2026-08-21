@@ -5,6 +5,11 @@ import {
   type ReadTextFile,
   type StatusLineConfig,
 } from "./config.ts";
+import {
+  createCustomStatusPayload,
+  CustomStatusController,
+  type IntervalScheduler,
+} from "./custom.ts";
 import { loadRepositoryMetadata, type ExecCommand, type RepositoryMetadata } from "./data.ts";
 import { renderFooter, type WidthHelpers } from "./render.ts";
 
@@ -18,8 +23,21 @@ type FooterData = {
 type FooterContext = {
   mode: string;
   cwd: string;
-  model?: { id?: string; name?: string };
-  getContextUsage(): { percent: number | null } | undefined;
+  model?: {
+    id?: string;
+    name?: string;
+    provider?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+  };
+  thinkingLevel?: string;
+  isIdle?(): boolean;
+  getContextUsage(): {
+    tokens?: number | null;
+    contextWindow?: number | null;
+    percent: number | null;
+  } | undefined;
   ui: {
     notify(message: string, level?: "info" | "warning" | "error"): void;
     setFooter(factory: ((
@@ -30,10 +48,7 @@ type FooterContext = {
   };
 };
 
-type Scheduler = {
-  setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>;
-  clearInterval(timer: ReturnType<typeof setInterval>): void;
-};
+type Scheduler = IntervalScheduler;
 
 export type StatusExtension = {
   onSessionStart(event: unknown, context: FooterContext): Promise<void>;
@@ -130,13 +145,18 @@ export function createStatusExtension(
 ): StatusExtension {
   const configPath = configDependencies.configPath ?? getStatusLineConfigPath();
   let activeController: RepositoryMetadataController | undefined;
+  let activeCustomController: CustomStatusController | undefined;
   let statusLineConfig: StatusLineConfig = createDefaultStatusLineConfig();
   let requestFooterRender: (() => void) | undefined;
 
   const reloadConfig = async (context: FooterContext, announce: boolean): Promise<void> => {
     const result = await loadStatusLineConfig(configPath, configDependencies.readTextFile);
     statusLineConfig = result.config;
-    if (announce) requestFooterRender?.();
+    if (activeCustomController) {
+      await activeCustomController.updateFormat(statusLineConfig.format);
+    } else if (announce) {
+      requestFooterRender?.();
+    }
 
     if (result.problem) {
       context.ui.notify(
@@ -167,9 +187,24 @@ export function createStatusExtension(
             if (requestFooterRender === renderFooterNow) requestFooterRender = undefined;
           },
         });
+        const customController = new CustomStatusController({
+          exec,
+          format: statusLineConfig.format,
+          configPath,
+          getPayload: () => createCustomStatusPayload(
+            context,
+            controller.metadata,
+            footerData.getExtensionStatuses(),
+          ),
+          requestRender: renderFooterNow,
+          notify: (message, level) => context.ui.notify(message, level),
+          scheduler,
+        });
         activeController = controller;
+        activeCustomController = customController;
         requestFooterRender = renderFooterNow;
         controller.start();
+        void customController.start();
 
         return {
           invalidate() {},
@@ -180,10 +215,15 @@ export function createStatusExtension(
               contextPercent: percent === null ? undefined : percent,
               repository: controller.metadata,
               statuses: footerData.getExtensionStatuses(),
+              customOutputs: customController.outputs,
               config: statusLineConfig,
             }, width, helpers);
           },
-          dispose: () => controller.dispose(),
+          dispose: () => {
+            customController.dispose();
+            if (activeCustomController === customController) activeCustomController = undefined;
+            controller.dispose();
+          },
         };
       });
     },
