@@ -356,8 +356,43 @@ test("reviewer denials survive allowlisted calls and trigger the third-denial ci
   assert.equal(third?.terminate, true);
   assert.match(third?.reason, /Stop here and ask the user/);
   assert.equal(fourth?.terminate, true);
-  assert.match(fourth?.reason, /three consecutive denials/);
+  assert.match(fourth?.reason, /three denials without an approved call/);
   assert.equal(calls.length, 3);
+});
+
+test("reviewer failures do not reset the denial streak", async (t) => {
+  const { configPath } = await withTempConfig(t, JSON.stringify({ model: "openai/reviewer" }));
+  const controller = new AutoReviewController({ configPath });
+  let denyNext = true;
+  const { ctx } = createContext({
+    complete: async () => {
+      if (denyNext) return makeAssistant('{"decision":"deny","reason":"unsafe"}', makeUsage(1));
+      return makeAssistant("not json", makeUsage(1));
+    },
+  });
+
+  controller.resetAgentRun();
+
+  const outcomes = [];
+  // Alternate deny, failure, deny, failure, deny: the failures must not
+  // forgive the denials, so the third deny trips the breaker.
+  for (let index = 0; index < 5; index += 1) {
+    outcomes.push(
+      await controller.handleToolCall(
+        { toolCallId: `alt-${index}`, toolName: "bash", input: { command: `rm -rf dir${index}` } },
+        ctx,
+      ),
+    );
+    denyNext = !denyNext;
+  }
+
+  assert.equal(outcomes[0]?.terminate, false);
+  assert.match(outcomes[1]?.reason, /invalid reviewer output/);
+  assert.equal(outcomes[1]?.terminate, false);
+  assert.equal(outcomes[2]?.terminate, false);
+  assert.equal(outcomes[3]?.terminate, false);
+  assert.equal(outcomes[4]?.terminate, true);
+  assert.match(outcomes[4]?.reason, /Stop here and ask the user/);
 });
 
 test("malformed reviewer output, reviewer errors, and reviewer timeouts fail closed", async (t) => {

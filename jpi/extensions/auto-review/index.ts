@@ -538,6 +538,8 @@ export class AutoReviewController {
     this.consecutiveReviewFailures = 0;
   }
 
+  // A reviewer failure must not reset the denial streak: otherwise alternating
+  // denials and failures would keep both breakers below their thresholds forever.
   recordReviewFailure(reason: string): ToolCallEventResult {
     this.consecutiveReviewFailures += 1;
     const terminate = this.consecutiveReviewFailures >= 2;
@@ -563,18 +565,10 @@ export class AutoReviewController {
       };
     }
 
-    if (issues.length > 0) {
+    if (issues.length > 0 || !config.model) {
       return {
         short: "review: fix config",
-        detail: `Auto-review needs a valid ${config.path}: ${issues[0]}.`,
-        level: "warning",
-      };
-    }
-
-    if (!config.model) {
-      return {
-        short: "review: fix config",
-        detail: `Auto-review needs a reviewer model in ${config.path}.`,
+        detail: `Auto-review needs a valid ${config.path}: ${issues[0] ?? "reviewer model is missing"}.`,
         level: "warning",
       };
     }
@@ -666,9 +660,9 @@ export class AutoReviewController {
       return undefined;
     }
 
-    if (issues.length > 0) return buildConfigGuidance(issues[0], config.path);
-
-    if (!config.model) return buildConfigGuidance("reviewer model is missing", config.path);
+    if (issues.length > 0 || !config.model) {
+      return buildConfigGuidance(issues[0] ?? "reviewer model is missing", config.path);
+    }
 
     const model = ctx.modelRegistry.find(config.model.provider, config.model.modelId);
     if (!model) return buildConfigGuidance(`reviewer model ${config.model.raw} is not available`, config.path);
@@ -704,7 +698,6 @@ export class AutoReviewController {
         },
       );
     } catch (error) {
-      this.resetDenials();
       if (timeoutSignal.aborted && !ctx.signal?.aborted) {
         return this.recordReviewFailure(`timeout after ${config.timeoutMs}ms`);
       }
@@ -715,23 +708,19 @@ export class AutoReviewController {
     this.rememberUsage(event.toolCallId, response.usage);
 
     if (response.stopReason === "aborted" && timeoutSignal.aborted && !ctx.signal?.aborted) {
-      this.resetDenials();
       return this.recordReviewFailure(`timeout after ${config.timeoutMs}ms`);
     }
 
     if (response.stopReason === "error") {
-      this.resetDenials();
       return this.recordReviewFailure(normalizeReason(response.errorMessage || "reviewer error"));
     }
 
     if (response.stopReason !== "stop") {
-      this.resetDenials();
       return this.recordReviewFailure(`reviewer stopped with ${response.stopReason}`);
     }
 
     const decision = parseReviewerDecision(getReviewerText(response));
     if (!decision) {
-      this.resetDenials();
       return this.recordReviewFailure("invalid reviewer output");
     }
 
@@ -743,8 +732,11 @@ export class AutoReviewController {
     }
 
     this.consecutiveExplicitDenials += 1;
+    // Pi only terminates early when every tool result in the current batch sets
+    // terminate, so an allowed sibling in a parallel batch delays the stop by one
+    // batch. The open circuit still blocks (and terminates) every later call.
     const terminate = this.consecutiveExplicitDenials >= 3;
-    if (terminate) this.openCircuitReason = "three consecutive denials";
+    if (terminate) this.openCircuitReason = "three denials without an approved call";
     return buildDenial(decision.reason, terminate);
   }
 

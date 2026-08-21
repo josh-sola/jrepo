@@ -98,11 +98,16 @@ bundled reviewer policy; it does not replace that policy. `/auto-review on` and
   tells Pi how to reload or disable the gate.
 - An explicit denial blocks the tool call and tells the main model not to work
   around the denial. It may only try a materially safer alternative or ask the
-  user. Three consecutive denials stop the turn to prevent retry loops.
+  user. Three denials without an approved call in between stop the run to
+  prevent retry loops. Reviewer failures do not reset the denial count.
 - Reviewer timeouts, errors, or malformed output also block the call, but they
   are treated as review failures rather than unsafe judgments. The model gets
-  one retry. A second consecutive review failure stops the turn and directs it
+  one retry. A second consecutive review failure stops the run and directs it
   to ask the user.
+- A stop takes effect when every tool call in the current batch is blocked. If
+  a parallel batch mixes an allowed call with the tripping denial, the allowed
+  call still runs and the stop lands on the next batch; the open circuit blocks
+  every call after the trip either way.
 
 ### Trust and data exposure
 
