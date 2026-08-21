@@ -4,8 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZSHRC="${ZSHRC:-${HOME}/.zshrc}"
-MARKER_BEGIN="# >>> wt-cli shell integration >>>"
-MARKER_END="# <<< wt-cli shell integration <<<"
+source "${REPO_ROOT}/shell-integration.sh"
 
 CLAUDE_DIR="${WT_CLAUDE_DIR:-${HOME}/.claude}"
 SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
@@ -32,28 +31,8 @@ if [[ -z "${WT_BIN}" ]]; then
 fi
 
 echo "==> Wiring the wt() shell function into ${ZSHRC}"
-if [[ -f "${ZSHRC}" ]] && grep -qF "${MARKER_BEGIN}" "${ZSHRC}"; then
-  echo "    already installed, no-op"
-else
-  cat >> "${ZSHRC}" <<EOF
-
-${MARKER_BEGIN}
-# No child process can change its parent shell's directory, so \`wt go\`/
-# \`wt cd\` are resolved here and everything else forwards to the real binary.
-wt() {
-  if [[ "\$1" == "go" || "\$1" == "cd" ]]; then
-    shift
-    local target
-    target="\$(command wt path "\$@")" || return \$?
-    cd "\${target}"
-  else
-    command wt "\$@"
-  fi
-}
-${MARKER_END}
-EOF
-  echo "    installed"
-fi
+wt_replace_shell_integration "${ZSHRC}"
+echo "    ${WT_SHELL_INTEGRATION_ACTION}"
 
 echo "==> Symlinking ${SKILL_LINK} -> ${REPO_ROOT}/plugin"
 mkdir -p "${CLAUDE_DIR}/skills"
@@ -122,6 +101,7 @@ cat > "${plist_tmp}" <<EOF
 	<key>ProgramArguments</key>
 	<array>
 		<string>${WT_BIN}</string>
+		<string>repo</string>
 		<string>sync</string>
 	</array>
 	<key>StartInterval</key>
@@ -161,7 +141,7 @@ echo "    NOT loaded. To activate: launchctl bootstrap gui/$(id -u) ${LAUNCHAGEN
 echo
 echo "==> Verification"
 echo "    wt on PATH: ${WT_BIN}"
-if grep -qF "${MARKER_BEGIN}" "${ZSHRC}" 2>/dev/null; then
+if grep -qF "${WT_SHELL_MARKER_BEGIN}" "${ZSHRC}" 2>/dev/null; then
   echo "    ${ZSHRC}: shell function present"
 else
   echo "    ${ZSHRC}: shell function MISSING"
@@ -177,5 +157,5 @@ echo "    CwdChanged hook installed: $(already_installed CwdChanged)"
 echo "    LaunchAgent plist: ${LAUNCHAGENT_PLIST} ($(command -v plutil >/dev/null 2>&1 && plutil -lint "${LAUNCHAGENT_PLIST}" || echo 'plutil not available'))"
 
 echo
-echo "Next: open a new shell, or run 'source ${ZSHRC}', to pick up 'wt go'/'wt cd'."
+echo "Next: open a new shell, or run 'source ${ZSHRC}', so 'wt go' reaches the binary and 'wt cd' changes this shell."
 echo "The LaunchAgent is written but not active; run the bootstrap command above when ready."

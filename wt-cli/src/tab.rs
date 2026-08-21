@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 /// The caller's rank in its own Ghostty window, and the rank of every other
 /// tty mapped in that window — a consistent 1..n over the window, computed
-/// from one probe. `wt launch` writes `others` back into the other sessions'
+/// from one probe. `wt go` writes `others` back into the other sessions'
 /// planter state files so a new tab correcting its own rank also corrects
 /// whichever tab it pushed down a slot.
 pub struct Tabs {
@@ -18,7 +18,7 @@ pub struct Tabs {
 
 /// Backs `wt __tab-index` (via [`index`]) and the planter renumber (via
 /// [`Tabs::others`]). The caller's own tty is always a candidate, even with
-/// no planted session running on it yet: `wt launch` calls this *before*
+/// no planted session running on it yet: `wt go` calls this *before*
 /// exec'ing the agent, so it has to count itself.
 pub fn probe() -> Result<Tabs> {
     let my_tty = own_tty()?;
@@ -150,7 +150,7 @@ fn stamp(tty: &str, title: &str) {
     }
 }
 
-/// The tty this run belongs to. A `wt launch` typed at a shell owns one
+/// The tty this run belongs to. A `wt go` typed at a shell owns one
 /// directly. A Claude Code hook does not — hooks get no terminal of their own —
 /// so walk up the parents until one turns up: the claude process that spawned
 /// the hook is attached to the tab's tty.

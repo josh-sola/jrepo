@@ -43,7 +43,7 @@ pub struct Entry {
 impl Entry {
     /// Graphite has one annotation slot per branch, and `(merged)` masks
     /// `(needs restack)` — so a branch whose pull request is already merged
-    /// or closed is done, whatever its actual git shape says: `wt stack`
+    /// or closed is done, whatever its actual git shape says: `wt gt stack`
     /// hides it by default and the restack planner skips it outright.
     pub fn is_merged_or_closed(&self) -> bool {
         matches!(self.pr_state.as_deref(), Some("MERGED") | Some("CLOSED"))

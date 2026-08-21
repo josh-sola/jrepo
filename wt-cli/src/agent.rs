@@ -84,7 +84,9 @@ pub fn exec_target(
     let target = resolve_target(&store, target)?;
 
     if target.is_base {
-        eprintln!("base is for reading; run `wt new <repo> --name \"...\"` to start work instead");
+        eprintln!(
+            "base is for reading; run `wt tree new <repo> --name \"...\"` to start work instead"
+        );
     }
 
     exec_at(agent, &target.cwd, args, &[])
@@ -100,7 +102,7 @@ pub fn exec_at(agent: Agent, cwd: &Path, args: &[String], env: &[(&str, &str)]) 
     let err = cmd.exec();
     if err.kind() == std::io::ErrorKind::NotFound {
         bail!(
-            "`{}` is not on PATH; install it, then run `wt {}`",
+            "`{}` is not on PATH; install it, then run `wt llm {}`",
             agent.executable(),
             agent.executable()
         );
@@ -147,7 +149,7 @@ pub fn exec_launch_codex(
     let err = command.exec();
     stop_bridge(&mut bridge);
     if err.kind() == std::io::ErrorKind::NotFound {
-        bail!("`codex` is not on PATH; install it, then run `wt codex`");
+        bail!("`codex` is not on PATH; install it, then run `wt llm codex`");
     }
     Err(err).context("exec'ing codex through planter bridge")
 }

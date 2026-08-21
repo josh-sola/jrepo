@@ -226,15 +226,15 @@ without touching your real sessions.
 
 ## Codex app-server sessions
 
-When Planter is enabled in `wt`, `wt launch` automatically starts interactive
+When Planter is enabled in `wt`, `wt go` automatically starts interactive
 Codex sessions through `planter-codex-bridge`. The bridge starts
 `codex app-server --listen stdio://`, gives the Codex TUI a private Unix-socket
 endpoint, and writes the same small live-state record as the Claude hook. It
 does not use Codex hooks and does not store prompts, replies, tool input, or
 credentials.
 
-Install this repository so the bridge is on `PATH`, then use `wt launch` as
-usual. Direct `wt codex` commands, explicit Codex `--remote` sessions, and
+Install this repository so the bridge is on `PATH`, then use `wt go` as
+usual. Direct `wt llm codex` commands, explicit Codex `--remote` sessions, and
 non-interactive or administrative Codex commands remain direct. If the bridge
 cannot start, `wt` prints a warning and starts Codex directly.
 

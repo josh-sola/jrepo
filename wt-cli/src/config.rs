@@ -95,7 +95,7 @@ pub fn load(path: &Path) -> Result<Config> {
 pub fn repo<'a>(config: &'a Config, name: &str) -> Result<&'a RepoConfig> {
     config.repos.get(name).ok_or_else(|| {
         anyhow!(
-            "repo '{name}' has no config block in {}; run `wt init` for it",
+            "repo '{name}' has no config block in {}; run `wt repo adopt <repo> <path>` for it",
             config_path().display()
         )
     })
@@ -257,7 +257,7 @@ fn is_repo_named(node: &KdlNode, name: &str) -> bool {
 }
 
 const HEADER_COMMENT: &str = "\
-// wt's user config. `wt init` appends a `repo` block here once per repo,\n\
+// wt's user config. `wt repo adopt` appends a `repo` block here once per repo,\n\
 // but never rewrites a block you have edited by hand.\n\
 //\n\
 // Uncomment to opt into hooks that reach outside wt. Absent means off.\n\
@@ -1183,7 +1183,7 @@ mod tests {
         let err = repo(&config, "monorepo").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("monorepo"), "message was: {msg}");
-        assert!(msg.contains("wt init"), "message was: {msg}");
+        assert!(msg.contains("wt repo adopt"), "message was: {msg}");
         assert!(
             msg.contains(&config_path().display().to_string()),
             "message was: {msg}"

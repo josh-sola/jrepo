@@ -53,7 +53,7 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
     if let Some((repo_name, _)) = store.repos.iter().find(|(_, r)| cwd.starts_with(&r.base)) {
         println!(
             "This directory is {repo_name}'s base checkout. It stays on trunk; do not edit or \
-             commit here. Run `wt new {repo_name} --name \"...\"` to start work in a disposable \
+             commit here. Run `wt tree new {repo_name} --name \"...\"` to start work in a disposable \
              tree."
         );
     }
@@ -86,7 +86,7 @@ fn stack_position_lines(position: &stack::Position) -> Vec<String> {
             lines.push(format!(
                 "This tree is mid-stack: '{parent}' belongs to tree \"{name}\", not this one. \
                  Don't rebase or restack '{parent}' from here — do that in tree \"{name}\", or \
-                 run `wt restack` to walk the whole stack in the right order."
+                 run `wt gt restack` to walk the whole stack in the right order."
             ));
         }
     }

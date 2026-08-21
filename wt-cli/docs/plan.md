@@ -25,7 +25,7 @@ Each decision names the fact that forces it.
 | 3 | **`wt` supersedes Claude Code's worktree isolation.** | Isolation copies `.worktreeinclude` paths but does not install dependencies — verified: in one `agent-*` tree `node_modules` was born four days after the worktree. Agents currently get a tree that cannot build. |
 | 4 | **`plans/` is a plain directory, not a git repo.** | User decision. |
 | 5 | **Shared gitignored state is symlinked, not copied** — `plans/`, `local/`, `user-memories/`, in base as well as in every tree. | User decision. Symlinks give one truth and survive teardown, which is the point of moving plans out of trees; base needs the same symlink so a plan written from a base session is visible everywhere else. |
-| 6 | **Base stays fresh two ways:** a LaunchAgent every few minutes, plus a fetch on `wt new`. | User decision. The `wt new` fetch is cheap precisely because the timer keeps base nearly current. |
+| 6 | **Base stays fresh two ways:** a LaunchAgent every few minutes, plus a fetch on `wt tree new`. | User decision. The `wt tree new` fetch is cheap precisely because the timer keeps base nearly current. |
 | 7 | **Always fresh `pnpm install`; never clone `node_modules`.** | Measured: install is 23s, `cp -Rc` of `node_modules` is 42–69s and still needs a repair pass because the `.bin` shims carry absolute paths. Cloning is both slower and wrong. |
 | 8 | **Shared `CARGO_TARGET_DIR` per repo.** | Measured: cuts `dspy-worker`'s `uv sync` from ~19s to 8.4s, and saves ~400 MB of real disk per tree. Cargo output is the only artifact here that is neither hardlinked nor reflinked from a shared store. |
 | 9 | **Rust, single binary.** | The statusline re-renders every 10s and hooks fire on every session start. A Python CLI costs ~100–200ms per invocation; Rust costs ~2ms, so the statusline can call `wt` directly instead of parsing `data.json` with `jq`. |
@@ -33,11 +33,11 @@ Each decision names the fact that forces it.
 | 11 | **Provisioning steps and the carry-over list are per-repo data in `data.json`,** seeded from `.worktreeinclude` when the repo has one. | helm and toy-apps have no `.worktreeinclude`, no pnpm lockfile, and no submodules, but do have their own provisioning needs (`helm dependency update`, per-app `uv sync`). Hardcoding monorepo steps would make them unsupportable. |
 | 12 | **Shared symlink names go into base's `.git/info/exclude`, for every repo.** | A directory-only `.gitignore` pattern like `local/` does not match a symlink named `local` — git still reports `?? local`, even in the monorepo, which already ignores `local/` as a directory. `.worktreeinclude` parsing strips the trailing slash, so `info/exclude` gets `local`, which does match. `info/exclude` lives in the common git dir, so it is shared by every worktree and never committed. |
 | 13 | **Base's original directories move to `<repo>/backup/`, not somewhere inside base.** | A backup left inside base (e.g. `local.pre-wt`) would not match the `.gitignore` pattern that covers the real name and would sit as untracked noise forever. Outside base it is inert and left for manual deletion once the shared copy is confirmed good. |
-| 14 | **`wt rm`/`wt gc` tear a tree down with `fs::remove_dir_all` plus `git worktree prune` — never `git worktree remove`, never `git submodule deinit`.** | `git submodule deinit` writes `submodule.<name>.url`/`.active` into the *common* `.git/config`, shared by base and every worktree — confirmed live: one `wt rm` on a monorepo tree deregistered `helm` and `n8n` for base and all 24 pre-existing worktrees at once, repaired by hand with `git submodule init`. `git worktree remove` is what forces deinit in the first place (it refuses outright on a populated submodule), but `wt`'s own dirty/unpushed guards already run before teardown, so git's refusal was never buying safety — only risk. Removing the directory directly and pruning afterward reaches the same end state without ever touching shared config. |
-| 15 | **The base commit block sets `core.hooksPath` at `--worktree` scope, and `wt new` immediately clears that same key in every new tree.** | `extensions.worktreeConfig` makes `core.hooksPath` overridable per-worktree, which is what lets base block commits without touching `.git/hooks` (dead under the monorepo's repo-wide `core.hooksPath=.husky`). But `git worktree add` copies the *main* worktree's `config.worktree` into every new linked worktree's admin dir — verified empirically — so without the clear step, every fresh tree would inherit base's block instead of the repo's real hooks path (Husky, for the monorepo) and could never commit either. |
-| 16 | **`wt sync` requires a genuinely clean base — no allowance for a dirty submodule pointer.** | Base is supposed to stay clean by construction (decision 10). A special case for benign submodule drift only existed to tolerate a stale ` M helm` pointer that has since been reset by hand; with base actually clean, a plain `git status --porcelain` emptiness check is the whole rule, and a simple rule with one clear failure message beats a special case carried for a state that shouldn't recur. |
+| 14 | **`wt tree rm`/`wt upkeep gc` tear a tree down with `fs::remove_dir_all` plus `git worktree prune` — never `git worktree remove`, never `git submodule deinit`.** | `git submodule deinit` writes `submodule.<name>.url`/`.active` into the *common* `.git/config`, shared by base and every worktree — confirmed live: one `wt tree rm` on a monorepo tree deregistered `helm` and `n8n` for base and all 24 pre-existing worktrees at once, repaired by hand with `git submodule init`. `git worktree remove` is what forces deinit in the first place (it refuses outright on a populated submodule), but `wt`'s own dirty/unpushed guards already run before teardown, so git's refusal was never buying safety — only risk. Removing the directory directly and pruning afterward reaches the same end state without ever touching shared config. |
+| 15 | **The base commit block sets `core.hooksPath` at `--worktree` scope, and `wt tree new` immediately clears that same key in every new tree.** | `extensions.worktreeConfig` makes `core.hooksPath` overridable per-worktree, which is what lets base block commits without touching `.git/hooks` (dead under the monorepo's repo-wide `core.hooksPath=.husky`). But `git worktree add` copies the *main* worktree's `config.worktree` into every new linked worktree's admin dir — verified empirically — so without the clear step, every fresh tree would inherit base's block instead of the repo's real hooks path (Husky, for the monorepo) and could never commit either. |
+| 16 | **`wt repo sync` requires a genuinely clean base — no allowance for a dirty submodule pointer.** | Base is supposed to stay clean by construction (decision 10). A special case for benign submodule drift only existed to tolerate a stale ` M helm` pointer that has since been reset by hand; with base actually clean, a plain `git status --porcelain` emptiness check is the whole rule, and a simple rule with one clear failure message beats a special case carried for a state that shouldn't recur. |
 
-### `wt init` always adopts; it never clones
+### `wt repo adopt` always adopts; it never clones
 
 **Settled: every repo is adopted in place, and `~/repos/wt/<repo>/base` is a symlink to
 the real checkout.** This holds for monorepo, helm, and toy-apps alike — helm has five
@@ -62,7 +62,7 @@ checkout** — it goes back to `master` and stays there.
 Migration is a one-liner, because nothing there needs rescuing: `josh/zod-stable-compat`
 is pushed and level with `origin` (both at `472d456a6e`), so base just checks out
 `master`. The only other local state is the drifted `helm` submodule pointer, which is
-noise rather than work. `wt adopt` stays in the command set for accidental edits in base
+noise rather than work. `wt repo lift` stays in the command set for accidental edits in base
 later, but it is not part of migration.
 
 ---
@@ -82,7 +82,7 @@ later, but it is not part of migration.
    │  ├─ local/
    │  └─ user-memories/
    ├─ backup/                       base's original plans/, local/, user-memories/,
-   │                                 moved here once when wt init first symlinks them —
+   │                                 moved here once when wt repo adopt first symlinks them —
    │                                 deleted by hand, never automatically
    └─ cache/
       └─ cargo-target/              shared CARGO_TARGET_DIR
@@ -94,11 +94,11 @@ Keeping `plans/` top-level would only make it visually prominent, and prominence
 what makes an agent find it — the SessionStart hook injecting the path is.
 
 Base gets the same symlinks as a tree, so a plan written from a session in base is not
-stranded there. `wt init` moves base's real directories into `shared/` (copying content
+stranded there. `wt repo adopt` moves base's real directories into `shared/` (copying content
 in first, if there is any) and replaces them with symlinks. The originals land in
 `backup/`, deliberately outside base: a backup left inside base would not match the
 `.gitignore` pattern that covers the real name and would sit as untracked noise forever.
-`wt init` prints the backup path; nothing deletes it automatically.
+`wt repo adopt` prints the backup path; nothing deletes it automatically.
 
 `cache/` stays separate. It is not repo state and is not symlinked into trees; it is
 reached through `CARGO_TARGET_DIR`.
@@ -140,7 +140,7 @@ gitignored in helm or toy-apps** — see "Other repos" below.
 `state` is one of `provisioning`, `ready`, `failed`. A tree is usable for reading as
 soon as it exists; `state` tells you whether dependencies have landed.
 
-**Writes are atomic and locked.** Parallel agents will call `wt new` at the same time,
+**Writes are atomic and locked.** Parallel agents will call `wt tree new` at the same time,
 so every mutation takes an advisory lock on a sibling lockfile, re-reads, mutates, then
 writes to a temp file and renames. `recipes` writes its store with a plain
 `write_text()` and no lock; that is fine for one human and not fine here.
@@ -155,23 +155,24 @@ about that the registry does not.
 
 | Command | Does |
 |---|---|
-| `wt init <repo> --adopt <path>` | Register an existing clone as base; create the layout and symlink `base`. |
-| `wt new <repo> --name "short summary" [--branch <b>] [--profile node,python]` | Fetch if stale, create the tree, wire symlinks, copy env files, start provisioning, print the path. |
-| `wt ls [--repo <r>] [--json]` | Registry with name, branch, state, dirty flag, ahead/behind. |
-| `wt path <selector>` | Resolve a name, uuid prefix, or branch to a path. |
-| `wt go <selector>` | Shell-function-backed `cd`. |
-| `wt name [--path <p>]` | The statusline's lookup. Prints the nice name for a path, or nothing. |
-| `wt status [selector]` | Provisioning state and per-step results. |
-| `wt wait [selector]` | Block until `ready` or `failed`. For scripts and agents. |
-| `wt claude [selector\|<repo>]` | Exec `claude` with cwd set; bare repo name means base. |
-| `wt rm <selector>` | Tear down, guarding dirty and unpushed work. `--force` to override. |
-| `wt gc [--repo <r>]` | Reap trees with no commits ahead of trunk and no dirty files. Replaces the auto-cleanup lost with decision 3. |
-| `wt sync [<repo>]` | Fetch and fast-forward base; refuse if base is dirty. |
-| `wt adopt [<repo>]` | Move uncommitted work out of base into a fresh tree. |
-| `wt env refresh <selector>` | Re-copy the repo's `copy` globs from base into a tree, overwriting what is there. |
-| `wt doctor` | Reconcile registry against `git worktree list`; report and offer to fix. |
+| `wt repo adopt <repo> <path>` | Register an existing clone as base; create the layout and symlink `base`. |
+| `wt tree new <repo> --name "short summary" [--branch <b>] [--profile node,python]` | Fetch if stale, create the tree, wire symlinks, copy env files, start provisioning, print the path. |
+| `wt tree ls [--repo <r>] [--json]` | Registry with name, branch, state, dirty flag, ahead/behind. |
+| `wt tree path <tree>` | Resolve a name, UUID prefix, or branch to a path. |
+| `wt go [tree] [--repo <repo>]` | Open a tree or create it in the named repository. |
+| `wt cd <tree>` | Shell-function-backed directory change. |
+| `wt tree name [--path <p>]` | Print the nice name for a path, or nothing. |
+| `wt tree status [tree]` | Provisioning state and per-step results. |
+| `wt tree wait [tree]` | Block until `ready` or `failed`. For scripts and agents. |
+| `wt llm claude [tree\|<repo>]` | Exec `claude` with cwd set; bare repo name means base. |
+| `wt tree rm <tree>` | Tear down, guarding dirty and unpushed work. `--force` to override. |
+| `wt upkeep gc [--repo <r>]` | Reap trees with no commits ahead of trunk and no dirty files. Replaces the auto-cleanup lost with decision 3. |
+| `wt repo sync [<repo>]` | Fetch and fast-forward base; refuse if base is dirty. |
+| `wt repo lift [<repo>]` | Move uncommitted work out of base into a fresh tree. |
+| `wt tree env <tree>` | Re-copy configured env files from base into a tree, overwriting what is there. |
+| `wt upkeep doctor` | Reconcile registry against `git worktree list`; report and offer to fix. |
 
-`wt env refresh` deliberately does **not** run `internal-cli config generate-env`, as an
+`wt tree env` deliberately does **not** run `internal-cli config generate-env`, as an
 earlier draft of this plan said it would. That command is monorepo-specific and needs AWS
 auth and network, so it cannot be a repo-agnostic step. Regenerating env files in base
 stays a manual step; refresh pushes base's current copies out to a tree.
@@ -212,7 +213,7 @@ Profiles keep the long pole optional: `--profile node` skips Python entirely,
 separate opt-out if 8.4s ever matters.
 
 Failure policy: a failed step marks `state: failed`, records which step and where the
-log is, and leaves the tree in place. `wt new` never half-deletes a tree on failure.
+log is, and leaves the tree in place. `wt tree new` never half-deletes a tree on failure.
 
 ---
 
@@ -233,8 +234,8 @@ Three gaps, each with a fix that also makes the monorepo path cleaner:
 
 **1. Provisioning must be per-repo configuration, not monorepo logic.** Neither repo
 wants `pnpm install`. helm wants `helm dependency update`; toy-apps wants `uv sync` per
-app. `wt init` detects what a repo needs and records an ordered step list in
-`data.json`; `wt new` runs that list. The monorepo's steps become data, not code, which
+app. `wt repo adopt` detects what a repo needs and records an ordered step list in
+`data.json`; `wt tree new` runs that list. The monorepo's steps become data, not code, which
 also makes them easy to change without a rebuild.
 
 **2. The carry-over manifest cannot depend on `.worktreeinclude`.** Only the monorepo has
@@ -247,7 +248,7 @@ explicitly otherwise. For helm and toy-apps the list starts empty.
 nothing ignores it. But even in the monorepo, which already lists `plans/` and `local/`
 as directories, a symlink of the same name is not covered — a directory-only pattern does
 not match a symlink, so git still reports `?? local`. The fix needs no repo change either
-way: `wt init` appends the shared names (trailing slash stripped, which is what makes the
+way: `wt repo adopt` appends the shared names (trailing slash stripped, which is what makes the
 match work) to the base clone's `.git/info/exclude`. That file lives in the common git
 dir, so — verified — it is shared by every worktree of the clone automatically, and it is
 never committed or pushed.
@@ -258,7 +259,7 @@ because they are so much cheaper than the monorepo.
 
 ## Integrations
 
-**Statusline.** `statusline.sh` gains one call: `wt name --path "$PWD"`, falling back to
+**Statusline.** `statusline.sh` gains one call: `wt tree name --path "$PWD"`, falling back to
 the current basename when it prints nothing. Worktree detection already keys off
 `git rev-parse --absolute-git-dir` matching `*/worktrees/*`, so `~/repos/wt/<repo>/trees/<uuid>`
 is detected with no change. The per-tree colour keeps hashing `basename(toplevel)`,
@@ -267,7 +268,7 @@ which is now the uuid — stable per tree, which is what it needs to be.
 **Hooks. Built.** One `SessionStart`/`CwdChanged` hook, registered by patching
 `~/.claude/settings.json` the way `recipes/install.sh` does. In a tree it surfaces the
 tree's name, its branch, and the plans path, so an agent never has to be told where
-plans live. In base it surfaces that base stays on trunk and `wt new` is how to start
+plans live. In base it surfaces that base stays on trunk and `wt tree new` is how to start
 work. `hooks/session-context.sh` delegates the resolution to a hidden `wt
 __session-context --path <p>` subcommand and only formats the result as hook JSON.
 
@@ -280,9 +281,9 @@ model, until Claude Code adds context injection for `CwdChanged`.
 This replaces `~/.claude/hooks/worktree-setup.sh`, which was orphaned — the script
 existed but nothing in `settings.json` referenced it.
 
-**Base commit block. Built.** `wt init` sets a `--worktree`-scoped `core.hooksPath` on
+**Base commit block. Built.** `wt repo adopt` sets a `--worktree`-scoped `core.hooksPath` on
 base pointing at generated `pre-commit`/`pre-push` hooks that fail with a message
-pointing at `wt new`. Editing in base is recoverable; committing from base is what
+pointing at `wt tree new`. Editing in base is recoverable; committing from base is what
 actually costs you. See decision 15 for the leak this needed a second fix for.
 
 **Agent-facing skill. Built.** A `plugin/` directory symlinked into `~/.claude/skills/wt`,
@@ -290,9 +291,9 @@ documenting `new`, `ls`, `path`, `name`, `status`, `wait`, `claude`, `rm`, `gc`,
 `doctor`, plus selector rules and the three traps that actually bite. Short, because the
 whole point is that an agent can create a working tree in one command.
 
-**Shell function. Built.** `wt go` and `wt cd` need a `wt()` wrapper in `.zshrc`, since no
+**Shell function. Built.** `wt cd` needs a `wt()` wrapper in `.zshrc`, since no
 child process can change its parent's directory. Every other command is a plain binary
-call, including `wt claude`, which execs with cwd set via
+call, including `wt llm claude`, which execs with cwd set via
 `std::os::unix::process::CommandExt::exec`.
 
 **LaunchAgent. Built.** Every 5 minutes: `git -C base fetch --prune`, then fast-forward
@@ -321,18 +322,18 @@ tree; `rm --delete-branch` and `gc` both refuse to delete a branch with commits 
 the remote. The original submodule teardown (deinit-then-force) shipped in this phase
 was found live to corrupt shared state and was replaced in Phase 3 — see decision 14.
 
-**Phase 3 — integrations. Done, verified live.** `wt sync`, `wt claude`, the
+**Phase 3 — integrations. Done, verified live.** `wt repo sync`, `wt llm claude`, the
 `SessionStart`/`CwdChanged` hook, the agent-facing skill, the base commit block, and the
 LaunchAgent are all built and tested — see Verification below. Fixed along the way: the
 Phase 2 submodule teardown corrupted base's shared submodule config on every removal
 (decision 14, now `fs::remove_dir_all` + `git worktree prune`); the base commit block's
 `core.hooksPath` leaked into every new tree via `git worktree add`'s config copy
-(decision 15, now cleared in `wt new` immediately after creation); `wt sync`'s dirty
+(decision 15, now cleared in `wt tree new` immediately after creation); `wt repo sync`'s dirty
 check was simplified to a plain `git status --porcelain` emptiness check once base was
 reset to genuinely clean (decision 16).
 
-**Phase 4 — the other repos and upkeep. Built.** Step detection generalised, `wt adopt`,
-and `wt env refresh`. (`sync` moved to Phase 3 — the LaunchAgent needed it.) Migration of
+**Phase 4 — the other repos and upkeep. Built.** Step detection generalised, `wt repo lift`,
+and `wt tree env`. (`sync` moved to Phase 3 — the LaunchAgent needed it.) Migration of
 the monorepo base was a `git checkout master`, so it needed no phase of its own. Adopting
 helm and toy-apps is a manual step, left until wanted.
 
@@ -364,7 +365,7 @@ reason `shared/` exists. Neither repo gitignores `plans/`, so this leans on the
   wrong tree. The base commit hooks catch the expensive version of this mistake; a
   hook that complains on writes to base would catch the rest.
 - **Registry drift.** Anything that creates worktrees outside `wt` — including the
-  harness, if it is ever used again — is invisible to `data.json`. `wt doctor` is the
+  harness, if it is ever used again — is invisible to `data.json`. `wt upkeep doctor` is the
   answer, and it should be cheap enough to run from a hook.
 - **`.worktreeinclude` is a shared contract.** It is tracked and maintained by the team
   (last changed in #10405). `wt` reads it rather than keeping a private list, so a
@@ -393,23 +394,23 @@ reason `shared/` exists. Neither repo gitignores `plans/`, so this leans on the
 Phase 1 is done when, from a cold shell:
 
 ```
-wt init monorepo --adopt ~/repos/monorepo
-wt new monorepo --name "scratch test"        # prints a path in under 2s
-cd "$(wt path 'scratch test')"
+wt repo adopt monorepo ~/repos/monorepo
+wt tree new monorepo --name "scratch test"   # prints a path in under 2s
+cd "$(wt tree path 'scratch test')"
 pnpm -F types-shared run typecheck           # passes
-wt ls                                        # shows the tree by name
-wt rm 'scratch test'                         # gone from disk and registry
+wt tree ls                                   # shows the tree by name
+wt tree rm 'scratch test'                    # gone from disk and registry
 ```
 
 Phase 2 is done — verified live against the real monorepo:
 
 ```
-wt new monorepo --name "..."                 # returns the path in ~2s (plus a fetch if stale)
-wt status                                    # shows state, current step index/total, elapsed, log
-wt wait '...'                                # blocks, then exits 0 once ready
-wt gc --dry-run                              # lists what it would reap, touches nothing
-wt gc                                        # reaps it and deletes its branch
-wt doctor                                    # reports the 24 pre-existing .claude/worktrees/
+wt tree new monorepo --name "..."            # returns the path in ~2s (plus a fetch if stale)
+wt tree status                               # shows state, current step index/total, elapsed, log
+wt tree wait '...'                           # blocks, then exits 0 once ready
+wt upkeep gc --dry-run                       # lists what it would reap, touches nothing
+wt upkeep gc                                 # reaps it and deletes its branch
+wt upkeep doctor                             # reports the 24 pre-existing .claude/worktrees/
                                               # entries as unregistered, not broken; touches none
 ```
 
@@ -417,7 +418,7 @@ Phase 3 is done — verified live against the real monorepo and a suite of throw
 fixture repos:
 
 ```
-wt sync monorepo                             # fetches, fast-forwards trunk, prints
+wt repo sync monorepo                        # fetches, fast-forwards trunk, prints
                                               # what moved; refuses cleanly if base
                                               # is ever dirty
 echo '{"hook_event_name":"SessionStart","cwd":"<tree path>"}' \
@@ -425,7 +426,7 @@ echo '{"hook_event_name":"SessionStart","cwd":"<tree path>"}' \
                                               # as SessionStart additionalContext JSON
 echo '{"hook_event_name":"SessionStart","cwd":"<base path>"}' \
   | hooks/session-context.sh                 # prints the base notice instead
-git -C <fixture base> commit                 # blocked, points at `wt new`
+git -C <fixture base> commit                 # blocked, points at `wt tree new`
 git -C <fixture tree> commit                 # still succeeds — the block does not leak
 plutil -lint ~/Library/LaunchAgents/com.joshbassin.wt.sync.plist   # OK
 ./install.sh                                 # run twice against scratch paths: second

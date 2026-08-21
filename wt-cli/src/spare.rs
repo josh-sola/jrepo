@@ -90,7 +90,7 @@ pub fn provision_spare(root: &Path, config_path: &Path, repo_name: &str) -> Resu
         eprintln!("warning: could not clear inherited worktree hooksPath: {e:#}");
     }
     // Canonicalized to match the cold path, whose registered path is also
-    // canonical — `wt doctor` compares registry entries against git's own
+    // canonical — `wt upkeep doctor` compares registry entries against git's own
     // (canonical) worktree list, and a symlinked component in `WT_ROOT`
     // would otherwise make that comparison miss.
     let tree_path = fs::canonicalize(&tree_path)?;
@@ -128,8 +128,8 @@ pub struct Claimed {
 /// Turns a ready spare into `plan`'s tree.
 ///
 /// This runs entirely inside one `store::with_store_lock`. That is what
-/// makes the claim atomic against a concurrent `wt new` with no locking
-/// beyond what `wt new` already does: two callers serialize on
+/// makes the claim atomic against a concurrent `wt tree new` with no locking
+/// beyond what `wt tree new` already does: two callers serialize on
 /// `.data.lock`, the first to reach here takes the spare, the second finds
 /// none and builds cold. It also means the common case — the spare's HEAD
 /// already matches `plan.start_point` — commits to disk with no `git` call
@@ -147,7 +147,7 @@ pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
         let spare_path = s.trees[idx].path.clone();
         let spare_id = s.trees[idx].id;
         // A spare is an optimization; nothing about it may ever be
-        // load-bearing for `wt new`. A directory deleted by hand or a
+        // load-bearing for `wt tree new`. A directory deleted by hand or a
         // corrupt git dir degrades to "no usable spare" here, the same as
         // a failed `switch` below, rather than failing the command outright.
         let Ok(head) = git::rev_parse(&spare_path, "HEAD") else {
@@ -257,7 +257,7 @@ fn reap_dead_spares(root: &Path, repo_name: &str) -> Result<()> {
 /// Removes a spare directly by uuid. Deliberately not `tree::rm_tree`:
 /// `store::resolve` filters spares out at every tier, and an unclaimed
 /// spare has no branch and no Graphite history for that function's guards
-/// to check in the first place. Only `top_up`'s own reaping and `wt spare
+/// to check in the first place. Only `top_up`'s own reaping and `wt repo spare
 /// drop` ever call this, always with an id already known to be a spare's.
 fn remove_spare(root: &Path, id: Uuid) -> Result<()> {
     let store = store::load(root)?;
@@ -287,7 +287,7 @@ fn remove_spare(root: &Path, id: Uuid) -> Result<()> {
 /// Fast-forwards each idle spare in `repo_filter` (or every repo) to
 /// `origin/<trunk>` and re-provisions it when trunk has moved on. A spare
 /// still `provisioning` is left alone — that's what keeps two overlapping
-/// `wt sync` ticks out of each other's way.
+/// `wt repo sync` ticks out of each other's way.
 pub fn refresh(root: &Path, config_path: &Path, repo_filter: Option<&str>) -> Result<()> {
     let store = store::load(root)?;
     let config = config::load(config_path)?;
@@ -318,8 +318,8 @@ pub fn refresh(root: &Path, config_path: &Path, repo_filter: Option<&str>) -> Re
         }
 
         // Flipping the row here, under the lock, before spawning is what
-        // keeps two overlapping callers (a `wt spare refresh` racing a `wt
-        // sync` tick) from both reading `Ready` and both starting a
+        // keeps two overlapping callers (a `wt repo spare refresh` racing a `wt
+        // repo sync` tick) from both reading `Ready` and both starting a
         // `checkout --detach` plus a dependency install in the same
         // directory. Only the caller that wins the flip spawns; the loser
         // sees `Ready` gone and moves on to the next spare.
@@ -333,7 +333,7 @@ pub fn refresh(root: &Path, config_path: &Path, repo_filter: Option<&str>) -> Re
             }
             row.state = TreeState::Provisioning;
             // A placeholder, not the eventual worker's pid: this process
-            // is `wt sync` or `wt spare refresh` and is about to exit. It
+            // is `wt repo sync` or `wt repo spare refresh` and is about to exit. It
             // exists only so the row is never `provisioning` with no pid
             // at all, which `proc::provisioning_is_stale` would never flag
             // — `run_refresh` overwrites it with its own pid immediately.
@@ -405,7 +405,7 @@ pub fn run_refresh(root: &Path, config_path: &Path, id: Uuid) -> Result<()> {
 
 /// Removes every one of `repo_name`'s spares — ordinarily just one, but
 /// nothing here assumes that. Also sets `spares` to 0 in config, so a
-/// `wt sync` tick five minutes later can't quietly rebuild the one this
+/// `wt repo sync` tick five minutes later can't quietly rebuild the one this
 /// just removed.
 pub fn drop_spare(root: &Path, config_path: &Path, repo_name: &str) -> Result<()> {
     let store = store::load(root)?;
