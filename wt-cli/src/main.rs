@@ -26,13 +26,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use uuid::Uuid;
 
 use agent::Agent;
 
 #[derive(Parser)]
-#[command(name = "wt", about = "Enriched worktree tooling")]
+#[command(
+    name = "wt",
+    about = "Manage adopted repositories and ready-to-use Git worktrees",
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -40,215 +44,55 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Register an existing clone as a repo's base.
-    Init {
-        name: String,
-        #[arg(long)]
-        adopt: PathBuf,
-        /// Prefix applied to branch names `wt new` generates for this repo.
-        /// Defaults to "josh/" for a fresh repo; ignored (with a warning)
-        /// when the repo already has a config block.
-        #[arg(long)]
-        branch_prefix: Option<String>,
-        /// Regenerate just the detected provisioning steps of an existing
-        /// config block.
-        #[arg(long)]
-        redetect: bool,
-    },
-    /// Create a new worktree and provision it.
-    New {
-        repo: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        branch: Option<String>,
-        /// Branch the new tree from here instead of `origin/<trunk>`: a `wt`
-        /// tree selector (its live branch), a branch name, or a commit-ish.
-        #[arg(long)]
-        onto: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        profile: Option<Vec<String>>,
-        /// Open a `codex` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "claude")]
-        codex: bool,
-        /// Open a `claude` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "codex")]
-        claude: bool,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Move uncommitted work out of base into a fresh tree.
-    Adopt {
-        repo: Option<String>,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        branch: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        profile: Option<Vec<String>>,
-        /// Open a `codex` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "claude")]
-        codex: bool,
-        /// Open a `claude` session in the new tree once it exists.
-        #[arg(long, conflicts_with = "codex")]
-        claude: bool,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Open a Codex session in a worktree, creating it if needed. Pass
-    /// --claude to choose that agent instead. A
-    /// worktree starting with `@` is a scratch session that opens in the
-    /// repo's base instead, with nothing created. With no worktree given, an
-    /// fzf picker lists the registered trees to choose from. Anything after
-    /// `--` is passed straight to the selected agent.
-    Launch {
-        worktree: Option<String>,
-        repo: Option<String>,
-        #[arg(long)]
-        branch: Option<String>,
-        /// Branch a newly created tree from here instead of
-        /// `origin/<trunk>`: a `wt` tree selector (its live branch), a
-        /// branch name, or a commit-ish. Only applies when `worktree` names
-        /// a tree that doesn't exist yet.
-        #[arg(long)]
-        onto: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        profile: Option<Vec<String>>,
-        /// Open Claude instead of Codex.
-        #[arg(long)]
-        claude: bool,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// List registered worktrees.
-    Ls {
-        #[arg(long)]
-        repo: Option<String>,
-        /// Also show each repo's hot spare, hidden by default.
-        #[arg(long)]
-        all: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print a worktree's absolute path.
-    Path { selector: String },
-    /// Print the worktree name for a path (statusline lookup).
-    Name {
-        #[arg(long)]
-        path: Option<PathBuf>,
-    },
-    /// Remove a worktree.
-    Rm {
-        selector: String,
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        delete_branch: bool,
-        /// When the deleted branch has Graphite children, re-parent each
-        /// one onto the deleted branch's own parent (trunk, if it has none)
-        /// instead of refusing.
-        #[arg(long)]
-        reparent_children: bool,
-    },
-    /// Show provisioning status; every non-ready tree if no selector.
-    Status {
-        selector: Option<String>,
-        /// Also show a non-ready hot spare, hidden by default.
-        #[arg(long)]
-        all: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Block until a tree is ready or failed.
-    Wait {
-        selector: Option<String>,
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
-    },
-    /// Reap clean trees with no commits beyond origin/<trunk>.
-    Gc {
-        #[arg(long)]
-        repo: Option<String>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Reconcile the registry against git's worktree list.
-    Doctor {
-        #[arg(long)]
-        fix: bool,
-    },
-    /// Fetch and fast-forward base's trunk; refuses if base is dirty.
-    Sync {
-        repo: Option<String>,
-        /// Also restack every stack in the repo that has branches in more
-        /// than one worktree, walking bottom-up from wherever each branch
-        /// lives. Never deletes a branch — that's `gt sync`'s job.
-        #[arg(long)]
-        stack: bool,
-    },
-    /// Restack a Graphite stack across every worktree that holds one of its
-    /// branches, bottom-up. A selector resolves like `wt stack`'s: a
-    /// worktree name/uuid first, then a branch name; with none, the stack
-    /// containing the current tree's (or base's) checked-out branch.
-    Restack {
-        selector: Option<String>,
-        /// Print the ordered plan and run nothing.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Show the Graphite stack containing a branch, with `wt` identity —
-    /// tree names instead of raw worktree paths. A selector is a worktree
-    /// name/uuid first, then a branch name; with none, the stack containing
-    /// the current tree's (or base's) checked-out branch.
-    Stack {
-        selector: Option<String>,
-        #[arg(long)]
-        json: bool,
-        /// Every stack in the repo, not just the one containing `selector`.
-        #[arg(long)]
-        all: bool,
-        /// Show merged and closed branches too; hidden by default.
-        #[arg(long)]
-        all_branches: bool,
-    },
-    /// Env-file maintenance for a tree.
-    Env {
+    /// Manage registered base repositories.
+    Repo {
         #[command(subcommand)]
-        action: EnvCommand,
+        command: RepoCommand,
     },
-    /// Show or manage each repo's hot spare — a pre-provisioned worktree
-    /// `wt new` claims instead of building one from cold.
-    Spare {
+    /// Create, inspect, and remove worktrees.
+    Tree {
         #[command(subcommand)]
-        action: Option<SpareCommand>,
-        #[arg(long)]
-        repo: Option<String>,
-        #[arg(long)]
-        json: bool,
+        command: TreeCommand,
     },
-    /// Exec `claude` with cwd set to a tree, a repo's base, or the cwd's tree.
-    /// Anything after `--` is passed straight to `claude`.
-    Claude {
-        target: Option<String>,
-        #[arg(last = true)]
-        args: Vec<String>,
+    /// Work with Graphite stacks across worktrees.
+    Gt {
+        #[command(subcommand)]
+        command: GtCommand,
     },
-    /// Exec `codex` with cwd set to a tree, a repo's base, or the cwd's tree.
-    /// Anything after `--` is passed straight to `codex`.
-    Codex {
-        target: Option<String>,
-        #[arg(last = true)]
-        args: Vec<String>,
+    /// Maintain the registry and remove unused trees.
+    Upkeep {
+        #[command(subcommand)]
+        command: UpkeepCommand,
     },
-    /// Runs a tree's provisioning steps; spawned detached by `wt new`.
+    /// Run a coding agent in a repository or tree.
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommand,
+    },
+    /// Open a session in a tree, creating it when requested.
+    #[command(
+        long_about = "Open Codex in an existing tree or create one when no match is found with --repo. Claude is selected with --claude.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository.\n\nExamples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go -- --model gpt-5"
+    )]
+    Go(GoArgs),
+    /// Change directory to a tree through installed shell integration.
+    Cd {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name."
+        )]
+        tree: String,
+    },
+    /// Show command help or the recursive command tree.
+    Help(HelpArgs),
+    /// Runs a tree's provisioning steps; spawned detached by `wt tree new`.
     #[command(name = "__provision", hide = true)]
     Provision {
         tree_id: Uuid,
         #[arg(long, value_delimiter = ',')]
         profile: Option<Vec<String>>,
     },
-    /// Builds or refreshes one hot spare; spawned detached by `wt new`,
-    /// `wt sync`, and `wt spare refresh`.
+    /// Builds or refreshes one hot spare; spawned detached by `wt tree new`,
+    /// `wt repo sync`, and `wt repo spare refresh`.
     #[command(name = "__spare", hide = true)]
     SpareInternal {
         #[command(subcommand)]
@@ -264,29 +108,418 @@ enum Command {
     /// caller's own window that are running Claude Code.
     #[command(name = "__tab-index", hide = true)]
     TabIndex,
-    /// Prints a tree's details for the `wt launch` fzf preview window.
+    /// Prints a tree's details for the `wt go` fzf preview window.
     #[command(name = "__launch-preview", hide = true)]
     LaunchPreview { selector: String },
 }
 
 #[derive(Subcommand)]
-enum EnvCommand {
-    /// Re-copy the repo's `copy` globs from base into a tree, overwriting
-    /// whatever is already there.
-    Refresh { selector: String },
+#[command(disable_help_subcommand = true)]
+enum RepoCommand {
+    /// Register an existing clone as a repository's base.
+    Adopt {
+        #[arg(
+            value_name = "REPO",
+            help = "Short name to register for this repository."
+        )]
+        name: String,
+        #[arg(value_name = "PATH", help = "Existing Git clone to use as the base.")]
+        adopt: PathBuf,
+        #[arg(
+            long,
+            value_name = "PREFIX",
+            help = "Branch prefix for a new repository (default: josh/). Existing config keeps its value."
+        )]
+        branch_prefix: Option<String>,
+        #[arg(
+            long,
+            help = "Replace only detected provisioning steps in an existing config block."
+        )]
+        redetect: bool,
+    },
+    /// Fetch and fast-forward a base's trunk.
+    Sync {
+        #[arg(
+            value_name = "REPO",
+            help = "Repository to sync. Omit to sync every registered repository."
+        )]
+        repo: Option<String>,
+        #[arg(
+            long,
+            help = "Also restack every cross-tree Graphite stack after syncing."
+        )]
+        stack: bool,
+    },
+    /// Move uncommitted base work into a fresh tree.
+    #[command(
+        long_about = "Move tracked and untracked uncommitted changes out of a repository base into a fresh tree. A clean base is refused. If applying the preserved stash conflicts, the stash is kept."
+    )]
+    Lift(LiftArgs),
+    /// Show or manage a repository's hot spare.
+    Spare(SpareArgs),
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("agent").args(["codex", "claude"])))]
+struct LiftArgs {
+    #[arg(
+        value_name = "REPO",
+        help = "Repository whose base to lift. Omit only from inside that base."
+    )]
+    repo: Option<String>,
+    #[arg(
+        long,
+        value_name = "SUMMARY",
+        help = "Human-readable name for the new tree."
+    )]
+    name: String,
+    #[arg(
+        long,
+        value_name = "BRANCH",
+        help = "Exact branch name for the new tree."
+    )]
+    branch: Option<String>,
+    #[arg(
+        long,
+        value_name = "PROFILE,...",
+        value_delimiter = ',',
+        help = "Comma-separated provisioning profiles. Omit to run every configured profile."
+    )]
+    profile: Option<Vec<String>>,
+    #[arg(
+        long,
+        conflicts_with = "claude",
+        help = "Open Codex after provisioning."
+    )]
+    codex: bool,
+    #[arg(
+        long,
+        conflicts_with = "codex",
+        help = "Open Claude after provisioning."
+    )]
+    claude: bool,
+    #[arg(
+        last = true,
+        requires = "agent",
+        value_name = "AGENT_ARGS",
+        help = "Arguments passed through to the selected agent after --."
+    )]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct SpareArgs {
+    #[command(subcommand)]
+    action: Option<SpareCommand>,
+    #[arg(
+        long,
+        value_name = "REPO",
+        help = "Repository to show. Omit to show all repositories."
+    )]
+    repo: Option<String>,
+    #[arg(long, help = "Write JSON instead of a table.")]
+    json: bool,
 }
 
 #[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum TreeCommand {
+    /// Create and provision a worktree.
+    New(NewArgs),
+    /// List registered worktrees.
+    Ls(ListArgs),
+    /// Print a worktree's absolute path.
+    Path {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name."
+        )]
+        selector: String,
+    },
+    /// Print the worktree name containing a path.
+    Name {
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Path to inspect. Defaults to the current directory."
+        )]
+        path: Option<PathBuf>,
+    },
+    /// Remove a worktree.
+    Rm {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name."
+        )]
+        selector: String,
+        #[arg(
+            long,
+            help = "Bypass dirty, unpushed-commit, and Graphite-child safety checks."
+        )]
+        force: bool,
+        #[arg(
+            long,
+            help = "Also delete the tree's branch when its commits are preserved elsewhere."
+        )]
+        delete_branch: bool,
+        #[arg(
+            long,
+            requires = "delete_branch",
+            help = "Re-parent Graphite children before deleting the branch."
+        )]
+        reparent_children: bool,
+    },
+    /// Show provisioning status.
+    Status {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name. Omit to show non-ready ordinary trees."
+        )]
+        selector: Option<String>,
+        #[arg(long, help = "Also include non-ready hot spares.")]
+        all: bool,
+        #[arg(long, help = "Write JSON instead of a table.")]
+        json: bool,
+    },
+    /// Wait for provisioning to finish.
+    Wait {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name. Omit only when exactly one ordinary tree is provisioning."
+        )]
+        selector: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 600,
+            value_name = "SECONDS",
+            help = "Maximum wait time in seconds (default: 600)."
+        )]
+        timeout: u64,
+    },
+    /// Copy configured env files from a base into a tree.
+    Env {
+        #[arg(
+            value_name = "TREE",
+            help = "Tree name, UUID, UUID prefix, unique name substring, or branch name. Matching env files are overwritten with the base's current copies; this does not regenerate values."
+        )]
+        selector: String,
+    },
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("agent").args(["codex", "claude"])))]
+struct NewArgs {
+    #[arg(
+        value_name = "REPO",
+        help = "Registered repository in which to create the tree."
+    )]
+    repo: String,
+    #[arg(
+        long,
+        value_name = "SUMMARY",
+        help = "Human-readable tree name; also supplies the generated branch suffix."
+    )]
+    name: String,
+    #[arg(
+        long,
+        value_name = "BRANCH",
+        help = "Exact branch to create. Defaults to the configured prefix plus a slug of --name."
+    )]
+    branch: Option<String>,
+    #[arg(
+        long,
+        value_name = "TREE_OR_REF",
+        help = "Tree branch, local branch, or commit to branch from instead of trunk."
+    )]
+    onto: Option<String>,
+    #[arg(
+        long,
+        value_name = "PROFILE,...",
+        value_delimiter = ',',
+        help = "Comma-separated provisioning profiles. Omit to run every configured profile."
+    )]
+    profile: Option<Vec<String>>,
+    #[arg(
+        long,
+        conflicts_with = "claude",
+        help = "Open Codex after provisioning."
+    )]
+    codex: bool,
+    #[arg(
+        long,
+        conflicts_with = "codex",
+        help = "Open Claude after provisioning."
+    )]
+    claude: bool,
+    #[arg(
+        last = true,
+        requires = "agent",
+        value_name = "AGENT_ARGS",
+        help = "Arguments passed through to the selected agent after --."
+    )]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct ListArgs {
+    #[arg(
+        long,
+        value_name = "REPO",
+        help = "Only list trees for this registered repository."
+    )]
+    repo: Option<String>,
+    #[arg(long, help = "Also show each repository's hot spare.")]
+    all: bool,
+    #[arg(long, help = "Write JSON instead of a table.")]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum GtCommand {
+    /// Show the stack containing a tree or branch.
+    Stack {
+        #[arg(
+            value_name = "TREE_OR_BRANCH",
+            help = "Tree selector or branch. A branch needs the current directory to identify its repository."
+        )]
+        selector: Option<String>,
+        #[arg(long, help = "Write JSON instead of text.")]
+        json: bool,
+        #[arg(long, help = "Show every stack in the current repository.")]
+        all: bool,
+        #[arg(long, help = "Include merged and closed branches.")]
+        all_branches: bool,
+    },
+    /// Restack a Graphite stack across its worktrees.
+    Restack {
+        #[arg(
+            value_name = "TREE_OR_BRANCH",
+            help = "Tree selector or branch. A branch needs the current directory to identify its repository."
+        )]
+        selector: Option<String>,
+        #[arg(long, help = "Print the ordered plan without changing anything.")]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum UpkeepCommand {
+    /// Reap safe, unused trees.
+    Gc {
+        #[arg(
+            long,
+            value_name = "REPO",
+            help = "Only reap trees for this registered repository."
+        )]
+        repo: Option<String>,
+        #[arg(long, help = "Report candidates without changing anything.")]
+        dry_run: bool,
+    },
+    /// Reconcile the registry with Git's worktree list.
+    Doctor {
+        #[arg(
+            long,
+            help = "Remove stale registry entries and prune Git worktree metadata."
+        )]
+        fix: bool,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum LlmCommand {
+    /// Run Claude with its working directory set.
+    Claude(AgentArgs),
+    /// Run Codex with its working directory set.
+    Codex(AgentArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    #[arg(
+        value_name = "TREE_OR_REPO",
+        help = "Registered repository base or tree selector. Omit to use the current registered tree or base."
+    )]
+    target: Option<String>,
+    #[arg(
+        last = true,
+        value_name = "AGENT_ARGS",
+        help = "Arguments passed through unchanged after --. Targeting a base prints a warning."
+    )]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct GoArgs {
+    #[arg(
+        value_name = "TREE",
+        help = "Existing tree name, UUID, UUID prefix, unique name substring, or branch; creates a new tree name when --repo is supplied. Omit for the picker."
+    )]
+    worktree: Option<String>,
+    #[arg(
+        long,
+        value_name = "REPO",
+        help = "Scope tree matching and create a tree here when no tree matches."
+    )]
+    repo: Option<String>,
+    #[arg(
+        long,
+        value_name = "BRANCH",
+        help = "Exact branch for a newly created tree."
+    )]
+    branch: Option<String>,
+    #[arg(
+        long,
+        value_name = "TREE_OR_REF",
+        help = "Tree branch, local branch, or commit to branch from when creating."
+    )]
+    onto: Option<String>,
+    #[arg(
+        long,
+        value_name = "PROFILE,...",
+        value_delimiter = ',',
+        help = "Comma-separated provisioning profiles for a newly created tree."
+    )]
+    profile: Option<Vec<String>>,
+    #[arg(long, help = "Open Claude instead of Codex.")]
+    claude: bool,
+    #[arg(
+        last = true,
+        value_name = "AGENT_ARGS",
+        help = "Arguments passed through unchanged to the selected agent after --."
+    )]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct HelpArgs {
+    #[arg(short, long, help = "Show the complete public command hierarchy.")]
+    recursive: bool,
+    #[arg(value_name = "COMMAND", num_args = 0.., help = "Optional command path to describe.")]
+    path: Vec<String>,
+}
+
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
 enum SpareCommand {
-    /// Force a refresh now instead of waiting for `wt sync`.
+    /// Force a refresh now instead of waiting for `wt repo sync`.
     Refresh {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "REPO",
+            help = "Repository to refresh. Omit to refresh all repositories."
+        )]
         repo: Option<String>,
     },
-    /// Remove a repo's spare and turn spares off for it, so `wt sync`/`wt
-    /// new` don't immediately rebuild one.
+    /// Remove a repo's spare and turn spares off so later syncs do not rebuild it.
     Drop {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "REPO",
+            help = "Repository whose spare to drop. Omit to use the current repository."
+        )]
         repo: Option<String>,
     },
 }
@@ -300,11 +533,15 @@ enum SpareInternalCommand {
 const PROVISION_WAIT_SECS: u64 = 600;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_legacy_args(std::env::args_os()));
     let root = store::root_dir();
     let config_path = config::config_path();
-    let result = migrate::run_if_needed(&root, &config_path)
-        .and_then(|()| run(&root, &config_path, cli.command));
+    let result = if matches!(&cli.command, Command::Help(_)) {
+        run(&root, &config_path, cli.command)
+    } else {
+        migrate::run_if_needed(&root, &config_path)
+            .and_then(|()| run(&root, &config_path, cli.command))
+    };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -316,130 +553,149 @@ fn main() -> ExitCode {
 
 fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
     match command {
-        Command::Init {
-            name,
-            adopt,
-            branch_prefix,
-            redetect,
-        } => repo::init(
-            root,
-            config_path,
-            repo::InitOptions {
+        Command::Repo { command } => match command {
+            RepoCommand::Adopt {
                 name,
-                adopt_path: adopt,
+                adopt,
                 branch_prefix,
                 redetect,
+            } => repo::init(
+                root,
+                config_path,
+                repo::InitOptions {
+                    name,
+                    adopt_path: adopt,
+                    branch_prefix,
+                    redetect,
+                },
+            ),
+            RepoCommand::Sync { repo, stack } => cmd_sync(root, config_path, repo, stack),
+            RepoCommand::Lift(args) => {
+                reject_unselected_agent_args(args.codex, args.claude, &args.args)?;
+                let path = tree::adopt(
+                    root,
+                    config_path,
+                    tree::AdoptOptions {
+                        repo: args.repo,
+                        name: args.name,
+                        branch: args.branch,
+                        profiles: args.profile,
+                    },
+                )?;
+                open_if_requested(
+                    root,
+                    &path,
+                    Agent::from_flags(args.codex, args.claude),
+                    &args.args,
+                )
+            }
+            RepoCommand::Spare(args) => match args.action {
+                None => cmd_spare_status(root, config_path, args.repo, args.json),
+                Some(action) => {
+                    if args.repo.is_some() || args.json {
+                        bail!(
+                            "place --repo after the spare action; for example: wt repo spare refresh --repo <REPO>"
+                        );
+                    }
+                    match action {
+                        SpareCommand::Refresh { repo } => {
+                            cmd_spare_refresh(root, config_path, repo)
+                        }
+                        SpareCommand::Drop { repo } => cmd_spare_drop(root, config_path, repo),
+                    }
+                }
             },
-        ),
-        Command::New {
-            repo,
-            name,
-            branch,
-            onto,
-            profile,
-            codex,
-            claude,
-            args,
-        } => {
-            let path = tree::new_tree(
+        },
+        Command::Tree { command } => match command {
+            TreeCommand::New(args) => {
+                reject_unselected_agent_args(args.codex, args.claude, &args.args)?;
+                let path = tree::new_tree(
+                    root,
+                    config_path,
+                    tree::NewOptions {
+                        repo: args.repo,
+                        name: args.name,
+                        branch: args.branch,
+                        onto: args.onto,
+                        profiles: args.profile,
+                    },
+                )?;
+                open_if_requested(
+                    root,
+                    &path,
+                    Agent::from_flags(args.codex, args.claude),
+                    &args.args,
+                )
+            }
+            TreeCommand::Ls(args) => cmd_ls(root, args.repo, args.all, args.json),
+            TreeCommand::Path { selector } => cmd_path(root, &selector),
+            TreeCommand::Name { path } => cmd_name(root, path),
+            TreeCommand::Rm {
+                selector,
+                force,
+                delete_branch,
+                reparent_children,
+            } => tree::rm_tree(
                 root,
                 config_path,
-                tree::NewOptions {
-                    repo,
-                    name,
-                    branch,
-                    onto,
-                    profiles: profile,
-                },
-            )?;
-            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
-        }
-        Command::Adopt {
-            repo,
-            name,
-            branch,
-            profile,
-            codex,
-            claude,
-            args,
-        } => {
-            let path = tree::adopt(
-                root,
-                config_path,
-                tree::AdoptOptions {
-                    repo,
-                    name,
-                    branch,
-                    profiles: profile,
-                },
-            )?;
-            open_if_requested(root, &path, Agent::from_flags(codex, claude), &args)
-        }
-        Command::Launch {
-            worktree,
-            repo,
-            branch,
-            onto,
-            profile,
-            claude,
-            args,
-        } => cmd_launch(
+                &selector,
+                force,
+                delete_branch,
+                reparent_children,
+            ),
+            TreeCommand::Status {
+                selector,
+                all,
+                json,
+            } => cmd_status(root, selector, all, json),
+            TreeCommand::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
+            TreeCommand::Env { selector } => env_refresh::refresh(root, &selector),
+        },
+        Command::Gt { command } => match command {
+            GtCommand::Stack {
+                selector,
+                json,
+                all,
+                all_branches,
+            } => cmd_stack(root, selector, json, all, all_branches),
+            GtCommand::Restack { selector, dry_run } => cmd_restack(root, selector, dry_run),
+        },
+        Command::Upkeep { command } => match command {
+            UpkeepCommand::Gc { repo, dry_run } => {
+                validate_repo_filter(root, repo.as_deref())?;
+                tree::gc(root, config_path, tree::GcOptions { repo, dry_run })
+            }
+            UpkeepCommand::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
+        },
+        Command::Llm { command } => match command {
+            LlmCommand::Claude(args) => {
+                agent::exec_target(root, Agent::Claude, args.target, &args.args)
+            }
+            LlmCommand::Codex(args) => {
+                agent::exec_target(root, Agent::Codex, args.target, &args.args)
+            }
+        },
+        Command::Go(args) => cmd_launch(
             root,
             config_path,
             LaunchArgs {
-                worktree,
-                repo,
-                branch,
-                onto,
-                profile,
+                worktree: args.worktree,
+                repo: args.repo,
+                branch: args.branch,
+                onto: args.onto,
+                profile: args.profile,
             },
-            if claude { Agent::Claude } else { Agent::Codex },
-            &args,
+            if args.claude {
+                Agent::Claude
+            } else {
+                Agent::Codex
+            },
+            &args.args,
         ),
-        Command::Ls { repo, all, json } => cmd_ls(root, repo, all, json),
-        Command::Path { selector } => cmd_path(root, &selector),
-        Command::Name { path } => cmd_name(root, path),
-        Command::Rm {
-            selector,
-            force,
-            delete_branch,
-            reparent_children,
-        } => tree::rm_tree(
-            root,
-            config_path,
-            &selector,
-            force,
-            delete_branch,
-            reparent_children,
+        Command::Cd { tree } => bail!(
+            "`wt cd` needs the installed shell integration because a program cannot change its parent shell's directory; run `wt tree path {tree}` or reinstall wt and open a new shell"
         ),
-        Command::Status {
-            selector,
-            all,
-            json,
-        } => cmd_status(root, selector, all, json),
-        Command::Wait { selector, timeout } => cmd_wait(root, selector, timeout),
-        Command::Gc { repo, dry_run } => {
-            tree::gc(root, config_path, tree::GcOptions { repo, dry_run })
-        }
-        Command::Doctor { fix } => tree::doctor(root, tree::DoctorOptions { fix }),
-        Command::Sync { repo, stack } => sync::sync(root, config_path, repo, stack),
-        Command::Restack { selector, dry_run } => cmd_restack(root, selector, dry_run),
-        Command::Stack {
-            selector,
-            json,
-            all,
-            all_branches,
-        } => cmd_stack(root, selector, json, all, all_branches),
-        Command::Env { action } => match action {
-            EnvCommand::Refresh { selector } => env_refresh::refresh(root, &selector),
-        },
-        Command::Spare { action, repo, json } => match action {
-            None => cmd_spare_status(root, config_path, repo, json),
-            Some(SpareCommand::Refresh { repo }) => cmd_spare_refresh(root, config_path, repo),
-            Some(SpareCommand::Drop { repo }) => cmd_spare_drop(root, config_path, repo),
-        },
-        Command::Claude { target, args } => agent::exec_target(root, Agent::Claude, target, &args),
-        Command::Codex { target, args } => agent::exec_target(root, Agent::Codex, target, &args),
+        Command::Help(args) => cmd_help(args),
         Command::Provision { tree_id, profile } => {
             provision::run(root, config_path, tree_id, profile)
         }
@@ -456,6 +712,231 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
         }
         Command::LaunchPreview { selector } => cmd_launch_preview(root, config_path, &selector),
     }
+}
+
+fn reject_unselected_agent_args(codex: bool, claude: bool, args: &[String]) -> Result<()> {
+    if !args.is_empty() && !codex && !claude {
+        bail!("arguments after -- require --codex or --claude");
+    }
+    Ok(())
+}
+
+fn cmd_sync(root: &Path, config_path: &Path, repo: Option<String>, stack: bool) -> Result<()> {
+    validate_repo_filter(root, repo.as_deref())?;
+    sync::sync(root, config_path, repo, stack)
+}
+
+fn validate_repo_filter(root: &Path, repo: Option<&str>) -> Result<()> {
+    let Some(repo) = repo else {
+        return Ok(());
+    };
+    let store = store::load(root)?;
+    if !store.repos.contains_key(repo) {
+        bail!(
+            "unknown repo '{repo}'. Known repos: {}",
+            known_repos(&store)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_help(args: HelpArgs) -> Result<()> {
+    let command = public_command_for_path(&args.path)?;
+    let command_path = args.path.iter().map(String::as_str).collect::<Vec<_>>();
+    if args.recursive {
+        print!("{}", recursive_help(&command, &command_path));
+        return Ok(());
+    }
+    print!("{}", detailed_help(command, &command_path));
+    Ok(())
+}
+
+fn public_command_for_path(path: &[String]) -> Result<clap::Command> {
+    let mut command = Cli::command();
+    for component in path {
+        let children = visible_children(&command)
+            .map(|child| child.get_name().to_string())
+            .collect::<Vec<_>>();
+        let next = visible_children(&command)
+            .find(|child| child.get_name() == component)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "unknown command '{component}'. Valid commands: {}",
+                    if children.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        children.join(", ")
+                    }
+                )
+            })?;
+        command = next;
+    }
+    Ok(command)
+}
+
+fn detailed_help(mut command: clap::Command, path: &[&str]) -> String {
+    let invocation = if path.is_empty() {
+        "wt".to_string()
+    } else {
+        format!("wt {}", path.join(" "))
+    };
+    command.set_bin_name(invocation);
+    command.render_long_help().to_string()
+}
+
+fn visible_children(command: &clap::Command) -> impl Iterator<Item = &clap::Command> {
+    command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+}
+
+fn recursive_help(command: &clap::Command, path: &[&str]) -> String {
+    let display = if path.is_empty() {
+        "wt".to_string()
+    } else {
+        format!("wt {}", path.join(" "))
+    };
+    let mut out = display;
+    if let Some(about) = command.get_about() {
+        out.push_str(&format!(" -- {about}"));
+    }
+    out.push('\n');
+    let children = visible_children(command).collect::<Vec<_>>();
+    for (index, child) in children.iter().enumerate() {
+        render_command_tree(child, "", index + 1 == children.len(), &mut out);
+    }
+    out
+}
+
+fn render_command_tree(command: &clap::Command, prefix: &str, last: bool, out: &mut String) {
+    out.push_str(prefix);
+    out.push_str(if last { "└── " } else { "├── " });
+    out.push_str(command.get_name());
+    if let Some(about) = command.get_about() {
+        out.push_str(&format!(" -- {about}"));
+    }
+    out.push('\n');
+    let next_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
+    let children = visible_children(command).collect::<Vec<_>>();
+    for (index, child) in children.iter().enumerate() {
+        render_command_tree(child, &next_prefix, index + 1 == children.len(), out);
+    }
+}
+
+fn normalize_legacy_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = args.into_iter();
+    let Some(program) = args.next() else {
+        return Vec::new();
+    };
+    let rest = args.collect::<Vec<_>>();
+    let words = rest
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+    let canonical = match words.first().map(|word| word.as_ref()) {
+        Some("new") => prepend_words(&rest, &["tree", "new"]),
+        Some("ls") => prepend_words(&rest, &["tree", "ls"]),
+        Some("path") => prepend_words(&rest, &["tree", "path"]),
+        Some("name") => prepend_words(&rest, &["tree", "name"]),
+        Some("rm") => prepend_words(&rest, &["tree", "rm"]),
+        Some("status") => prepend_words(&rest, &["tree", "status"]),
+        Some("wait") => prepend_words(&rest, &["tree", "wait"]),
+        Some("stack") => prepend_words(&rest, &["gt", "stack"]),
+        Some("restack") => prepend_words(&rest, &["gt", "restack"]),
+        Some("gc") => prepend_words(&rest, &["upkeep", "gc"]),
+        Some("doctor") => prepend_words(&rest, &["upkeep", "doctor"]),
+        Some("sync") => prepend_words(&rest, &["repo", "sync"]),
+        Some("spare") => prepend_words(&rest, &["repo", "spare"]),
+        Some("claude") => prepend_words(&rest, &["llm", "claude"]),
+        Some("codex") => prepend_words(&rest, &["llm", "codex"]),
+        Some("adopt") => prepend_words(&rest, &["repo", "lift"]),
+        Some("env") if words.get(1).is_some_and(|word| word == "refresh") => {
+            let mut rewritten = vec![
+                std::ffi::OsString::from("tree"),
+                std::ffi::OsString::from("env"),
+            ];
+            rewritten.extend(rest.into_iter().skip(2));
+            rewritten
+        }
+        Some("init") => normalize_legacy_init(&rest),
+        Some("launch") => normalize_legacy_launch(&rest),
+        _ => rest,
+    };
+    std::iter::once(program).chain(canonical).collect()
+}
+
+fn prepend_words(rest: &[std::ffi::OsString], prefix: &[&str]) -> Vec<std::ffi::OsString> {
+    prefix
+        .iter()
+        .map(std::ffi::OsString::from)
+        .chain(rest.iter().skip(1).cloned())
+        .collect()
+}
+
+fn normalize_legacy_init(rest: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    let mut out = vec![
+        std::ffi::OsString::from("repo"),
+        std::ffi::OsString::from("adopt"),
+    ];
+    let mut iter = rest.iter().skip(1);
+    if let Some(name) = iter.next() {
+        out.push(name.clone());
+    }
+    let mut path = None;
+    while let Some(arg) = iter.next() {
+        if arg == "--adopt" {
+            path = iter.next().cloned();
+        } else if let Some(value) = arg.to_string_lossy().strip_prefix("--adopt=") {
+            path = Some(std::ffi::OsString::from(value));
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    if let Some(path) = path {
+        out.insert(3, path);
+    }
+    out
+}
+
+fn normalize_legacy_launch(rest: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    let mut remainder = Vec::new();
+    let mut positionals = Vec::new();
+    let mut after_separator = false;
+    let mut option_value_follows = false;
+    for arg in rest.iter().skip(1) {
+        let arg_text = arg.to_string_lossy();
+        if after_separator {
+            remainder.push(arg.clone());
+        } else if option_value_follows {
+            remainder.push(arg.clone());
+            option_value_follows = false;
+        } else if arg == "--" {
+            remainder.push(arg.clone());
+            after_separator = true;
+        } else if matches!(arg_text.as_ref(), "--branch" | "--onto" | "--profile") {
+            remainder.push(arg.clone());
+            option_value_follows = true;
+        } else if arg_text.starts_with('-') {
+            remainder.push(arg.clone());
+        } else if positionals.len() < 2 {
+            positionals.push(arg.clone());
+        } else {
+            remainder.push(arg.clone());
+        }
+    }
+    let mut out = vec![std::ffi::OsString::from("go")];
+    if let Some(tree) = positionals.first() {
+        out.push(tree.clone());
+    }
+    if let Some(repo) = positionals.get(1) {
+        out.push(std::ffi::OsString::from("--repo"));
+        out.push(repo.clone());
+    }
+    out.extend(remainder);
+    out
 }
 
 /// Blocks until provisioning finishes before handing the tree over: a
@@ -480,8 +961,8 @@ fn open_if_requested(
     eprintln!("waiting for provisioning before opening a session...");
     wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
         format!(
-            "not opening a session; the tree is still at {} — inspect it with `wt status`, then \
-             `wt {}` into it once you know why",
+            "not opening a session; the tree is still at {} — inspect it with `wt tree status`, then \
+             `wt llm {}` into it once you know why",
             tree_path.display(),
             agent.executable()
         )
@@ -533,7 +1014,7 @@ fn resolve_launch(
             None => cwd_repo.map(str::to_string).with_context(|| {
                 format!(
                     "'{worktree}' has no repo, and the current directory isn't inside a \
-                     registered repo; pass one: wt launch {worktree} <repo>"
+                     registered repo; pass one: wt go {worktree} --repo <REPO>"
                 )
             })?,
         };
@@ -546,47 +1027,44 @@ fn resolve_launch(
         });
     }
 
-    if let Some(repo) = repo_arg {
-        let existing = store.trees.iter().find(|t| {
-            t.repo == repo
-                && (t.name == worktree || tree::slugify(&t.name) == tree::slugify(worktree))
-        });
-        return Ok(match existing {
-            Some(t) => LaunchPlan::Existing { id: t.id },
-            None => LaunchPlan::New {
-                repo: repo.to_string(),
-                name: worktree.to_string(),
-            },
-        });
+    if let Some(repo) = repo_arg
+        && !store.repos.contains_key(repo)
+    {
+        bail!("unknown repo '{repo}'. Known repos: {}", known_repos(store));
     }
 
-    let matches: Vec<&store::Tree> = store
-        .trees
-        .iter()
-        .filter(|t| t.name == worktree || tree::slugify(&t.name) == tree::slugify(worktree))
-        .collect();
-
-    match matches.len() {
-        0 => bail!(
-            "no tree named '{worktree}'; to create one, pass the repo: wt launch {worktree} <repo>"
-        ),
-        1 => Ok(LaunchPlan::Existing { id: matches[0].id }),
-        _ => {
-            if let Some(cwd_repo) = cwd_repo
-                && let Some(t) = matches.iter().find(|t| t.repo == cwd_repo)
-            {
-                return Ok(LaunchPlan::Existing { id: t.id });
-            }
-            let candidates = matches
-                .iter()
-                .map(|t| format!("{}  {}", t.repo, t.name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!(
-                "'{worktree}' is ambiguous across repos: {candidates}; pass the repo: \
-                 wt launch {worktree} <repo>"
-            );
+    let scoped = |repo: Option<&str>| {
+        store
+            .trees
+            .iter()
+            .filter(|tree| repo.is_none_or(|repo| tree.repo == repo))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let candidates = if let Some(repo) = repo_arg {
+        scoped(Some(repo))
+    } else if let Some(repo) = cwd_repo {
+        let in_cwd_repo = scoped(Some(repo));
+        if store::resolve_optional(&in_cwd_repo, worktree)?.is_some() {
+            in_cwd_repo
+        } else {
+            scoped(None)
         }
+    } else {
+        scoped(None)
+    };
+
+    match store::resolve_optional(&candidates, worktree)? {
+        Some(tree) => Ok(LaunchPlan::Existing { id: tree.id }),
+        None => match repo_arg {
+            Some(repo) => Ok(LaunchPlan::New {
+                repo: repo.to_string(),
+                name: worktree.to_string(),
+            }),
+            None => bail!(
+                "no tree matches '{worktree}'; to create one, pass --repo: wt go {worktree} --repo <REPO>"
+            ),
+        },
     }
 }
 
@@ -612,7 +1090,7 @@ fn wait_for_tree(root: &Path, id: Uuid, agent: Agent) -> Result<store::Tree> {
     eprintln!("waiting for provisioning before opening a session...");
     wait_for_ready(root, id, PROVISION_WAIT_SECS).with_context(|| {
         format!(
-            "not opening a session; inspect '{pending_name}' with `wt status`, then `wt {}` \
+            "not opening a session; inspect '{pending_name}' with `wt tree status`, then `wt llm {}` \
              into it once you know why",
             agent.executable()
         )
@@ -669,8 +1147,8 @@ fn cmd_launch(
             if branch.is_some() || onto.is_some() || profile.is_some() {
                 bail!(
                     "the picker only opens trees that already exist, so --branch, --onto, and \
-                     --profile need a worktree name to create one: wt launch <worktree> [repo] \
-                     --branch <b>"
+                     --profile need a tree name to create one: wt go <TREE> --repo <REPO> \
+                     --branch <BRANCH>"
                 );
             }
             match pick::pick_tree(&store, cwd_repo)? {
@@ -839,6 +1317,14 @@ fn ls_state_str(t: &store::Tree) -> String {
 
 fn cmd_ls(root: &Path, repo_filter: Option<String>, all: bool, json: bool) -> Result<()> {
     let store = store::load(root)?;
+    if let Some(repo) = repo_filter.as_deref()
+        && !store.repos.contains_key(repo)
+    {
+        bail!(
+            "unknown repo '{repo}'. Known repos: {}",
+            known_repos(&store)
+        );
+    }
     let mut rows = Vec::new();
     for t in &store.trees {
         if !all && t.spare {
@@ -1044,7 +1530,7 @@ fn cmd_stack(
     }
 }
 
-/// Resolves which repo `wt stack` looks at, and — for the default,
+/// Resolves which repo `wt gt stack` looks at, and — for the default,
 /// non-`--all` view — which branch counts as "current" for the `*` marker
 /// and the stack it shows.
 fn stack_context(
@@ -1053,7 +1539,7 @@ fn stack_context(
     cwd: Option<&Path>,
 ) -> Result<(String, Option<String>)> {
     if let Some(sel) = selector {
-        if let Ok(t) = store::resolve(&store.trees, sel) {
+        if let Some(t) = store::resolve_optional(&store.trees, sel)? {
             return Ok((t.repo.clone(), Some(live_branch(t))));
         }
         let repo = cwd
@@ -1082,8 +1568,8 @@ fn stack_context(
         return Ok((name.clone(), git::current_branch(&repo.base).ok()));
     }
     bail!(
-        "not inside a registered tree or repo; pass a selector, e.g. `wt stack <tree>` or \
-         `wt stack --all`"
+        "not inside a registered tree or repo; pass a selector, e.g. `wt gt stack <tree>` or \
+         `wt gt stack --all`"
     );
 }
 
@@ -1528,6 +2014,14 @@ fn cmd_spare_status(
     json: bool,
 ) -> Result<()> {
     let store = store::load(root)?;
+    if let Some(repo) = repo_filter.as_deref()
+        && !store.repos.contains_key(repo)
+    {
+        bail!(
+            "unknown repo '{repo}'. Known repos: {}",
+            known_repos(&store)
+        );
+    }
     let config = config::load(config_path)?;
     let mut rows = Vec::new();
     for t in &store.trees {
@@ -1601,6 +2095,7 @@ fn cmd_spare_status(
 }
 
 fn cmd_spare_refresh(root: &Path, config_path: &Path, repo: Option<String>) -> Result<()> {
+    validate_repo_filter(root, repo.as_deref())?;
     spare::refresh(root, config_path, repo.as_deref())?;
     println!("refreshing");
     Ok(())
@@ -1608,7 +2103,7 @@ fn cmd_spare_refresh(root: &Path, config_path: &Path, repo: Option<String>) -> R
 
 /// Resolves `--repo`, else the current directory's repo, and errors
 /// naming the registered repos rather than falling back to "every repo" —
-/// a bare `wt spare drop` must never silently turn spares off everywhere.
+/// a bare `wt repo spare drop` must never silently turn spares off everywhere.
 fn cmd_spare_drop(root: &Path, config_path: &Path, repo: Option<String>) -> Result<()> {
     let repo_name = match repo {
         Some(r) => r,
@@ -1627,6 +2122,7 @@ fn cmd_spare_drop(root: &Path, config_path: &Path, repo: Option<String>) -> Resu
                 })?
         }
     };
+    validate_repo_filter(root, Some(&repo_name))?;
     spare::drop_spare(root, config_path, &repo_name)?;
     println!("dropped {repo_name}'s hot spare; spares are now off for it");
     Ok(())
@@ -1743,13 +2239,13 @@ mod tests {
         let store = store_with(&[("monorepo", "/base")], vec![]);
         let err = resolve_launch(&store, "ghost", None, false, None).unwrap_err();
         assert!(
-            err.to_string().contains("no tree named 'ghost'"),
+            err.to_string().contains("no tree matches 'ghost'"),
             "message was: {err}"
         );
     }
 
     #[test]
-    fn resolve_launch_ambiguous_name_across_repos_names_both_candidates() {
+    fn resolve_launch_ambiguous_name_across_repos_is_an_error() {
         let a = tree_in(
             "019fa4ef-6669-7f32-a29c-a459aee6716b",
             "repo-a",
@@ -1763,9 +2259,7 @@ mod tests {
         let store = store_with(&[("repo-a", "/a"), ("repo-b", "/b")], vec![a, b]);
 
         let err = resolve_launch(&store, "shared name", None, false, None).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("repo-a  shared name"), "message was: {msg}");
-        assert!(msg.contains("repo-b  shared name"), "message was: {msg}");
+        assert!(err.to_string().contains("ambiguous"), "message was: {err}");
     }
 
     #[test]
@@ -1837,5 +2331,155 @@ mod tests {
         let store = store_with(&[("monorepo", "/base")], vec![]);
         let err = resolve_launch(&store, "@poking-around", None, false, None).unwrap_err();
         assert!(err.to_string().contains("repo"), "message was: {err}");
+    }
+
+    fn parse(args: &[&str]) -> std::result::Result<Cli, clap::Error> {
+        Cli::try_parse_from(normalize_legacy_args(
+            args.iter().map(std::ffi::OsString::from),
+        ))
+    }
+
+    #[test]
+    fn root_help_exposes_only_the_public_hierarchy() {
+        let root = Cli::command();
+        let children = visible_children(&root)
+            .map(|child| child.get_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            children,
+            ["repo", "tree", "gt", "upkeep", "llm", "go", "cd", "help"]
+        );
+    }
+
+    #[test]
+    fn recursive_help_is_public_deterministic_and_nested() {
+        let output = recursive_help(&Cli::command(), &[]);
+        assert!(output.contains("├── repo -- Manage registered base repositories"));
+        assert!(output.contains("│   └── spare -- Show or manage a repository's hot spare"));
+        assert!(output.contains("│       ├── refresh"));
+        assert!(output.contains("├── tree -- Create, inspect, and remove worktrees"));
+        assert!(
+            output.contains(
+                "├── cd -- Change directory to a tree through installed shell integration"
+            )
+        );
+        assert!(!output.contains("__provision"));
+        assert!(!output.contains("launch"));
+    }
+
+    #[test]
+    fn recursive_help_can_be_limited_to_a_namespace() {
+        let command = Cli::command();
+        let repo = command.find_subcommand("repo").unwrap();
+        let output = recursive_help(repo, &["repo"]);
+        assert!(output.starts_with("wt repo -- Manage registered base repositories\n"));
+        assert!(output.contains("└── spare"));
+        assert!(!output.contains("tree --"));
+    }
+
+    #[test]
+    fn explicit_help_uses_long_help_and_excludes_hidden_commands() {
+        let path = vec!["go".to_string()];
+        let help = detailed_help(public_command_for_path(&path).unwrap(), &["go"]);
+        assert!(help.contains("A TREE starting with @ opens a labeled scratch session"));
+        assert!(help.contains("wt go @poking-around --repo monorepo"));
+
+        let hidden = vec!["__provision".to_string()];
+        assert!(public_command_for_path(&hidden).is_err());
+    }
+
+    #[test]
+    fn legacy_routes_normalize_to_canonical_routes() {
+        let cases = [
+            (
+                vec!["wt", "new", "repo", "--name", "x"],
+                vec!["wt", "tree", "new", "repo", "--name", "x"],
+            ),
+            (vec!["wt", "ls"], vec!["wt", "tree", "ls"]),
+            (vec!["wt", "path", "x"], vec!["wt", "tree", "path", "x"]),
+            (vec!["wt", "name"], vec!["wt", "tree", "name"]),
+            (vec!["wt", "rm", "x"], vec!["wt", "tree", "rm", "x"]),
+            (vec!["wt", "status"], vec!["wt", "tree", "status"]),
+            (vec!["wt", "wait"], vec!["wt", "tree", "wait"]),
+            (
+                vec!["wt", "env", "refresh", "x"],
+                vec!["wt", "tree", "env", "x"],
+            ),
+            (vec!["wt", "stack"], vec!["wt", "gt", "stack"]),
+            (vec!["wt", "restack"], vec!["wt", "gt", "restack"]),
+            (vec!["wt", "gc"], vec!["wt", "upkeep", "gc"]),
+            (vec!["wt", "doctor"], vec!["wt", "upkeep", "doctor"]),
+            (vec!["wt", "sync"], vec!["wt", "repo", "sync"]),
+            (vec!["wt", "spare"], vec!["wt", "repo", "spare"]),
+            (vec!["wt", "claude"], vec!["wt", "llm", "claude"]),
+            (vec!["wt", "codex"], vec!["wt", "llm", "codex"]),
+            (vec!["wt", "adopt"], vec!["wt", "repo", "lift"]),
+            (
+                vec!["wt", "init", "repo", "--adopt", "/base"],
+                vec!["wt", "repo", "adopt", "repo", "/base"],
+            ),
+            (
+                vec!["wt", "init", "repo", "--adopt=/base"],
+                vec!["wt", "repo", "adopt", "repo", "/base"],
+            ),
+            (
+                vec!["wt", "launch", "tree", "repo"],
+                vec!["wt", "go", "tree", "--repo", "repo"],
+            ),
+            (
+                vec!["wt", "launch", "--branch", "feature", "tree", "repo"],
+                vec!["wt", "go", "tree", "--repo", "repo", "--branch", "feature"],
+            ),
+            (
+                vec![
+                    "wt",
+                    "launch",
+                    "tree",
+                    "--onto=base",
+                    "repo",
+                    "--profile=node,python",
+                ],
+                vec![
+                    "wt",
+                    "go",
+                    "tree",
+                    "--repo",
+                    "repo",
+                    "--onto=base",
+                    "--profile=node,python",
+                ],
+            ),
+        ];
+        for (input, expected) in cases {
+            let actual = normalize_legacy_args(input.iter().map(std::ffi::OsString::from))
+                .iter()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn parser_enforces_tree_removal_and_agent_argument_constraints() {
+        assert!(parse(&["wt", "tree", "rm", "tree", "--reparent-children"]).is_err());
+        assert!(
+            parse(&[
+                "wt", "tree", "new", "repo", "--name", "tree", "--", "--model", "x"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "wt", "tree", "new", "repo", "--name", "tree", "--codex", "--", "--model", "x"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "wt", "repo", "lift", "repo", "--name", "tree", "--", "--model", "x"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["wt", "repo", "spare", "--repo", "repo", "refresh"]).is_ok());
     }
 }

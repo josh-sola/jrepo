@@ -44,7 +44,7 @@ pub fn slugify(name: &str) -> String {
     slug
 }
 
-/// The result of `plan_tree`: every decision `wt new` has to make before it
+/// The result of `plan_tree`: every decision `wt tree new` has to make before it
 /// touches disk, resolved once so both the claim path and the cold path act
 /// on the same answer.
 pub(crate) struct TreePlan {
@@ -77,14 +77,14 @@ pub fn new_tree(root: &Path, config_path: &Path, opts: NewOptions) -> Result<Pat
     }
     println!("{}", tree_path.display());
     // A claimed or freshly built tree both leave the repo's spare pool one
-    // short; topping up here is what keeps the next `wt new` fast too. Never
+    // short; topping up here is what keeps the next `wt tree new` fast too. Never
     // lets a spare-provisioning hiccup fail the command that just succeeded.
     crate::spare::top_up(root, config_path, Some(&plan.repo_name)).ok();
     Ok(tree_path)
 }
 
 /// Resolves `--onto`, fetches trunk when stale, derives the branch name, and
-/// rejects a collision — everything `wt new` needs to decide before it
+/// rejects a collision — everything `wt tree new` needs to decide before it
 /// claims a spare or builds cold. Branch validation happens here, ahead of
 /// any claim, so a colliding name never consumes a spare only to fail anyway.
 fn plan_tree(root: &Path, config: &config::Config, opts: &NewOptions) -> Result<TreePlan> {
@@ -162,7 +162,7 @@ fn plan_tree(root: &Path, config: &config::Config, opts: &NewOptions) -> Result<
 }
 
 /// Worktree creation, shared-state wiring, and the registry write — stops
-/// short of starting provisioning so `wt adopt` can pop its stash into the
+/// short of starting provisioning so `wt repo lift` can pop its stash into the
 /// tree first, before a background install could touch any of the same
 /// files, and so `new_tree` can start it only when `needs_steps` says so.
 fn create_cold(root: &Path, plan: &TreePlan) -> Result<(Uuid, PathBuf, PathBuf)> {
@@ -195,7 +195,7 @@ fn create_cold_with(
 
     // Registered while still `Provisioning` so a failure in wiring or a
     // step below lands as a `Failed` entry, not an orphan invisible to
-    // `wt ls`/`wt rm`.
+    // `wt tree ls`/`wt tree rm`.
     let now = Utc::now();
     store::with_store_lock(root, |s| {
         s.trees.push(Tree {
@@ -245,7 +245,7 @@ fn create_tree_with(
     create_cold_with(root, &plan, gt_bin)
 }
 
-/// Resolves `--onto`'s selector into the branch `wt new` should create its
+/// Resolves `--onto`'s selector into the branch `wt tree new` should create its
 /// worktree from, checked in the same tiered, ambiguity-errors order as
 /// `store::resolve_index`: a `wt` tree in this repo — by the branch it
 /// actually has checked out right now, never `Tree.branch`, which only
@@ -303,7 +303,7 @@ fn resolve_onto_tree(trees: &[&Tree], sel: &str) -> Result<Option<String>> {
 }
 
 /// `gt`'s wording when `--parent` names a branch it doesn't track itself —
-/// the common case the first time anything stacks onto a plain `wt new`
+/// the common case the first time anything stacks onto a plain `wt tree new`
 /// tree, since that tree was never tracked. Matched loosely, like
 /// `restack.rs`'s misrouted-worktree marker: a reworded message only costs
 /// this specific remedy, never turns the generic warning into no warning.
@@ -444,7 +444,7 @@ pub struct AdoptOptions {
 /// for when editing started in base by mistake (base blocks commits, not
 /// edits). `refs/stash` lives in the common git dir, so it is visible from
 /// every worktree of the same clone; that's what lets a stash taken in base
-/// be popped straight into the tree `wt new` just created from it, no patch
+/// be popped straight into the tree `wt tree new` just created from it, no patch
 /// file needed.
 ///
 /// No `--onto` here: the stash was taken against whatever base's `HEAD`
@@ -457,13 +457,13 @@ pub fn adopt(root: &Path, config_path: &Path, opts: AdoptOptions) -> Result<Path
 
     if !git::is_dirty(&repo.base)? {
         bail!(
-            "{repo_name}'s base ({}) is clean; there is nothing to adopt",
+            "{repo_name}'s base ({}) is clean; there is nothing to lift",
             repo.base.display()
         );
     }
 
     let stash_sha =
-        git::stash_push_include_untracked(&repo.base, &format!("wt adopt: {}", opts.name))?;
+        git::stash_push_include_untracked(&repo.base, &format!("wt repo lift: {}", opts.name))?;
 
     let new_opts = NewOptions {
         repo: repo_name.clone(),
@@ -511,7 +511,7 @@ pub fn adopt(root: &Path, config_path: &Path, opts: AdoptOptions) -> Result<Path
 }
 
 /// `Some(name)` looks the repo up by name; `None` resolves from the current
-/// directory, since `wt adopt` is meant to be run from inside the base
+/// directory, since `wt repo lift` is meant to be run from inside the base
 /// checkout it's rescuing work out of.
 fn resolve_adopt_repo(store: &store::Store, repo: Option<String>) -> Result<(String, Repo)> {
     if let Some(name) = repo {
@@ -641,8 +641,8 @@ fn matches_glob(pattern: &str, filename: &str) -> bool {
 /// gitignores wholesale (build caches, `node_modules`, `.venv`s) just to
 /// find a dozen `.env` files. A tracked file is never a candidate either —
 /// if it's tracked it's already in the worktree. `fs::copy` overwrites an
-/// existing destination, which is what makes this reusable as `wt env
-/// refresh`'s re-copy. Returns the relative paths actually copied, so a
+/// existing destination, which is what makes this reusable as `wt tree env`'s
+/// re-copy. Returns the relative paths actually copied, so a
 /// caller can report them.
 pub(crate) fn copy_globs(
     base: &Path,
@@ -728,7 +728,7 @@ fn rm_tree_with(
 
     if state == TreeState::Provisioning && !force {
         bail!(
-            "tree '{name}' is still provisioning; run `wt wait '{name}'` first, or pass --force \
+            "tree '{name}' is still provisioning; run `wt tree wait '{name}'` first, or pass --force \
              to stop it and remove anyway"
         );
     }
@@ -782,7 +782,7 @@ fn rm_tree_with(
             };
             bail!(
                 "failed to remove worktree at {}: {err:#}. The registry entry is kept; remove it \
-                 by hand (rm -rf \"{}\" && git -C {} worktree prune) or run `wt doctor --fix`.",
+                 by hand (rm -rf \"{}\" && git -C {} worktree prune) or run `wt upkeep doctor --fix`.",
                 tree_path.display(),
                 tree_path.display(),
                 repo.base.display()
@@ -824,7 +824,7 @@ fn rm_tree_with(
 }
 
 /// Graphite children of `branch`, each paired with where it lives — the same
-/// holder resolution `wt restack` uses, so a message or a `gt track` call
+/// holder resolution `wt gt restack` uses, so a message or a `gt track` call
 /// names an actual tree rather than a raw worktree path. `Ok(None)` when
 /// Graphite's stack graph can't be read, or doesn't track `branch` at all:
 /// there is nothing to check a delete against, so callers treat that the
@@ -855,7 +855,7 @@ fn stacked_children(
 /// each one onto the deleted branch's own parent (trunk, if it has none)
 /// with `gt track` first. Silently allows the delete when Graphite's stack
 /// graph can't be read at all: there is nothing to check against, and a
-/// schema change or a missing database must never block `wt rm`.
+/// schema change or a missing database must never block `wt tree rm`.
 fn guard_stacked_children(
     store: &store::Store,
     repo_name: &str,
@@ -891,7 +891,7 @@ fn guard_stacked_children(
         msg.push_str(&format!(
             "re-parent {} onto '{new_parent}' first, then delete '{branch}' — by hand with `gt \
              track --parent {new_parent}` in each tree above, or pass --reparent-children to let \
-             `wt rm` do it for you",
+             `wt tree rm` do it for you",
             if children.len() == 1 { "it" } else { "them" }
         ));
         bail!(msg);
@@ -1079,7 +1079,7 @@ fn gc_verdict(
     // wave it through and take its provisioning log with it.
     if tree.state == TreeState::Failed {
         return Ok(GcVerdict::Skip(
-            "provisioning failed; read its log, then remove it with `wt rm`".to_string(),
+            "provisioning failed; read its log, then remove it with `wt tree rm`".to_string(),
         ));
     }
     if tree.path.exists() && git::is_dirty(&tree.path)? {

@@ -10,9 +10,9 @@ use uuid::Uuid;
 use crate::config;
 use crate::store::{self, TreeState};
 
-/// Runs as `wt __provision <tree-id>`, re-exec'd and detached by `wt new`
+/// Runs as `wt __provision <tree-id>`, re-exec'd and detached by `wt tree new`
 /// so the parent can return the tree path immediately. All state lives in
-/// `state.json`; `wt status`/`wt wait` read it back, no IPC needed.
+/// `state.json`; `wt tree status`/`wt tree wait` read it back, no IPC needed.
 pub fn run(
     root: &Path,
     config_path: &Path,

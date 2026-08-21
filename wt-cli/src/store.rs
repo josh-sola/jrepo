@@ -91,7 +91,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Display name for an unclaimed spare, shown by `wt ls --all`. It carries
+/// Display name for an unclaimed spare, shown by `wt tree ls --all`. It carries
 /// no meaning for lookups: `resolve_index` skips spares outright, so this
 /// never has to be unique or collision-proof.
 pub const SPARE_NAME: &str = "@spare";
@@ -163,7 +163,7 @@ fn save(root: &Path, store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Concurrent `wt new` calls from separate processes serialize on the
+/// Concurrent `wt tree new` calls from separate processes serialize on the
 /// lockfile rather than racing on `state.json` directly.
 pub fn with_store_lock<F, R>(root: &Path, f: F) -> Result<R>
 where
@@ -189,11 +189,15 @@ where
 /// Ambiguity within a tier is an error, not a fallthrough — a broader tier
 /// below never gets a chance to silently pick a winner.
 pub fn resolve<'a>(trees: &'a [Tree], selector: &str) -> Result<&'a Tree> {
-    let idx = resolve_index(trees, selector)?;
-    Ok(&trees[idx])
+    resolve_optional(trees, selector)?
+        .with_context(|| format!("no tree matches selector '{selector}'"))
 }
 
-pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
+pub fn resolve_optional<'a>(trees: &'a [Tree], selector: &str) -> Result<Option<&'a Tree>> {
+    Ok(resolve_index_optional(trees, selector)?.map(|idx| &trees[idx]))
+}
+
+fn resolve_index_optional(trees: &[Tree], selector: &str) -> Result<Option<usize>> {
     let needle = selector.to_lowercase();
     let tiers: [fn(&Tree, &str, &str) -> bool; 6] = [
         |t, s, _| t.id.to_string() == s,
@@ -219,7 +223,7 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
             .collect();
         match matches.len() {
             0 => continue,
-            1 => return Ok(matches[0]),
+            1 => return Ok(Some(matches[0])),
             _ => {
                 let candidates = matches
                     .iter()
@@ -230,7 +234,7 @@ pub fn resolve_index(trees: &[Tree], selector: &str) -> Result<usize> {
             }
         }
     }
-    bail!("no tree matches selector '{selector}'");
+    Ok(None)
 }
 
 /// `None` on any git failure (path missing, still provisioning, not a

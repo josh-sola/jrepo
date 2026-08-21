@@ -19,7 +19,8 @@ test:
 
 # Check shell-script syntax.
 bash:
-    bash -n wt-cli/install.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh
+    bash -n wt-cli/install.sh wt-cli/shell-integration.sh wt-cli/tests/shell-integration.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh
+    bash wt-cli/tests/shell-integration.sh
 
 # Check the jpi package without installing dependencies.
 jpi-check:

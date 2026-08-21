@@ -13,7 +13,7 @@ use crate::store::{self, Repo, Store};
 /// Fetches every registered repo (or just `repo_filter`) and fast-forwards
 /// its trunk when safe. With `stack`, also walks every Graphite stack in the
 /// repo that spans more than one worktree, restacking it bottom-up — the
-/// same walk `wt restack` runs, just over every such stack instead of one.
+/// same walk `wt gt restack` runs, just over every such stack instead of one.
 /// Never destructive: a repo that fails to sync is reported and skipped
 /// rather than aborting the rest.
 pub fn sync(
@@ -88,7 +88,7 @@ pub fn sync(
 
 /// Restacks every stack in `repo` that has branches held by more than one
 /// worktree — a single-tree stack has no cross-worktree problem for this
-/// walk to solve. Stops at the first failure, same as `wt restack`, leaving
+/// walk to solve. Stops at the first failure, same as `wt gt restack`, leaving
 /// later stacks in the repo unwalked rather than pressing on past a tree
 /// left mid-rebase.
 fn sync_stack(root: &Path, name: &str, repo: &Repo) -> Result<()> {

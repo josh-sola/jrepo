@@ -448,7 +448,7 @@ pub fn ignored_files(path: &Path) -> Result<Vec<String>> {
 
 /// `refs/stash` lives in the common git dir, so a stash taken in one
 /// worktree is visible from every other worktree of the same clone — this
-/// is what lets `wt adopt` push here and pop in `stash_pop` against a tree
+/// is what lets `wt repo lift` push here and pop in `stash_pop` against a tree
 /// that didn't exist yet when the stash was made.
 /// Returns the new stash commit so the caller can prove which entry is its
 /// own before popping.

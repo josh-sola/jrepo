@@ -40,8 +40,8 @@ pub fn pid_alive(pid: u32) -> bool {
 /// A `provisioning` row whose recorded pid is no longer alive is wedged, not
 /// progressing — a killed child leaves it in `provisioning` forever
 /// otherwise. `None` (not yet recorded, or an older registry entry) is not
-/// flagged: there is nothing to compare against. Shared by `wt status`/`wt
-/// ls` and the hot-spare reaper, which both need to tell a wedged row from
+/// flagged: there is nothing to compare against. Shared by `wt tree status`/
+/// `wt tree ls` and the hot-spare reaper, which both need to tell a wedged row from
 /// one that's genuinely still working.
 pub fn provisioning_is_stale(t: &store::Tree) -> bool {
     t.state == store::TreeState::Provisioning && t.provision_pid.is_some_and(|pid| !pid_alive(pid))

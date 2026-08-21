@@ -8,12 +8,12 @@ use crate::status_state_str;
 use crate::store;
 
 /// `Ok(None)` is the cancel path: escaping the picker ends a bare
-/// `wt launch` without launching anything, and that is not a failure.
+/// `wt go` without launching anything, and that is not a failure.
 pub fn pick_tree(store: &store::Store, cwd_repo: Option<&str>) -> Result<Option<Uuid>> {
     // A hot spare is unclaimed by definition, so it has nothing to open.
     let candidates: Vec<store::Tree> = store.trees.iter().filter(|t| !t.spare).cloned().collect();
     if candidates.is_empty() {
-        bail!("no worktrees registered; create one first with `wt new <repo> --name \"...\"`");
+        bail!("no worktrees registered; create one first with `wt tree new <repo> --name \"...\"`");
     }
 
     let trees = ordered(&candidates, cwd_repo);
@@ -47,7 +47,7 @@ pub fn pick_tree(store: &store::Store, cwd_repo: Option<&str>) -> Result<Option<
     {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
-            "a bare `wt launch` opens a picker that needs fzf on PATH; `brew install fzf` \
+            "a bare `wt go` opens a picker that needs fzf on PATH; `brew install fzf` \
              installs it, or pass a worktree name to skip the picker"
         ),
         Err(e) => return Err(e).context("spawning fzf"),

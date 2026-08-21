@@ -189,7 +189,7 @@ pub fn graph(git_common_dir: &Path) -> Result<Graph> {
 /// Parent/child edges only, skipping the pull-request read and the
 /// needs-restack computation `graph` pays for the whole database — each
 /// branch whose cached fork point has gone stale costs `graph` a
-/// `merge-base` subprocess, which is fine for `wt stack` but too slow for a
+/// `merge-base` subprocess, which is fine for `wt gt stack` but too slow for a
 /// hook that runs on every prompt. Callers that only need "what is this
 /// branch's parent, what sits on top of it" want this instead.
 pub fn graph_light(git_common_dir: &Path) -> Result<Graph> {
