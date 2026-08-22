@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -7,6 +8,7 @@ import { registerWebTools } from "../extensions/web/index.ts";
 import {
   createKetchRunner,
   getPackageKetchPath,
+  KETCH_VERSION,
   mapKetchPlatform,
   resolveKetchExecutable,
   truncateDiagnostic,
@@ -165,6 +167,12 @@ test("web_search handles empty and malformed search output", async () => {
     executeWebSearch({ query: "bad" }, makeRunner({ result: [] }).runner),
     /malformed search output/,
   );
+});
+
+test("KETCH_VERSION matches the pinned release manifest", async () => {
+  const manifestText = await readFile(new URL("../ketch-release.json", import.meta.url), "utf8");
+  const manifest = JSON.parse(manifestText);
+  assert.equal(KETCH_VERSION, manifest.version);
 });
 
 test("ketch platform mapping covers the supported runtime artifacts", () => {

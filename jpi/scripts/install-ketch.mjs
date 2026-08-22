@@ -387,9 +387,10 @@ function downloadUrlOnce(url, options, resolvePromise, reject) {
   request.on("error", fail);
 }
 
-function appendBoundedOutput(current, chunk, maxBytes) {
-  if (Buffer.byteLength(current) >= maxBytes) return current;
-  return `${current}${chunk.toString("utf8")}`.slice(0, maxBytes);
+export function appendBoundedOutput(current, chunk, maxBytes) {
+  const remaining = maxBytes - Buffer.byteLength(current);
+  if (remaining <= 0) return current;
+  return `${current}${chunk.subarray(0, remaining).toString("utf8")}`.replace(/�+$/, "");
 }
 
 export async function runCommandWithSpawn(command, args, options = {}) {
@@ -427,7 +428,10 @@ export async function runCommandWithSpawn(command, args, options = {}) {
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   runCli().catch((error) => {
-    process.stderr.write(`Failed to install ketch: ${error.message}\n`);
-    process.exitCode = 1;
+    process.stderr.write(
+      `Warning: could not install ketch: ${error.message}\n` +
+        "web_search and web_fetch will not work until ketch is installed. " +
+        "Re-run `node jpi/scripts/install-ketch.mjs`, or install ketch on PATH, to recover.\n",
+    );
   });
 }

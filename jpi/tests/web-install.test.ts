@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  appendBoundedOutput,
   createNodeInstallOperations,
   downloadUrl,
   getKetchInstallTarget,
@@ -314,6 +315,31 @@ test("installer network and process operations are bounded", async () => {
   );
   assert.equal(timedOut.timedOut, true);
   assert.notEqual(timedOut.signal, null);
+});
+
+test("appendBoundedOutput caps output at maxBytes even with multi-byte characters", () => {
+  const euroSign = Buffer.from("€");
+  assert.equal(euroSign.byteLength, 3);
+
+  let current = "";
+  for (let i = 0; i < 10; i += 1) {
+    current = appendBoundedOutput(current, euroSign, 10);
+  }
+
+  assert.ok(Buffer.byteLength(current) <= 10);
+  assert.doesNotMatch(current, /�/);
+
+  assert.equal(appendBoundedOutput("already full", Buffer.from("more"), 0), "already full");
+});
+
+test("runCommandWithSpawn never exceeds maxOutputBytes for multi-byte output", async () => {
+  const output = await runCommandWithSpawn(
+    process.execPath,
+    ["-e", "process.stdout.write(Buffer.from('€'.repeat(10000)))"],
+    { timeoutMs: 5_000, maxOutputBytes: 1_000 },
+  );
+  assert.equal(output.exitCode, 0);
+  assert.ok(Buffer.byteLength(output.stdout) <= 1_000);
 });
 
 test("installer rejects wrong extracted versions before the final move", async (t) => {

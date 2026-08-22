@@ -2,6 +2,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Static, TObject, TString } from "typebox";
 
 import type { KetchRunner } from "./ketch.ts";
+import { boundedText, isRecord } from "./text.ts";
 
 const WEB_SEARCH_TIMEOUT_MS = 30_000;
 const MAX_SEARCH_URL_CHARS = 8_192;
@@ -36,15 +37,6 @@ export type WebSearchDetails = {
   results: WebSearchResult[];
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function boundedMetadataText(value: unknown, maxChars: number): string {
-  if (typeof value !== "string") return "";
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, maxChars);
-}
-
 function normalizeHttpUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || value.trim() === "") return undefined;
 
@@ -65,10 +57,10 @@ function normalizeResult(value: unknown): WebSearchResult | undefined {
   if (!url) return undefined;
 
   return {
-    title: boundedMetadataText(value.title, MAX_SEARCH_TITLE_CHARS),
+    title: boundedText(value.title, MAX_SEARCH_TITLE_CHARS),
     url,
-    description: boundedMetadataText(value.description, MAX_SEARCH_DESCRIPTION_CHARS)
-      || boundedMetadataText(value.snippet, MAX_SEARCH_DESCRIPTION_CHARS),
+    description: boundedText(value.description, MAX_SEARCH_DESCRIPTION_CHARS)
+      || boundedText(value.snippet, MAX_SEARCH_DESCRIPTION_CHARS),
   };
 }
 

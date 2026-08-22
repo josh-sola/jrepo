@@ -1,9 +1,18 @@
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const KETCH_VERSION = "0.14.0";
+function readKetchVersion(): string {
+  const manifestUrl = new URL("../../ketch-release.json", import.meta.url);
+  const manifest = JSON.parse(readFileSync(manifestUrl, "utf8"));
+  if (typeof manifest.version !== "string") {
+    throw new Error("The ketch release manifest must include a version string.");
+  }
+  return manifest.version;
+}
+
+export const KETCH_VERSION = readKetchVersion();
 export const MAX_KETCH_DIAGNOSTIC_CHARS = 2_000;
 
 const CACHE_ROOT = join("node_modules", ".cache", "jpi", "ketch");

@@ -7,6 +7,7 @@ import type { Static, TObject, TString } from "typebox";
 import type { KetchRunner } from "./ketch.ts";
 import { truncateDiagnostic } from "./ketch.ts";
 import { buildWebFetchUserMessage, WEB_FETCH_SYSTEM_PROMPT } from "./prompt.ts";
+import { boundedText, isRecord } from "./text.ts";
 
 const WEB_FETCH_TIMEOUT_MS = 60_000;
 const WEB_FETCH_MAX_TOKENS = 2_048;
@@ -62,15 +63,6 @@ type FetchedPage = {
   markdown: string;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function boundedTitle(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_FETCH_TITLE_CHARS);
-}
-
 function normalizeHttpUrl(value: string, label: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`web_fetch needs a non-empty ${label}.`);
@@ -120,7 +112,7 @@ export function parseFetchedPage(rawPage: unknown): FetchedPage {
   return {
     url,
     fetchedUrl,
-    title: boundedTitle(rawPage.title),
+    title: boundedText(rawPage.title, MAX_FETCH_TITLE_CHARS),
     markdown,
   };
 }
