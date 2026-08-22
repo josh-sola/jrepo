@@ -40,6 +40,53 @@ Start Pi and run `/jpi`. An info notification that says `jpi is loaded.`
 confirms that the extension loaded. The package also exposes the existing `wt`
 skill from `wt-cli/plugin/skills`; installation does not copy or move that skill.
 
+## Web extension
+
+`jpi/extensions/web/` adds two model-callable tools:
+
+- `web_search({ query: string })` searches DuckDuckGo and returns up to five
+  titles, URLs, and snippets.
+- `web_fetch({ url: string, prompt: string })` reads one HTTP or HTTPS URL and
+  asks the active authenticated Pi model to answer the prompt from that page.
+
+Search always uses DuckDuckGo through ketch's free, keyless backend. It does
+not use SearXNG, Docker, an API key, a setup command, or separate web
+configuration. Package installation downloads the pinned ketch release for the
+host, verifies its SHA-256 checksum and version, and installs it under the
+package's `node_modules/.cache/` directory. A `ketch` executable on `PATH` is
+the development fallback when lifecycle scripts are disabled.
+
+Fetch keeps the full page out of the main conversation and returned tool
+details. Existing ketch browser, cookie, rewrite, user-agent, and cache settings
+can still affect page extraction. A page that requires JavaScript may fail
+without an existing browser configuration. DuckDuckGo may throttle requests
+and provides no service guarantee.
+
+This extension implements a smaller interface than Claude's web tools. It does
+not include domain filters, domain approval, Claude-specific redirect or quote
+rules, or a network sandbox. Ketch can reach any HTTP or HTTPS address that the
+host can reach, subject to the user's permissions.
+
+The package also contains personal extensions such as auto-review. To load only
+the web extension, use the object form of the package entry in Pi settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/josh-sola/jrepo",
+      "extensions": ["+jpi/extensions/web/index.ts"],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    }
+  ]
+}
+```
+
+Resource filters control what Pi loads after installation. The package's ketch
+`postinstall` step still runs when a filter disables the web extension.
+
 ## Planter extension
 
 `jpi/extensions/jpi-planter/` adds interactive Pi TUI sessions to the Planter
