@@ -11,7 +11,7 @@ Personal projects that share one checkout and one Git history.
 Pi extensions that used to live here as the `jpi` package moved to standalone
 plugin repos under [github.com/josh-sola](https://github.com/josh-sola)
 (`jpi-base`, `jpi-guardian`, `jpi-planter`, `jpi-status`, `jpi-title`,
-`jpi-web`). This repository still exposes the `wt` skill as a Pi package.
+`jpi-web`).
 
 ## Validate
 
