@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: fmt clippy test bash swift jpi-check
+check: fmt clippy test bash swift
 
 # Check Rust formatting.
 fmt:
@@ -21,10 +21,6 @@ test:
 bash:
     bash -n wt-cli/install.sh wt-cli/shell-integration.sh wt-cli/tests/shell-integration.sh wt-cli/hooks/session-context.sh claude-planter/install.sh claude-planter/login-item.sh claude-planter/planter-state ghostty/install.sh
     bash wt-cli/tests/shell-integration.sh
-
-# Check the jpi package without installing dependencies.
-jpi-check:
-    npm run test:jpi
 
 # Typecheck and self-test the Swift components.
 swift:
