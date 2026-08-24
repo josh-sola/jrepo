@@ -250,11 +250,12 @@ fallback.
 
 ## Pi sessions
 
-Pi support ships through the `jpi` package in this repository. Install both
-Planter and `jpi`, then start Pi directly or through `wt`:
+Pi support ships through the standalone
+[jpi-planter](https://github.com/josh-sola/jpi-planter) plugin. Install both
+Planter and `jpi-planter`, then start Pi directly or through `wt`:
 
 ```sh
-pi install git:github.com/josh-sola/jrepo
+pi install git:github.com/josh-sola/jpi-planter
 wt go                         # Pi is the default
 wt llm pi "fix login"         # direct launch in a selected tree
 ```
@@ -269,7 +270,8 @@ their normal working state.
 
 A Pi process launched by `wt go` inherits `PLANTER_COLOR`, `PLANTER_LABEL`, and
 `PLANTER_TAB_INDEX`, so its plant shares the same colour and tab ordering as the
-other supported agents. Direct Pi sessions still appear when `jpi` is loaded;
+other supported agents. Direct Pi sessions still appear when `jpi-planter` is
+loaded;
 they use the normal automatic colour, label, and ordering rules.
 
 ## Icon packs
