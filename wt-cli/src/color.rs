@@ -40,7 +40,22 @@ pub fn pick(repo: &str, name: &str) -> (&'static str, &'static str) {
 /// resets it. Guarded on a tty so a redirected run gets no escape bytes.
 pub fn set_background(hex: &str) {
     if std::io::stderr().is_terminal() {
-        eprint!("\x1b]11;{hex}\x1b\\");
+        eprint!("{}", osc11(hex, std::env::var_os("TMUX").is_some()));
+    }
+}
+
+/// Builds the OSC 11 sequence. Inside tmux it is wrapped in the passthrough
+/// envelope (inner ESCs doubled; needs `allow-passthrough on`) so it reaches
+/// the outer terminal: tmux would otherwise consume OSC 11 and repaint pane
+/// cells with an explicit background color, which terminals draw opaque —
+/// hiding background shaders and transparency that only apply to the
+/// default background.
+fn osc11(hex: &str, inside_tmux: bool) -> String {
+    let osc = format!("\x1b]11;{hex}\x1b\\");
+    if inside_tmux {
+        format!("\x1bPtmux;{}\x1b\\", osc.replace('\x1b', "\x1b\x1b"))
+    } else {
+        osc
     }
 }
 
@@ -65,6 +80,19 @@ mod tests {
             .map(|i| pick("monorepo", &format!("t{i}")).0)
             .collect();
         assert_eq!(colors.len(), 8, "expected all 8 colors, got {colors:?}");
+    }
+
+    #[test]
+    fn osc11_is_bare_outside_tmux() {
+        assert_eq!(osc11("#120c1a", false), "\x1b]11;#120c1a\x1b\\");
+    }
+
+    #[test]
+    fn osc11_is_wrapped_in_passthrough_inside_tmux() {
+        assert_eq!(
+            osc11("#120c1a", true),
+            "\x1bPtmux;\x1b\x1b]11;#120c1a\x1b\x1b\\\x1b\\"
+        );
     }
 
     #[test]
