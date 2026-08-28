@@ -206,7 +206,11 @@ features {
   `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background through an OSC 11 escape
   sequence. It applies to Pi, Claude, and Codex sessions launched through
-  `wt go`.
+  `wt go`. Inside tmux the tint is stored per window (`@wt_bg`) and tmux
+  hooks re-apply the active window's tint — or reset an untinted window with
+  OSC 111 — by writing straight to the client tty, so each window keeps its
+  own color and the terminal still treats it as the default background
+  (shaders and transparency keep working).
 
 Each hook is either a wt `builtin` or a `cmd`. Commands receive
 `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, and `WT_COLOR_HEX`, and wt stops
