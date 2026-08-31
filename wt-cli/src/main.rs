@@ -111,10 +111,6 @@ enum Command {
     /// Prints a tree's details for the `wt go` fzf preview window.
     #[command(name = "__launch-preview", hide = true)]
     LaunchPreview { selector: String },
-    /// Re-applies each tmux client's active-window background tint; run by
-    /// the tmux hooks that `wt go` installs.
-    #[command(name = "__retint", hide = true)]
-    Retint,
 }
 
 #[derive(Subcommand)]
@@ -723,10 +719,6 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             Ok(())
         }
         Command::LaunchPreview { selector } => cmd_launch_preview(root, config_path, &selector),
-        Command::Retint => {
-            color::retint_clients();
-            Ok(())
-        }
     }
 }
 
