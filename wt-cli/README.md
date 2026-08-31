@@ -204,13 +204,11 @@ features {
   Eligible sessions receive `PLANTER_COLOR`, `PLANTER_LABEL`, and
   `PLANTER_TAB_INDEX`. The bridge preserves `PLANTER_STATE_DIR` or
   `CLAUDE_PLANTER_DIR`.
-- `terminal` sets a session's terminal background through an OSC 11 escape
-  sequence, using its tint color. It applies to Pi, Claude, and Codex sessions
-  launched through `wt go`. Inside tmux the tint is stored per window
-  (`@wt_bg`) and tmux hooks re-apply the active window's tint — or reset an
-  untinted window with OSC 111 — by writing straight to the client tty, so
-  each window keeps its own color and the terminal still treats it as the
-  default background (shaders and transparency keep working).
+- `terminal` sets a session's terminal background to its tint color: an
+  OSC 11 escape sequence outside tmux, and tmux's window-scoped
+  `window-style` option inside it, so tmux itself keeps each window's tint
+  right across splits, clients, and reattach. It applies to Pi, Claude, and
+  Codex sessions launched through `wt go`.
 
 Each tree's color comes from the 12-color palette in `/palette.json` at the
 repo root, keyed by a hash of the repo and tree name so the same tree always
