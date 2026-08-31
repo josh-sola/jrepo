@@ -23,6 +23,8 @@ pub struct Context<'a> {
     pub repo: &'a str,
     pub label: &'a str,
     pub color_hex: &'a str,
+    pub primary_hex: &'a str,
+    pub text_hex: &'a str,
 }
 
 /// Runs the get-position hook. `None` when the hook is unconfigured or fails.
@@ -91,6 +93,8 @@ fn run_cmd(argv: &[String], ctx: &Context) -> Option<Vec<u8>> {
         .env("WT_REPO", ctx.repo)
         .env("WT_LABEL", ctx.label)
         .env("WT_COLOR_HEX", ctx.color_hex)
+        .env("WT_COLOR_PRIMARY_HEX", ctx.primary_hex)
+        .env("WT_COLOR_TEXT_HEX", ctx.text_hex)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -172,11 +176,34 @@ mod tests {
             repo: "monorepo",
             label: "fix login",
             color_hex: "#123456",
+            primary_hex: "#abcdef",
+            text_hex: "#fedcba",
         }
     }
 
     fn sh(script: &str) -> Hook {
         Hook::Cmd(vec!["sh".to_string(), "-c".to_string(), script.to_string()])
+    }
+
+    #[test]
+    fn cmd_hook_receives_all_context_env_vars() {
+        let tree_path = PathBuf::from("/tmp/wt-features-test");
+        let hook = sh(
+            "printf '%s %s %s %s %s\\n' \"$WT_TREE_PATH\" \"$WT_REPO\" \"$WT_LABEL\" \"$WT_COLOR_HEX\" \"$WT_COLOR_PRIMARY_HEX\"; printf '%s\\n' \"$WT_COLOR_TEXT_HEX\"",
+        );
+        let stdout = run_cmd(
+            match &hook {
+                Hook::Cmd(argv) => argv,
+                Hook::Builtin(_) => unreachable!(),
+            },
+            &ctx(&tree_path),
+        )
+        .expect("hook should succeed");
+        let text = String::from_utf8_lossy(&stdout);
+        assert_eq!(
+            text,
+            "/tmp/wt-features-test monorepo fix login #123456 #abcdef\n#fedcba\n"
+        );
     }
 
     #[test]

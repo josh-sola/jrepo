@@ -28,15 +28,17 @@ Only a dialog that is waiting for you raises a `!`, and it appears when that
 dialog opens. Claude Code also notifies when a session has merely gone quiet;
 treating that as blocking was a false alarm, since the wilt already says it.
 
-Every session gets its own colour from a palette of eight. Planter picks new
+Every session gets its own colour from a palette of twelve, defined once in
+the repo root's `/palette.json` and shared with `wt`. Planter picks new
 automatic colours at random from colours that are not tied for most used by the
-visible plants. If all eight are tied, all eight are eligible. The choice is
+visible plants. If all twelve are tied, all twelve are eligible. The choice is
 remembered for that session's lifetime, including overlay restarts. A launcher
 that already knows better can set
 `PLANTER_COLOR`, `PLANTER_LABEL`, and
 `PLANTER_TAB_INDEX` on the agent process to choose that session's colour,
 name, and place in the row directly, and can rewrite that place later if its
-tabs move — see "How it works" below.
+tabs move — see "How it works" below. `wt` is one such launcher: it sets
+these directly, and no longer sends Claude Code a `/color` command.
 
 macOS only — it draws with AppKit.
 
@@ -205,10 +207,11 @@ until the turn ends, instead of clearing when you approve.
 A launcher can set three environment variables on an agent process. Each
 provider integration reads them from the environment rather than remembering
 them, so nothing can drift:
-`PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `green`, `cyan`, `blue`,
-`purple`, `pink`) fixes its colour exactly, even if another plant already has
+`PLANTER_COLOR` (one of `red`, `orange`, `yellow`, `lime`, `green`, `teal`,
+`cyan`, `blue`, `indigo`, `purple`, `magenta`, `pink` — the twelve names in
+`/palette.json`) fixes its colour exactly, even if another plant already has
 it. Automatic colours are chosen randomly from palette slots below the current
-largest usage count. If all eight slots are tied, any slot may be chosen. The
+largest usage count. If all twelve slots are tied, any slot may be chosen. The
 automatic choice stays with the session until it ends,
 `PLANTER_LABEL` fixes its name instead of the label-hook or directory basename,
 and `PLANTER_TAB_INDEX` (a 1-based position) sets its place in the row instead
@@ -415,7 +418,7 @@ that run, never a broken row.
 ### Iterating
 
 `--preview` renders a contact sheet of whichever pack is active: the main poses
-across all eight hues, twice, on a dark ground and a light one, so you can see
+across all twelve hues, twice, on a dark ground and a light one, so you can see
 whether the art holds up against either desktop.
 
 ```sh
@@ -438,6 +441,6 @@ Layout measures the art rather than assuming it, so if you redraw the plant wide
 or narrower the spacing follows. After an edit:
 
 ```sh
-swiftc -O -o planter main.swift Planter.swift Sprites.swift
+swiftc -O -o planter main.swift Planter.swift Palette.swift Sprites.swift
 ./planter --preview /tmp/preview.png && open /tmp/preview.png
 ```

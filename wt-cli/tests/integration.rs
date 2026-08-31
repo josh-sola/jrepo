@@ -1558,7 +1558,7 @@ fn go_claude_keeps_its_decoration_and_planter() {
         record.contains("arg=-n\narg=claude target\narg=--model\narg=opus"),
         "{record}"
     );
-    assert!(record.contains("arg=/color "), "{record}");
+    assert!(!record.contains("arg=/color"), "{record}");
     assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
     assert!(record.contains("PLANTER_LABEL=claude target"), "{record}");
     assert!(planter_sentinel.exists(), "Claude should run planter hooks");

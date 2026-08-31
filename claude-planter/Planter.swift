@@ -26,6 +26,10 @@ struct Plant {
     var state: PlantState
     var createdAt: Double
     var hue: CGFloat = 0
+    /// Index into the Palette.swift table. Sprites draw from `hue` alone, but
+    /// the label needs the slot's own text colour, which a scalar hue can't
+    /// recover on its own (two slots can round to the same one).
+    var paletteSlot: Int = 0
     /// Where this plant starts its frame cycle. Taken from the session id rather
     /// than drawn at random, so a plant keeps its place for its whole life instead
     /// of jumping whenever a neighbour appears or the row is reordered.
@@ -61,19 +65,6 @@ private func wiltStage(waitingSince since: Double, now: Double) -> Int {
     let age = now - since
     return wiltAfter.filter { age >= $0 }.count
 }
-
-/// Wide separation makes neighbouring plants easy to tell apart at a glance.
-let plantHues: [CGFloat] = [0.02, 0.09, 0.15, 0.33, 0.47, 0.58, 0.72, 0.88]
-
-/// Names and hues share their index, so saved names map to the intended hue.
-private let colorNames = [
-    "red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink",
-]
-
-private let colorSlots: [String: Int] = [
-    "red": 0, "orange": 1, "yellow": 2, "green": 3,
-    "cyan": 4, "blue": 5, "purple": 6, "pink": 7,
-]
 
 /// `~/.claude/sessions` is the authority whenever it answers; `claude agents
 /// --json` only stands in when that directory is missing or unreadable, and it
@@ -435,7 +426,7 @@ enum Store {
     private static func pruneAutomaticColors(
         _ colors: inout [String: String], keeping liveSessionIDs: Set<String>
     ) {
-        colors = colors.filter { liveSessionIDs.contains($0.key) && colorSlots[$0.value] != nil }
+        colors = colors.filter { liveSessionIDs.contains($0.key) && paletteSlots[$0.value] != nil }
     }
 
     /// Initial assignments use creation order so display order cannot influence them.
@@ -445,23 +436,25 @@ enum Store {
                 (plants[$1].createdAt, plants[$1].sessionID)
         }
 
-        var counts = Array(repeating: 0, count: plantHues.count)
+        var counts = Array(repeating: 0, count: palette.count)
 
         for i in byCreation {
             let sessionID = plants[i].sessionID
-            if let name = plants[i].color, let slot = colorSlots[name] {
-                plants[i].hue = plantHues[slot]
+            if let name = plants[i].color, let slot = paletteSlots[name] {
+                plants[i].hue = palette[slot].hue
+                plants[i].paletteSlot = slot
                 counts[slot] += 1
                 automaticColors.removeValue(forKey: sessionID)
-            } else if let name = automaticColors[sessionID], let slot = colorSlots[name] {
-                plants[i].hue = plantHues[slot]
+            } else if let name = automaticColors[sessionID], let slot = paletteSlots[name] {
+                plants[i].hue = palette[slot].hue
+                plants[i].paletteSlot = slot
                 counts[slot] += 1
             }
         }
 
         for i in byCreation {
             let sessionID = plants[i].sessionID
-            if colorSlots[plants[i].color ?? ""] != nil || colorSlots[automaticColors[sessionID] ?? ""] != nil {
+            if paletteSlots[plants[i].color ?? ""] != nil || paletteSlots[automaticColors[sessionID] ?? ""] != nil {
                 continue
             }
             let slot: Int
@@ -469,8 +462,9 @@ enum Store {
             let eligible = counts.indices.filter { counts[$0] < maximum }
             let choices = eligible.isEmpty ? Array(counts.indices) : eligible
             slot = choices.randomElement()!
-            automaticColors[sessionID] = colorNames[slot]
-            plants[i].hue = plantHues[slot]
+            automaticColors[sessionID] = palette[slot].name
+            plants[i].hue = palette[slot].hue
+            plants[i].paletteSlot = slot
             counts[slot] += 1
         }
     }

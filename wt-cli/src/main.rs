@@ -1218,13 +1218,15 @@ fn cmd_launch(
         }
     };
 
-    let (color, hex) = color::pick(&color_repo, &color_name);
+    let entry = color::pick(&color_repo, &color_name);
 
     let ctx = features::Context {
         tree_path: &tree_path,
         repo: &color_repo,
         label: &label,
-        color_hex: hex,
+        color_hex: entry.tint,
+        primary_hex: entry.primary,
+        text_hex: entry.text,
     };
     let set_background_hook = config
         .features
@@ -1253,7 +1255,7 @@ fn cmd_launch(
             features::renumber_peers(renumber_peers_hook, tabs, &ctx);
         }
 
-        env.push(("PLANTER_COLOR", color));
+        env.push(("PLANTER_COLOR", entry.name));
         env.push(("PLANTER_LABEL", &label));
         if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
             tab_index_str = idx.to_string();
@@ -1261,16 +1263,11 @@ fn cmd_launch(
         }
     }
 
-    features::set_background(set_background_hook, hex, &ctx);
+    features::set_background(set_background_hook, entry.tint, &ctx);
 
     match agent {
         Agent::Pi => agent::exec_at(agent, &tree_path, &pi_launch_args(&label, args), &env),
-        Agent::Claude => agent::exec_at(
-            agent,
-            &tree_path,
-            &claude_launch_args(&label, args, color),
-            &env,
-        ),
+        Agent::Claude => agent::exec_at(agent, &tree_path, &claude_launch_args(&label, args), &env),
         Agent::Codex => {
             agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
         }
@@ -1283,12 +1280,9 @@ fn pi_launch_args(name: &str, passthrough: &[String]) -> Vec<String> {
     args
 }
 
-/// Claude takes the color as a slash-command prompt: the `--agent-color`
-/// launch flag does not set the prompt-bar color.
-fn claude_launch_args(name: &str, passthrough: &[String], color: &str) -> Vec<String> {
+fn claude_launch_args(name: &str, passthrough: &[String]) -> Vec<String> {
     let mut args = vec!["-n".to_string(), name.to_string()];
     args.extend(passthrough.iter().cloned());
-    args.push(format!("/color {color}"));
     args
 }
 
@@ -2190,16 +2184,9 @@ mod tests {
     }
 
     #[test]
-    fn claude_launch_args_orders_name_flag_passthrough_then_color_last() {
-        let args = claude_launch_args(
-            "fix login",
-            &["--model".to_string(), "opus".to_string()],
-            "blue",
-        );
-        assert_eq!(
-            args,
-            vec!["-n", "fix login", "--model", "opus", "/color blue"]
-        );
+    fn claude_launch_args_puts_generated_name_before_passthrough() {
+        let args = claude_launch_args("fix login", &["--model".to_string(), "opus".to_string()]);
+        assert_eq!(args, vec!["-n", "fix login", "--model", "opus"]);
     }
 
     #[test]

@@ -115,7 +115,7 @@ final class PlanterView: NSView {
 
         return NSAttributedString(string: plant.display, attributes: [
             .font: layout.font(),
-            .foregroundColor: NSColor(hue: plant.hue, saturation: 0.35, brightness: 1.0, alpha: 1),
+            .foregroundColor: palette[plant.paletteSlot].text,
             .shadow: shadow,
         ])
     }
@@ -285,7 +285,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
             Plant(sessionID: "demo-c", label: "recipes", state: .attention, createdAt: 3),
             Plant(sessionID: "demo-d", label: "planhub", agents: 2, state: .working, createdAt: 4),
         ]
-        for (i, hue) in plantHues.prefix(plants.count).enumerated() { plants[i].hue = hue }
+        for (i, entry) in palette.prefix(plants.count).enumerated() {
+            plants[i].hue = entry.hue
+            plants[i].paletteSlot = i
+        }
         return plants
     }
 
@@ -388,7 +391,7 @@ func writePreview(to path: String, pack: Pack, scale: CGFloat = 6) {
     let cellW = CGFloat(pack.width) * scale
     let cellH = CGFloat(pack.height) * scale + 16
     let cols = flat.count
-    let rows = plantHues.count
+    let rows = palette.count
     let panelW = CGFloat(cols) * cellW
     let size = NSSize(width: panelW * 2, height: CGFloat(rows) * cellH)
 
@@ -406,9 +409,9 @@ func writePreview(to path: String, pack: Pack, scale: CGFloat = 6) {
     NSColor(white: 0.92, alpha: 1).setFill()
     NSRect(x: panelW, y: 0, width: panelW, height: size.height).fill()
 
-    for (r, hue) in plantHues.enumerated() {
+    for (r, color) in palette.enumerated() {
         for (c, entry) in flat.enumerated() {
-            let img = pack.image(rows: entry.1, hue: hue)
+            let img = pack.image(rows: entry.1, hue: color.hue)
             for panel in 0..<2 {
                 let rect = NSRect(
                     x: CGFloat(panel) * panelW + CGFloat(c) * cellW,

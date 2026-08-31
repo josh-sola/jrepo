@@ -1,0 +1,17 @@
+{
+  "docs": "Canonical session/tree color palette shared by wt-cli and claude-planter. Each color: hue (degrees, drives plant sprite art), primary (identity color), text (labels on dark ground), tint (near-black terminal background). Order is load-bearing: wt hashes into the array by index, and planter's slot bookkeeping is index-aligned. Tints must keep HSV saturation >= 0.15 or the ghostty balatro shader stops tinting its swirl. Copies in wt-cli/src/color.rs, claude-planter/Palette.swift, and claude-planter/planter-state are checked against this file by tools/check-palette.",
+  "colors": [
+    { "name": "red",     "hue": 0,   "primary": "#eb5959", "text": "#ffa6a6", "tint": "#170a0a" },
+    { "name": "orange",  "hue": 28,  "primary": "#eb9d59", "text": "#ffcfa6", "tint": "#17100a" },
+    { "name": "yellow",  "hue": 52,  "primary": "#ebd759", "text": "#fff3a6", "tint": "#17150a" },
+    { "name": "lime",    "hue": 90,  "primary": "#a2eb59", "text": "#d2ffa6", "tint": "#11170a" },
+    { "name": "green",   "hue": 130, "primary": "#59eb71", "text": "#a6ffb5", "tint": "#0a170c" },
+    { "name": "teal",    "hue": 165, "primary": "#59ebc6", "text": "#a6ffe9", "tint": "#0a1714" },
+    { "name": "cyan",    "hue": 190, "primary": "#59d2eb", "text": "#a6f0ff", "tint": "#0a1517" },
+    { "name": "blue",    "hue": 215, "primary": "#5996eb", "text": "#a6cbff", "tint": "#0a1017" },
+    { "name": "indigo",  "hue": 250, "primary": "#7159eb", "text": "#b5a6ff", "tint": "#0c0a17" },
+    { "name": "purple",  "hue": 275, "primary": "#ae59eb", "text": "#daa6ff", "tint": "#120a17" },
+    { "name": "magenta", "hue": 310, "primary": "#eb59d2", "text": "#ffa6f0", "tint": "#170a15" },
+    { "name": "pink",    "hue": 340, "primary": "#eb598a", "text": "#ffa6c4", "tint": "#170a0f" }
+  ]
+}

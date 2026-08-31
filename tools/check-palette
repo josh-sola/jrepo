@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Check that every copy of the palette matches palette.json.
+
+palette.json is canonical. wt-cli/src/color.rs, claude-planter/Palette.swift,
+and the claude-planter/planter-state name allowlist are hand-written copies;
+this script fails when any of them drifts. Stdlib only; run as
+`just check-palette` or directly from the repo root.
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+LEGACY_NAMES = {"red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"}
+# ghostty/shaders/balatro_bg.glsl stops tinting its swirl below this HSV
+# saturation, so every tint must stay above it.
+SHADER_SATURATION_FLOOR = 0.15
+
+errors: list[str] = []
+
+
+def fail(msg: str) -> None:
+    errors.append(msg)
+
+
+def hex_rgb(hex_str: str) -> tuple[int, int, int]:
+    return tuple(int(hex_str[i : i + 2], 16) for i in (1, 3, 5))
+
+
+def check_json(colors: list[dict]) -> None:
+    names = [c["name"] for c in colors]
+    if len(colors) != 12:
+        fail(f"palette.json: expected 12 colors, found {len(colors)}")
+    if len(set(names)) != len(names):
+        fail("palette.json: duplicate color names")
+    if missing := LEGACY_NAMES - set(names):
+        fail(f"palette.json: legacy names missing (planter state files use them): {sorted(missing)}")
+    for c in colors:
+        for field in ("primary", "text", "tint"):
+            if not re.fullmatch(r"#[0-9a-f]{6}", c[field]):
+                fail(f"palette.json: {c['name']}.{field} = {c[field]!r} is not a lowercase 6-digit hex")
+        if not 0 <= c["hue"] < 360:
+            fail(f"palette.json: {c['name']}.hue = {c['hue']} out of range [0, 360)")
+        r, g, b = hex_rgb(c["tint"])
+        s = 0.0 if max(r, g, b) == 0 else (max(r, g, b) - min(r, g, b)) / max(r, g, b)
+        if s < SHADER_SATURATION_FLOOR:
+            fail(
+                f"palette.json: {c['name']}.tint saturation {s:.2f} is below the "
+                f"balatro shader floor {SHADER_SATURATION_FLOOR}"
+            )
+
+
+def check_rust(colors: list[dict]) -> None:
+    path = ROOT / "wt-cli" / "src" / "color.rs"
+    text = path.read_text()
+    pattern = re.compile(
+        r'PaletteEntry \{ name: "(\w+)", primary: "(#[0-9a-f]{6})", '
+        r'text: "(#[0-9a-f]{6})", tint: "(#[0-9a-f]{6})" \}'
+    )
+    entries = pattern.findall(text)
+    expected = [(c["name"], c["primary"], c["text"], c["tint"]) for c in colors]
+    if entries != expected:
+        fail(f"{path.relative_to(ROOT)}: PALETTE does not match palette.json (order matters)")
+
+
+def check_swift(colors: list[dict]) -> None:
+    path = ROOT / "claude-planter" / "Palette.swift"
+    if not path.exists():
+        fail("claude-planter/Palette.swift: missing")
+        return
+    pattern = re.compile(r'PaletteColor\(name: "(\w+)", hueDegrees: (\d+), textHex: "(#[0-9a-f]{6})"\)')
+    entries = [(n, int(h), t) for n, h, t in pattern.findall(path.read_text())]
+    expected = [(c["name"], c["hue"], c["text"]) for c in colors]
+    if entries != expected:
+        fail(f"{path.relative_to(ROOT)}: palette does not match palette.json (order matters)")
+
+
+def check_planter_state(colors: list[dict]) -> None:
+    path = ROOT / "claude-planter" / "planter-state"
+    match = re.search(
+        r'case "\$\{PLANTER_COLOR:-\}" in\s*\n\s*((?:\w+ \| )+\w+)\)',
+        path.read_text(),
+    )
+    if not match:
+        fail(f"{path.relative_to(ROOT)}: PLANTER_COLOR case pattern not found")
+        return
+    if match.group(1).split(" | ") != [c["name"] for c in colors]:
+        fail(f"{path.relative_to(ROOT)}: PLANTER_COLOR allowlist does not match palette.json")
+
+
+def main() -> int:
+    colors = json.loads((ROOT / "palette.json").read_text())["colors"]
+    check_json(colors)
+    check_rust(colors)
+    check_swift(colors)
+    check_planter_state(colors)
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+    print(f"palette: {len(colors)} colors, all copies in sync")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

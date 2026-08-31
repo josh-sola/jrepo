@@ -239,7 +239,7 @@ esac
 # not the string "null".
 color_json="null"
 case "${PLANTER_COLOR:-}" in
-    red | orange | yellow | green | cyan | blue | purple | pink)
+    red | orange | yellow | lime | green | teal | cyan | blue | indigo | purple | magenta | pink)
         color_json="\"$PLANTER_COLOR\"" ;;
 esac
 

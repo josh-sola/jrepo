@@ -66,7 +66,7 @@ command -v jq >/dev/null || fail "jq not found — the hook needs it: brew insta
 
 echo "building planter"
 mkdir -p "$bin_dir"
-swiftc -O -o "$binary" "$src/main.swift" "$src/Planter.swift" "$src/Sprites.swift"
+swiftc -O -o "$binary" "$src/main.swift" "$src/Planter.swift" "$src/Palette.swift" "$src/Sprites.swift"
 echo "building planter-codex-bridge"
 swiftc -O -o "$bridge_binary" "$src/PlanterCodexBridge.swift"
 

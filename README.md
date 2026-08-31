@@ -31,3 +31,11 @@ just install
 `just install` also installs the Ghostty shaders. Run it from the primary
 checkout after syncing `main`. The shader installer refuses disposable `wt`
 trees and uncommitted shader sources because it creates absolute symlinks.
+
+## Palette
+
+`palette.json` is the canonical 12-color session palette shared by wt-cli and
+claude-planter. Each color defines a hue (drives plant sprite art), a primary
+identity color, a text color for labels, and a near-black terminal tint. The
+hand-written copies in `wt-cli/src/color.rs`, `claude-planter/Palette.swift`,
+and `claude-planter/planter-state` are kept in sync by `just check-palette`.

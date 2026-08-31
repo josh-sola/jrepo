@@ -205,18 +205,22 @@ features {
   `PLANTER_TAB_INDEX`. The bridge preserves `PLANTER_STATE_DIR` or
   `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background through an OSC 11 escape
-  sequence. It applies to Pi, Claude, and Codex sessions launched through
-  `wt go`. Inside tmux the tint is stored per window (`@wt_bg`) and tmux
-  hooks re-apply the active window's tint — or reset an untinted window with
-  OSC 111 — by writing straight to the client tty, so each window keeps its
-  own color and the terminal still treats it as the default background
-  (shaders and transparency keep working).
+  sequence, using its tint color. It applies to Pi, Claude, and Codex sessions
+  launched through `wt go`. Inside tmux the tint is stored per window
+  (`@wt_bg`) and tmux hooks re-apply the active window's tint — or reset an
+  untinted window with OSC 111 — by writing straight to the client tty, so
+  each window keeps its own color and the terminal still treats it as the
+  default background (shaders and transparency keep working).
 
-Each hook is either a wt `builtin` or a `cmd`. Commands receive
-`WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, and `WT_COLOR_HEX`, and wt stops
-them after two seconds. A hook error, timeout, or invalid result is treated as
-absent; it never prevents the agent session from starting. The builtins are
-`ghostty-tab`, `planter-state`, and `osc11`.
+Each tree's color comes from the 12-color palette in `/palette.json` at the
+repo root, keyed by a hash of the repo and tree name so the same tree always
+gets the same color. Each hook is either a wt `builtin` or a `cmd`. Commands
+receive `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, `WT_COLOR_HEX` (the near-black
+tint used as the terminal background), `WT_COLOR_PRIMARY_HEX` (the color's
+identity hex), and `WT_COLOR_TEXT_HEX` (a lighter hex for labels on a dark
+ground), and wt stops them after two seconds. A hook error, timeout, or
+invalid result is treated as absent; it never prevents the agent session from
+starting. The builtins are `ghostty-tab`, `planter-state`, and `osc11`.
 
 ## Integrations
 
