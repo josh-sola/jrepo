@@ -422,6 +422,67 @@ fn write_fake_agent(dir: &Path, name: &str, record: &Path) -> PathBuf {
     bin_dir
 }
 
+fn write_fake_tmux(bin_dir: &Path, record: &Path) {
+    let path = bin_dir.join("tmux");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  display-message)\n    [ \"$#\" -eq 5 ] && [ \"$2\" = -p ] && [ \"$3\" = -t ] && [ \"$4\" = %42 ] && [ \"$5\" = '#{{session_id}}' ] || exit 2\n    printf '%s\\n' tmux-session\n    ;;\n  list-panes)\n    [ \"$#\" -eq 6 ] && [ \"$2\" = -s ] && [ \"$3\" = -t ] && [ \"$4\" = tmux-session ] && [ \"$5\" = -F ] || exit 2\n    printf '@0\\t2\\t%%41\\t/dev/ttys9999\\n@1\\t7\\t%%42\\t/dev/ttys001\\n@1\\t7\\t%%43\\t/dev/ttys7777\\n@2\\t9\\t%%44\\t/dev/ttys8888\\n'\n    ;;\n  *) exit 2 ;;\nesac\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn write_fake_ps(bin_dir: &Path) {
+    let path = bin_dir.join("ps");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nprintf 'ttys9999 /Applications/My Tools/claude\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn run_wt_with_path_and_tmux_pane(
+    root: &Path,
+    cwd: &Path,
+    bin_dir: &Path,
+    args: &[&str],
+    tmux_pane: Option<&str>,
+) -> Output {
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.to_path_buf()).chain(
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(wt_bin());
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    if let Some(pane) = tmux_pane {
+        command.env("TMUX", "/tmp/wt-test-tmux,1,0");
+        command.env("TMUX_PANE", pane);
+    }
+    command.output().expect("spawn wt")
+}
+
 fn write_fake_bridge(bin_dir: &Path, record: &Path, readiness: &str) {
     let path = bin_dir.join("planter-codex-bridge");
     std::fs::write(
@@ -734,7 +795,7 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
         "__provision",
         "__spare",
         "__session-context",
-        "__tab-index",
+        "__window-index",
         "__launch-preview",
     ] {
         assert!(
@@ -742,6 +803,23 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
             "{hidden} leaked into help:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn hidden_window_index_dispatches_to_tmux() {
+    let tmp = unique_dir("window-index");
+    let root = tmp.join("wt-root");
+    std::fs::write(config_path_for(&root), "version 1\n").unwrap();
+    let bin_dir = tmp.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let tmux_record = tmp.join("tmux-record");
+    write_fake_tmux(&bin_dir, &tmux_record);
+    write_fake_ps(&bin_dir);
+
+    let out =
+        run_wt_with_path_and_tmux_pane(&root, &tmp, &bin_dir, &["__window-index"], Some("%42"));
+    assert_success(&out, "__window-index");
+    assert_eq!(out.stdout, b"2\n");
 }
 
 #[test]
@@ -1315,6 +1393,77 @@ fn go_pi_forwards_name_arguments_and_planter_environment() {
         terminal_sentinel.exists(),
         "Pi should retain terminal hooks"
     );
+}
+
+#[test]
+fn go_pi_tmux_window_sets_planter_tab_index() {
+    let tmp = unique_dir("go-pi-tmux-window");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
+    std::fs::write(
+        config_path_for(&root),
+        "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n    }\n}\n",
+    )
+    .unwrap();
+
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    let tmux_record = tmp.join("tmux-record");
+    write_fake_tmux(&bin_dir, &tmux_record);
+
+    let out = run_wt_with_path_and_tmux_pane(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "pi target", "--repo", "myrepo", "--pi"],
+        Some("%42"),
+    );
+    assert_success(&out, "go with tmux-window positioning");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(record.contains("PLANTER_TAB_INDEX=1"), "{record}");
+    assert_eq!(
+        std::fs::read_to_string(&tmux_record).unwrap(),
+        "display-message -p -t %42 #{session_id}\nlist-panes -s -t tmux-session -F #{window_id}\t#{window_index}\t#{pane_id}\t#{pane_tty}\n"
+    );
+}
+
+#[test]
+fn go_pi_tmux_window_without_pane_launches_without_position() {
+    let tmp = unique_dir("go-pi-tmux-without-pane");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
+    std::fs::write(
+        config_path_for(&root),
+        "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n    }\n}\n",
+    )
+    .unwrap();
+
+    let record = tmp.join("pi-record");
+    let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    let out = run_wt_with_path_and_tmux_pane(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "pi target", "--repo", "myrepo", "--pi"],
+        None,
+    );
+    assert_success(&out, "go without TMUX_PANE");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(record.contains("PLANTER_TAB_INDEX=\n"), "{record}");
 }
 
 #[test]

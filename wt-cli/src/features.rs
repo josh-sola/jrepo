@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::color;
 use crate::config::Hook;
 use crate::planter;
-use crate::tab::{self, Tabs};
+use crate::tmux::{self, Windows};
 
 const HOOK_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -28,9 +28,9 @@ pub struct Context<'a> {
 }
 
 /// Runs the get-position hook. `None` when the hook is unconfigured or fails.
-pub fn get_position(hook: Option<&Hook>, ctx: &Context) -> Option<Tabs> {
+pub fn get_position(hook: Option<&Hook>, ctx: &Context) -> Option<Windows> {
     match hook? {
-        Hook::Builtin(name) if name == "ghostty-tab" => tab::probe().ok(),
+        Hook::Builtin(name) if name == "tmux-window" => tmux::probe().ok(),
         Hook::Builtin(other) => {
             eprintln!("wt: unknown get-position builtin '{other}'");
             None
@@ -39,7 +39,7 @@ pub fn get_position(hook: Option<&Hook>, ctx: &Context) -> Option<Tabs> {
             let stdout = run_cmd(argv, ctx)?;
             let text = String::from_utf8_lossy(&stdout);
             match text.trim().parse::<usize>() {
-                Ok(mine) => Some(Tabs {
+                Ok(mine) => Some(Windows {
                     mine,
                     others: Vec::new(),
                 }),
@@ -56,10 +56,10 @@ pub fn get_position(hook: Option<&Hook>, ctx: &Context) -> Option<Tabs> {
 }
 
 /// Runs the renumber-peers hook with the peers `get_position` reported.
-pub fn renumber_peers(hook: Option<&Hook>, tabs: &Tabs, ctx: &Context) {
+pub fn renumber_peers(hook: Option<&Hook>, windows: &Windows, ctx: &Context) {
     let Some(hook) = hook else { return };
     match hook {
-        Hook::Builtin(name) if name == "planter-state" => planter::renumber(tabs),
+        Hook::Builtin(name) if name == "planter-state" => planter::renumber(windows),
         Hook::Builtin(other) => eprintln!("wt: unknown renumber-peers builtin '{other}'"),
         Hook::Cmd(argv) => {
             run_cmd(argv, ctx);
@@ -210,9 +210,9 @@ mod tests {
     fn cmd_get_position_parses_integer_stdout() {
         let tree_path = PathBuf::from("/tmp/wt-features-test");
         let hook = sh("echo 7");
-        let tabs = get_position(Some(&hook), &ctx(&tree_path)).expect("hook should succeed");
-        assert_eq!(tabs.mine, 7);
-        assert!(tabs.others.is_empty());
+        let windows = get_position(Some(&hook), &ctx(&tree_path)).expect("hook should succeed");
+        assert_eq!(windows.mine, 7);
+        assert!(windows.others.is_empty());
     }
 
     #[test]

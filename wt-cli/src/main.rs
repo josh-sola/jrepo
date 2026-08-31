@@ -17,7 +17,7 @@ mod spare;
 mod stack;
 mod store;
 mod sync;
-mod tab;
+mod tmux;
 mod tree;
 
 use std::path::{Path, PathBuf};
@@ -104,10 +104,10 @@ enum Command {
         #[arg(long)]
         path: Option<PathBuf>,
     },
-    /// Prints this tab's 1-based rank among planted agent tabs in the
-    /// caller's own Ghostty window.
-    #[command(name = "__tab-index", hide = true)]
-    TabIndex,
+    /// Prints this window's 1-based rank among supported agent windows in
+    /// the caller's tmux session.
+    #[command(name = "__window-index", hide = true)]
+    WindowIndex,
     /// Prints a tree's details for the `wt go` fzf preview window.
     #[command(name = "__launch-preview", hide = true)]
     LaunchPreview { selector: String },
@@ -714,8 +714,8 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             }
         },
         Command::SessionContext { path } => context::session_context(root, path),
-        Command::TabIndex => {
-            println!("{}", tab::index()?);
+        Command::WindowIndex => {
+            println!("{}", tmux::index()?);
             Ok(())
         }
         Command::LaunchPreview { selector } => cmd_launch_preview(root, config_path, &selector),
@@ -1242,14 +1242,14 @@ fn cmd_launch(
             .planter
             .as_ref()
             .and_then(|p| p.renumber_peers.as_ref());
-        let tabs = features::get_position(get_position_hook, &ctx);
-        if let Some(tabs) = &tabs {
-            features::renumber_peers(renumber_peers_hook, tabs, &ctx);
+        let windows = features::get_position(get_position_hook, &ctx);
+        if let Some(windows) = &windows {
+            features::renumber_peers(renumber_peers_hook, windows, &ctx);
         }
 
         env.push(("PLANTER_COLOR", entry.name));
         env.push(("PLANTER_LABEL", &label));
-        if let Some(idx) = tabs.as_ref().map(|t| t.mine) {
+        if let Some(idx) = windows.as_ref().map(|w| w.mine) {
             tab_index_str = idx.to_string();
             env.push(("PLANTER_TAB_INDEX", &tab_index_str));
         }

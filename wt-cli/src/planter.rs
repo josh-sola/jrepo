@@ -7,23 +7,22 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::tab::Tabs;
+use crate::tmux::Windows;
 
 const RESERVED_FILES: [&str; 3] = ["order.json", "prefs.json", "overlay-position.json"];
 
 /// Rewrites the `tab` field of every other live session's planter state
-/// file to the rank `tab::probe` just computed for it, so the tab that a
-/// new launch pushed down a slot gets the corrected number immediately
-/// instead of waiting on the overlay's stale-tie-break fallback. Best
-/// effort, like the probe itself: nothing here may fail or block a launch.
-pub fn renumber(tabs: &Tabs) {
-    if let Err(e) = try_renumber(tabs) {
+/// file to the rank `tmux::probe` just computed for it, so a new launch can
+/// immediately correct another agent window it pushed down. Best effort, like
+/// the probe itself: nothing here may fail or block a launch.
+pub fn renumber(windows: &Windows) {
+    if let Err(e) = try_renumber(windows) {
         eprintln!("wt: planter renumber skipped: {e:#}");
     }
 }
 
-fn try_renumber(tabs: &Tabs) -> Result<()> {
-    if tabs.others.is_empty() {
+fn try_renumber(windows: &Windows) -> Result<()> {
+    if windows.others.is_empty() {
         return Ok(());
     }
 
@@ -34,7 +33,7 @@ fn try_renumber(tabs: &Tabs) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
 
-    let ranks: HashMap<String, usize> = tabs.others.iter().cloned().collect();
+    let ranks: HashMap<String, usize> = windows.others.iter().cloned().collect();
 
     let mut candidates = Vec::new();
     for entry in read_dir {
@@ -127,7 +126,7 @@ fn pid_to_tty(pid: i64) -> Option<String> {
 
 /// The pure mapping at the heart of the renumber: given each candidate
 /// file's resolved tty and current `tab` value, and the rank each tty holds
-/// in the caller's window, decide which files need a new `tab` written.
+/// in the caller's tmux session, decide which files need a new `tab` written.
 /// A candidate whose tty isn't in `ranks`, or whose current tab already
 /// matches its rank, produces no write.
 fn plan_writes(candidates: &[Candidate], ranks: &HashMap<String, usize>) -> Vec<(PathBuf, usize)> {

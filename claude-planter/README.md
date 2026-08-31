@@ -37,8 +37,11 @@ that already knows better can set
 `PLANTER_COLOR`, `PLANTER_LABEL`, and
 `PLANTER_TAB_INDEX` on the agent process to choose that session's colour,
 name, and place in the row directly, and can rewrite that place later if its
-tabs move — see "How it works" below. `wt` is one such launcher: it sets
-these directly, and no longer sends Claude Code a `/color` command.
+tmux windows move — see "How it works" below. `wt` is one such launcher: in
+tmux it uses supported agent windows in the current session, skips unrelated
+windows, and gives splits one shared position. Outside tmux or when its query
+fails, it leaves the position unset for Planter's normal ordering. It sets
+these directly and no longer sends Claude Code a `/color` command.
 
 macOS only — it draws with AppKit.
 
@@ -218,11 +221,11 @@ and `PLANTER_TAB_INDEX` (a 1-based position) sets its place in the row instead
 of sorting by creation time. An unset colour gets an automatic choice. Unset
 labels and positions use their normal defaults.
 
-`PLANTER_TAB_INDEX` is the exception: it only sets the position when the plant
-is created, because a tab index goes stale the moment tabs move. After
-creation the `tab` field in the state file is the record. A launcher that moves
-tabs can rewrite that field in another live session's file, and the hook
-carries the new value forward instead of stamping the old one back.
+`PLANTER_TAB_INDEX` is the exception: it only establishes the initial launcher
+or terminal order when the plant is created. After creation the `tab` field in
+the state file is the record. Launchers such as `wt` can rewrite that field in
+another live session's file when tmux windows move, and the hook carries the
+new value forward instead of stamping the old one back.
 
 Set `PLANTER_STATE_DIR` to move the state directory. It takes precedence over
 `CLAUDE_PLANTER_DIR`, which remains supported for existing Claude setups. Both
@@ -272,10 +275,10 @@ prompt, so prompts from integrations without a matching public event remain in
 their normal working state.
 
 A Pi process launched by `wt go` inherits `PLANTER_COLOR`, `PLANTER_LABEL`, and
-`PLANTER_TAB_INDEX`, so its plant shares the same colour and tab ordering as the
-other supported agents. Direct Pi sessions still appear when `jpi-planter` is
-loaded;
-they use the normal automatic colour, label, and ordering rules.
+`PLANTER_TAB_INDEX`, so its plant shares the same colour and tmux-window
+ordering as the other supported agents. Direct Pi sessions still appear when
+`jpi-planter` is loaded; they use the normal automatic colour, label, and
+ordering rules.
 
 ## Icon packs
 

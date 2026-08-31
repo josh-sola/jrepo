@@ -263,7 +263,7 @@ const HEADER_COMMENT: &str = "\
 // Uncomment to opt into hooks that reach outside wt. Absent means off.\n\
 // features {\n\
 //     planter {\n\
-//         get-position { builtin \"ghostty-tab\" }\n\
+//         get-position { builtin \"tmux-window\" }\n\
 //         renumber-peers { builtin \"planter-state\" }\n\
 //     }\n\
 //     terminal {\n\
@@ -614,7 +614,7 @@ fn parse_cmd_node(text: &str, node: &KdlNode) -> Result<Vec<String>> {
     Ok(argv)
 }
 
-/// Parses a hook block, e.g. `get-position { builtin "ghostty-tab" }`. Exactly
+/// Parses a hook block, e.g. `get-position { builtin "tmux-window" }`. Exactly
 /// one of `builtin` or `cmd` is required; a `builtin` name must be one of
 /// `valid_builtins`.
 fn parse_hook_block(text: &str, node: &KdlNode, valid_builtins: &[&str]) -> Result<Hook> {
@@ -712,7 +712,7 @@ fn parse_planter_block(text: &str, node: &KdlNode) -> Result<Planter> {
     for child in children.nodes() {
         match child.name().value() {
             "get-position" => {
-                planter.get_position = Some(parse_hook_block(text, child, &["ghostty-tab"])?);
+                planter.get_position = Some(parse_hook_block(text, child, &["tmux-window"])?);
             }
             "renumber-peers" => {
                 planter.renumber_peers = Some(parse_hook_block(text, child, &["planter-state"])?);
@@ -1428,14 +1428,14 @@ mod tests {
     fn parses_a_full_features_block() {
         let dir = temp_dir();
         let path = dir.join("config.kdl");
-        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n        renumber-peers { cmd \"~/bin/iterm-tab-index\" }\n    }\n    terminal {\n        set-background { builtin \"osc11\" }\n    }\n}\n";
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n        renumber-peers { cmd \"~/bin/iterm-tab-index\" }\n    }\n    terminal {\n        set-background { builtin \"osc11\" }\n    }\n}\n";
         fs::write(&path, text).unwrap();
 
         let config = load(&path).unwrap();
         let planter = config.features.planter.unwrap();
         assert_eq!(
             planter.get_position,
-            Some(Hook::Builtin("ghostty-tab".to_string()))
+            Some(Hook::Builtin("tmux-window".to_string()))
         );
         assert_eq!(
             planter.renumber_peers,
@@ -1462,7 +1462,7 @@ mod tests {
     fn planter_alone_leaves_terminal_absent() {
         let dir = temp_dir();
         let path = dir.join("config.kdl");
-        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n    }\n}\n";
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n    }\n}\n";
         fs::write(&path, text).unwrap();
 
         let config = load(&path).unwrap();
@@ -1486,7 +1486,7 @@ mod tests {
     fn hook_with_both_builtin_and_cmd_errors() {
         let dir = temp_dir();
         let path = dir.join("config.kdl");
-        let text = "version 1\n\nfeatures {\n    planter {\n        get-position {\n            builtin \"ghostty-tab\"\n            cmd \"x\"\n        }\n    }\n}\n";
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position {\n            builtin \"tmux-window\"\n            cmd \"x\"\n        }\n    }\n}\n";
         fs::write(&path, text).unwrap();
 
         let err = load(&path).unwrap_err();
@@ -1546,14 +1546,14 @@ mod tests {
     fn unknown_builtin_names_the_line() {
         let dir = temp_dir();
         let path = dir.join("config.kdl");
-        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"nope\" }\n    }\n}\n";
+        let text = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n    }\n}\n";
         fs::write(&path, text).unwrap();
 
         let err = load(&path).unwrap_err();
         let msg = format!("{err:#}");
-        let line = line_of(text, "builtin \"nope\"");
+        let line = line_of(text, "builtin \"ghostty-tab\"");
         assert!(msg.contains(&line.to_string()), "message was:\n{msg}");
-        assert!(msg.contains("unknown builtin 'nope'"));
+        assert!(msg.contains("unknown builtin 'ghostty-tab'"));
     }
 
     #[test]
@@ -1575,7 +1575,7 @@ mod tests {
     fn features_block_survives_append_repo_and_set_repo_spares() {
         let dir = temp_dir();
         let path = dir.join("config.kdl");
-        let original = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"ghostty-tab\" }\n    }\n}\n";
+        let original = "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n    }\n}\n";
         fs::write(&path, original).unwrap();
 
         assert!(append_repo(&path, "monorepo", &sample_repo()).unwrap());
@@ -1589,7 +1589,7 @@ mod tests {
         assert!(config.features.planter.is_some());
         assert_eq!(
             config.features.planter.unwrap().get_position,
-            Some(Hook::Builtin("ghostty-tab".to_string()))
+            Some(Hook::Builtin("tmux-window".to_string()))
         );
         assert_eq!(config.repos["monorepo"].spares, 0);
     }

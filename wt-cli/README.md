@@ -187,7 +187,7 @@ Without that block, wt does not enable either integration.
 ```kdl
 features {
     planter {
-        get-position { builtin "ghostty-tab" }
+        get-position { builtin "tmux-window" }
         renumber-peers { builtin "planter-state" }
     }
     terminal {
@@ -197,13 +197,17 @@ features {
 ```
 
 - `planter` connects sessions launched through `wt go` to the optional
-  Planter overlay. Pi, Claude, and interactive Codex sessions share tab
-  position. Codex uses `planter-codex-bridge` when available. A missing or
+  Planter overlay. Pi, Claude, and interactive Codex sessions share a
+  position. In tmux, position follows supported agent windows in the current
+  session: unrelated windows are skipped and splits share one position. Outside
+  tmux, or when tmux cannot be queried, `PLANTER_TAB_INDEX` is left unset and
+  Planter falls back to its normal ordering. Codex uses `planter-codex-bridge`
+  when available. A missing or
   failed bridge falls back to direct Codex. Explicit `--remote` endpoints,
   administrative Codex commands, and direct `wt llm codex` remain direct.
-  Eligible sessions receive `PLANTER_COLOR`, `PLANTER_LABEL`, and
-  `PLANTER_TAB_INDEX`. The bridge preserves `PLANTER_STATE_DIR` or
-  `CLAUDE_PLANTER_DIR`.
+  Eligible sessions receive `PLANTER_COLOR` and `PLANTER_LABEL`, plus
+  `PLANTER_TAB_INDEX` when the position hook succeeds. The bridge preserves
+  `PLANTER_STATE_DIR` or `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background to its tint color: an
   OSC 11 escape sequence outside tmux, and tmux's window-scoped
   `window-style` option inside it, so tmux itself keeps each window's tint
@@ -222,7 +226,7 @@ tint used as the terminal background), `WT_COLOR_PRIMARY_HEX` (the color's
 identity hex), and `WT_COLOR_TEXT_HEX` (a lighter hex for labels on a dark
 ground), and wt stops them after two seconds. A hook error, timeout, or
 invalid result is treated as absent; it never prevents the agent session from
-starting. The builtins are `ghostty-tab`, `planter-state`, and `osc11`.
+starting. The builtins are `tmux-window`, `planter-state`, and `osc11`.
 
 ## Integrations
 
