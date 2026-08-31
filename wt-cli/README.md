@@ -207,7 +207,11 @@ features {
 - `terminal` sets a session's terminal background to its tint color: an
   OSC 11 escape sequence outside tmux, and tmux's window-scoped
   `window-style` option inside it, so tmux itself keeps each window's tint
-  right across splits, clients, and reattach. It applies to Pi, Claude, and
+  right across splits, clients, and reattach. Inside tmux it also colors
+  the window's status-bar tab, via window-scoped `window-status-format` /
+  `window-status-current-format` overrides — the tab background takes the
+  tint with the tree's light text color on it, and the current tab swaps
+  in the primary color for its text, bold. It applies to Pi, Claude, and
   Codex sessions launched through `wt go`.
 
 Each tree's color comes from the 12-color palette in `/palette.json` at the

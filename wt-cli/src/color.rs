@@ -56,11 +56,11 @@ pub fn pick(repo: &str, name: &str) -> &'static PaletteEntry {
 /// of the terminal session. Guarded on a tty so a redirected run gets no
 /// escape bytes. Inside tmux the tint goes on the window instead: OSC 11
 /// would recolor the whole outer terminal for every window at once.
-pub fn set_background(hex: &str) {
+pub fn set_background(entry: &PaletteEntry) {
     if std::env::var_os("TMUX").is_some() {
-        set_tmux_window_background(hex);
+        set_tmux_window_colors(entry);
     } else if std::io::stderr().is_terminal() {
-        eprint!("{}", osc11(hex));
+        eprint!("{}", osc11(entry.tint));
     }
 }
 
@@ -68,17 +68,42 @@ fn osc11(hex: &str) -> String {
     format!("\x1b]11;{hex}\x1b\\")
 }
 
-/// `window-style` is a window-scoped tmux option, so tmux itself keeps the
-/// tint right per window and per client, across splits, session switches,
-/// and reattach — nothing to hook and nothing to reset. tmux paints the
-/// cells with an explicit background rather than the terminal's default,
-/// which the Ghostty shader can't key off `iBackgroundColor`; the shader
-/// keys each PALETTE tint per pixel instead (see balatro_bg.glsl, held in
-/// sync by `shader_keys_every_palette_tint`).
-fn set_tmux_window_background(hex: &str) {
-    let _ = Command::new("tmux")
-        .args(["set-option", "-w", "window-style", &format!("bg={hex}")])
-        .status();
+/// All three options are window-scoped, so tmux itself keeps the color
+/// right per window and per client, across splits, session switches, and
+/// reattach — nothing to hook and nothing to reset.
+///
+/// `window-style` tints the panes. tmux paints the cells with an explicit
+/// background rather than the terminal's default, which the Ghostty shader
+/// can't key off `iBackgroundColor`; the shader keys each PALETTE tint per
+/// pixel instead (see balatro_bg.glsl, held in sync by
+/// `shader_keys_every_palette_tint`).
+///
+/// The two format options color the window's tab in the status bar. A
+/// per-window `window-status-style` would not: status-bar themes (dracula)
+/// bake explicit `#[fg=…,bg=…]` directives into their global formats, and
+/// those win over any style. A window-scoped format wins over the global
+/// one instead.
+fn set_tmux_window_colors(entry: &PaletteEntry) {
+    for (option, value) in [
+        ("window-style", format!("bg={}", entry.tint)),
+        ("window-status-format", tab_format(entry)),
+        ("window-status-current-format", current_tab_format(entry)),
+    ] {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-w", option, &value])
+            .status();
+    }
+}
+
+/// Inactive tab: the tree's near-black tint — the same color the panes are
+/// tinted — under the palette's light text color, tuned to read on it.
+fn tab_format(entry: &PaletteEntry) -> String {
+    format!("#[fg={},bg={}] #I #W ", entry.text, entry.tint)
+}
+
+/// Current tab: set apart by the bright primary color, bold.
+fn current_tab_format(entry: &PaletteEntry) -> String {
+    format!("#[fg={},bold,bg={}] #I #W ", entry.primary, entry.tint)
 }
 
 #[cfg(test)]
@@ -107,6 +132,17 @@ mod tests {
     #[test]
     fn osc11_sets_the_background() {
         assert_eq!(osc11("#170a0a"), "\x1b]11;#170a0a\x1b\\");
+    }
+
+    #[test]
+    fn tab_formats_color_the_status_bar_tab() {
+        let blue = &PALETTE[7];
+        assert_eq!(blue.name, "blue");
+        assert_eq!(tab_format(blue), "#[fg=#a6cbff,bg=#0a1017] #I #W ");
+        assert_eq!(
+            current_tab_format(blue),
+            "#[fg=#5996eb,bold,bg=#0a1017] #I #W "
+        );
     }
 
     #[test]

@@ -1255,7 +1255,7 @@ fn cmd_launch(
         }
     }
 
-    features::set_background(set_background_hook, entry.tint, &ctx);
+    features::set_background(set_background_hook, entry, &ctx);
 
     match agent {
         Agent::Pi => agent::exec_at(agent, &tree_path, &pi_launch_args(&label, args), &env),

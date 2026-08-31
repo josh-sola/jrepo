@@ -68,10 +68,10 @@ pub fn renumber_peers(hook: Option<&Hook>, tabs: &Tabs, ctx: &Context) {
 }
 
 /// Runs the set-background hook.
-pub fn set_background(hook: Option<&Hook>, hex: &str, ctx: &Context) {
+pub fn set_background(hook: Option<&Hook>, entry: &color::PaletteEntry, ctx: &Context) {
     let Some(hook) = hook else { return };
     match hook {
-        Hook::Builtin(name) if name == "osc11" => color::set_background(hex),
+        Hook::Builtin(name) if name == "osc11" => color::set_background(entry),
         Hook::Builtin(other) => eprintln!("wt: unknown set-background builtin '{other}'"),
         Hook::Cmd(argv) => {
             run_cmd(argv, ctx);
