@@ -13,7 +13,7 @@ pub fn pick_tree(store: &store::Store, cwd_repo: Option<&str>) -> Result<Option<
     // A hot spare is unclaimed by definition, so it has nothing to open.
     let candidates: Vec<store::Tree> = store.trees.iter().filter(|t| !t.spare).cloned().collect();
     if candidates.is_empty() {
-        bail!("no worktrees registered; create one first with `wt tree new <repo> --name \"...\"`");
+        bail!("no worktrees registered; create one first with `wt new <repo> --name \"...\"`");
     }
 
     let trees = ordered(&candidates, cwd_repo);
@@ -83,8 +83,35 @@ fn ordered<'a>(trees: &'a [store::Tree], cwd_repo: Option<&str>) -> Vec<&'a stor
     sorted
 }
 
+/// A compact stack position hint: the parent tree's name, when this tree
+/// stacks on a branch another tree holds, or how many trees stack on top of
+/// it, when it's the bottom of such a chain instead. Empty for a tree that
+/// shares no stack edge with any other tree in `trees`.
+fn stack_hint(t: &store::Tree, trees: &[&store::Tree]) -> String {
+    if let Some(parent_branch) = &t.parent_branch
+        && let Some(parent) = trees
+            .iter()
+            .find(|o| o.repo == t.repo && &o.branch == parent_branch)
+    {
+        return format!("^{}", parent.name);
+    }
+    let children = trees
+        .iter()
+        .filter(|o| o.repo == t.repo && o.parent_branch.as_deref() == Some(t.branch.as_str()))
+        .count();
+    if children > 0 {
+        format!("+{children}")
+    } else {
+        String::new()
+    }
+}
+
 fn build_lines(trees: &[&store::Tree]) -> (String, Vec<String>) {
     let states: Vec<String> = trees.iter().map(|t| status_state_str(t)).collect();
+    let hints: Vec<String> = trees.iter().map(|t| stack_hint(t, trees)).collect();
+    // A column that would be blank for every row is noise; solo-tree
+    // listings keep exactly the layout they always had.
+    let show_stack = hints.iter().any(|h| !h.is_empty());
 
     let w = |header: &str, vals: &mut dyn Iterator<Item = usize>| {
         vals.chain(std::iter::once(header.len())).max().unwrap_or(0)
@@ -96,22 +123,38 @@ fn build_lines(trees: &[&store::Tree]) -> (String, Vec<String>) {
         &mut trees.iter().map(|t| t.branch.chars().count()),
     );
     let state_w = w("STATE", &mut states.iter().map(String::len));
+    let stack_w = w("STACK", &mut hints.iter().map(String::len));
 
-    let header = format!(
-        "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$}",
-        "NAME", "REPO", "BRANCH", "STATE"
-    )
+    let header = if show_stack {
+        format!(
+            "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<stack_w$}",
+            "NAME", "REPO", "BRANCH", "STATE", "STACK"
+        )
+    } else {
+        format!(
+            "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$}",
+            "NAME", "REPO", "BRANCH", "STATE"
+        )
+    }
     .trim_end()
     .to_string();
 
     let lines = trees
         .iter()
         .zip(&states)
-        .map(|(t, state)| {
-            let display = format!(
-                "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$}",
-                t.name, t.repo, t.branch, state
-            );
+        .zip(&hints)
+        .map(|((t, state), hint)| {
+            let display = if show_stack {
+                format!(
+                    "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$} {:<stack_w$}",
+                    t.name, t.repo, t.branch, state, hint
+                )
+            } else {
+                format!(
+                    "{:<name_w$} {:<repo_w$} {:<branch_w$} {:<state_w$}",
+                    t.name, t.repo, t.branch, state
+                )
+            };
             format!("{}\t{}", t.id, display.trim_end())
         })
         .collect();
@@ -162,6 +205,9 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            parent_revision: None,
+            pending_restack: false,
+            pr_number: None,
             spare: false,
         }
     }
@@ -236,6 +282,43 @@ mod tests {
         let mut fields = lines[0].splitn(2, '\t');
         assert_eq!(fields.next(), Some(a.id.to_string().as_str()));
         assert!(fields.next().unwrap().starts_with("fix login"));
+    }
+
+    #[test]
+    fn build_lines_hints_at_stack_position_only_for_trees_that_have_one() {
+        let root = tree_at("mono", "root pr", "a", 10);
+        let mut child = tree_at("mono", "child pr", "b", 5);
+        child.parent_branch = Some("a".to_string());
+        let solo = tree_at("mono", "solo", "c", 1);
+        let refs = vec![&root, &child, &solo];
+
+        let (header, lines) = build_lines(&refs);
+        assert!(header.contains("STACK"), "header was: {header}");
+
+        assert!(lines[0].ends_with("+1"), "root line was: {}", lines[0]);
+        assert!(
+            lines[1].ends_with("^root pr"),
+            "child line was: {}",
+            lines[1]
+        );
+        assert!(
+            !lines[2].contains('^') && !lines[2].contains('+'),
+            "solo tree must carry no stack hint: {}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn build_lines_omits_the_stack_column_when_nothing_is_stacked() {
+        let a = tree_at("mono", "a", "josh/a", 10);
+        let b = tree_at("mono", "b", "josh/b", 5);
+        let refs = vec![&a, &b];
+
+        let (header, lines) = build_lines(&refs);
+        assert!(!header.contains("STACK"), "header was: {header}");
+        for line in &lines {
+            assert!(!line.contains("  +") && !line.contains("  ^"), "{line}");
+        }
     }
 
     #[test]

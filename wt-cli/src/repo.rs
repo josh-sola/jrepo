@@ -387,7 +387,7 @@ fn write_guard_hook(hooks_dir: &Path, name: &str, repo_name: &str) -> Result<()>
     let path = hooks_dir.join(name);
     let script = format!(
         "#!/bin/sh\necho \"error: this is {repo_name}'s base checkout — it stays on trunk.\" >&2\n\
-         echo \"run: wt tree new {repo_name} --name \\\"<short summary>\\\" and commit there instead.\" >&2\n\
+         echo \"run: wt new {repo_name} --name \\\"<short summary>\\\" and commit there instead.\" >&2\n\
          exit 1\n"
     );
     fs::write(&path, script).with_context(|| format!("writing {}", path.display()))?;
@@ -398,9 +398,9 @@ fn write_guard_hook(hooks_dir: &Path, name: &str, repo_name: &str) -> Result<()>
 /// helm gets none of these: chart dependencies (`charts/*/charts/`,
 /// `Chart.lock`) come from `helm dependency update`, which needs network and
 /// is only wanted when actively working on one chart, not on every tree. A
-/// step here would run it unconditionally against every chart on every
-/// `wt tree new`, so helm is deliberately left with an empty step list rather
-/// than scanned for `Chart.yaml`.
+/// step here would run it unconditionally against every chart on every new
+/// tree, so helm is deliberately left with an empty step list rather than
+/// scanned for `Chart.yaml`.
 fn detect_steps(base: &Path) -> Vec<config::Step> {
     let mut steps = Vec::new();
 

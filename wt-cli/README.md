@@ -33,8 +33,15 @@ wt
 │   └── spare
 │       ├── refresh
 │       └── drop
+├── new
+├── pr
+│   └── new
+├── sync
+├── submit
+├── ls
+├── stack
+├── restack
 ├── tree
-│   ├── new
 │   ├── ls
 │   ├── path
 │   ├── name
@@ -42,12 +49,10 @@ wt
 │   ├── status
 │   ├── wait
 │   └── env
-├── gt
-│   ├── stack
-│   └── restack
 ├── upkeep
 │   ├── gc
 │   └── doctor
+├── adopt-branch
 ├── llm
 │   ├── pi
 │   ├── claude
@@ -57,9 +62,76 @@ wt
 └── help
 ```
 
-The old flat command forms remain accepted as hidden compatibility routes for
-existing scripts and installed integrations. New commands, documentation, and
-automation should use the paths shown above.
+`wt init` and `wt launch` remain accepted as hidden compatibility routes for
+existing scripts. New commands, documentation, and automation should use the
+paths shown above.
+
+## Stacks
+
+A repository adopted by `wt` must be a Graphite repo. Every worktree holds
+exactly one branch, and every branch is one pull request, for the tree's
+whole life. A stack is the chain of trees you get by following parent
+branches down to trunk — not something `wt` stores separately.
+
+Start a stack. The command prints the tree's path immediately; provisioning
+continues in the background.
+
+```sh
+wt new monorepo --name "fix login" --codex -- --model gpt-5
+wt tree wait "fix login"
+```
+
+Stack another pull request on top of the branch in the current tree (or name
+one explicitly with `--onto <tree-or-branch>`):
+
+```sh
+wt pr new --name "fix login, part 2"
+```
+
+Pass `--pi`, `--claude`, or `--codex` to `wt new`, `wt pr new`, or
+`wt repo lift` to open that agent after provisioning. With no agent flag,
+these commands only create the tree. Arguments after `--` require one of the
+three flags.
+
+See where a tree sits in its stack, or every stack in a repo:
+
+```sh
+wt stack
+wt stack --all
+wt ls
+```
+
+A downstream restack is debt, not a blocker: when a branch moves, everything
+stacked on top of it is marked pending instead of being forced through right
+away. `wt restack` walks a whole stack bottom-up, restacking whatever tree is
+clean and idle and leaving the rest marked; `wt sync` drains one tree's own
+pending restack on demand. `wt ls` and `wt stack` both show which branches
+are still pending.
+
+```sh
+wt restack "fix login" --dry-run
+wt sync "fix login"
+```
+
+Push a branch and its downstack ancestors as pull requests; `--stack` also
+pushes what's stacked on top. Every branch in scope must already be
+restacked, or this refuses rather than push a stale base.
+
+```sh
+wt submit "fix login" --stack
+```
+
+`wt upkeep doctor` can find a branch Graphite tracks that no tree holds — a
+"homeless" branch, left behind by `gt track` run by hand or by `gt split`.
+`wt adopt-branch` materializes a tree for it:
+
+```sh
+wt adopt-branch josh/some-branch --repo monorepo
+```
+
+`wt upkeep gc` also reaps a tree whose pull request has merged or closed,
+even if it wouldn't otherwise look safe to remove, and re-parents any
+branches stacked on top of it onto its own parent.
 
 ## Common workflows
 
@@ -68,18 +140,6 @@ Adopt an existing clone as a base:
 ```sh
 wt repo adopt monorepo ~/repos/monorepo
 ```
-
-Create a worktree. The command prints its path immediately; provisioning can
-continue in the background.
-
-```sh
-wt tree new monorepo --name "fix login" --codex -- --model gpt-5
-wt tree wait "fix login"
-```
-
-Pass `--pi`, `--claude`, or `--codex` to `wt tree new` or `wt repo lift` to
-open that agent after provisioning. With no agent flag, these commands only
-create the tree. Arguments after `--` require one of the three flags.
 
 Open an existing tree in Pi, or choose one from the picker:
 
@@ -115,11 +175,9 @@ wt upkeep gc --dry-run
 wt upkeep doctor --fix
 ```
 
-Work with a Graphite stack or run an agent in a selected tree or base:
+Run an agent in a selected tree or base directly, bypassing `wt go`:
 
 ```sh
-wt gt stack
-wt gt restack "fix login" --dry-run
 wt llm pi "fix login" -- --model custom
 wt llm claude "fix login" -- --model opus
 wt llm codex monorepo -- --model gpt-5
@@ -153,8 +211,8 @@ Configuration lives at `~/.config/wt/config.kdl` (or `$WT_CONFIG`).
 `wt repo adopt` adds a repo block without rewriting a block you have edited.
 Use `--redetect` to replace only detected provisioning steps.
 
-The base stays on trunk and is not a work area. Use `wt tree new` for work.
-Shared, gitignored directories such as `plans/`, `local/`, and
+The base stays on trunk and is not a work area. Use `wt new` or `wt pr new`
+for work. Shared, gitignored directories such as `plans/`, `local/`, and
 `user-memories/` are linked into the base and every tree. They are not copied,
 so changes survive tree removal and remain visible across the repository.
 The base paths moved aside during the first adoption stay in `backup/`; wt
@@ -163,15 +221,15 @@ does not remove them automatically.
 Provisioning steps, trunk, branch prefix, spare count, and per-repo environment
 settings are hand-editable in `config.kdl`. The shared and copied paths come
 from `.worktreeinclude` each time a tree is created, so a later edit takes
-effect on the next `wt tree new`.
+effect on the next tree.
 
 ## Hot spares
 
 Provisioning a large tree can require a checkout, submodule setup, dependency
 installs, and builds. A hot spare has already completed those steps on a
-detached `origin/<trunk>` checkout. `wt tree new` claims a ready spare when
-one is available. It returns immediately when the spare is at the requested
-start point; otherwise it reuses the warm tree and reprovisions it.
+detached `origin/<trunk>` checkout. `wt new` and `wt pr new` claim a ready
+spare when one is available. It returns immediately when the spare is at the
+requested start point; otherwise it reuses the warm tree and reprovisions it.
 
 Hot spares have no branch, so they stay out of Graphite's graph. `wt repo
 sync` refreshes them against trunk and replaces a missing spare in the
@@ -230,22 +288,22 @@ starting. The builtins are `tmux-window`, `planter-state`, and `osc11`.
 
 ## Integrations
 
-- **Statusline.** New integrations should call `wt tree name --path "$PWD"`
-  and fall back to the directory basename when it prints nothing. Existing
-  flat statusline calls keep working through hidden compatibility.
+- **Statusline.** Integrations should call `wt tree name --path "$PWD"` and
+  fall back to the directory basename when it prints nothing.
 - **Session hook.** `hooks/session-context.sh` backs Claude Code's
   `SessionStart` and `CwdChanged` hooks. In a tree it reports the name,
-  branch, shared `plans/` path, and Graphite position. In a base it explains
-  that `wt tree new` is the place to start work. `CwdChanged` delivers the
-  same text as a system message because Claude Code does not expose
-  `additionalContext` for that hook.
+  branch, shared `plans/` path, stack position, and pending restack debt,
+  plus a reminder to run `wt pr new` rather than `gt create` for a new pull
+  request. In a base it explains that `wt new` is the place to start work.
+  `CwdChanged` delivers the same text as a system message because Claude
+  Code does not expose `additionalContext` for that hook.
 - **Skill.** `plugin/` is a Claude Code skill installed at
   `~/.claude/skills/wt`.
 - **Base commit block.** `wt repo adopt` sets a worktree-scoped
   `core.hooksPath` on the base. Its generated hooks point accidental commits
-  toward `wt tree new`. It does not overwrite an existing worktree-scoped
-  hook path. New trees clear the copied base hook path after `git worktree
-  add`, so their repository hooks keep working.
+  toward `wt new`. It does not overwrite an existing worktree-scoped hook
+  path. New trees clear the copied base hook path after `git worktree add`,
+  so their repository hooks keep working.
 - The LaunchAgent is written but not loaded. It runs `wt repo sync` every
   five minutes and logs to `~/repos/wt/wt-sync.log` and
   `~/repos/wt/wt-sync.err.log`.

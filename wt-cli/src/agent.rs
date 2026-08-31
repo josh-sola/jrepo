@@ -94,9 +94,7 @@ pub fn exec_target(
     let target = resolve_target(&store, target)?;
 
     if target.is_base {
-        eprintln!(
-            "base is for reading; run `wt tree new <repo> --name \"...\"` to start work instead"
-        );
+        eprintln!("base is for reading; run `wt new <repo> --name \"...\"` to start work instead");
     }
 
     exec_at(agent, &target.cwd, args, &[])

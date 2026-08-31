@@ -67,6 +67,9 @@ pub fn provision_spare(root: &Path, config_path: &Path, repo_name: &str) -> Resu
             log_path: Some(log_path.clone()),
             provision_pid: Some(std::process::id()),
             parent_branch: None,
+            parent_revision: None,
+            pending_restack: false,
+            pr_number: None,
             spare: true,
         });
         Ok(true)
@@ -125,8 +128,30 @@ pub struct Claimed {
     pub needs_steps: bool,
 }
 
-/// Turns a ready spare into `plan`'s tree.
-///
+/// Turns a ready spare into `plan`'s tree, then tracks it with Graphite if
+/// it has a parent.
+pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
+    let claimed = claim_locked(root, plan)?;
+
+    // A spare has no branch, so it never went through the cold path's `gt
+    // track`; a claimed spare with a parent needs that same call or it
+    // silently drops out of the stack it was meant to join. Run after the
+    // lock is released: `gt` is an external process that can be slow or
+    // hang, and holding the store flock across it would block every other
+    // `wt` invocation for as long as it runs.
+    if let (Some(claimed), Some(parent)) = (&claimed, &plan.parent_branch) {
+        let store = store::load(root)?;
+        let ctx = tree::RepoCtx {
+            name: &plan.repo_name,
+            repo: &plan.repo,
+            config: &plan.repo_config,
+        };
+        tree::track_with_graphite(&store, &ctx, &plan.name, &claimed.path, parent, "gt");
+    }
+
+    Ok(claimed)
+}
+
 /// This runs entirely inside one `store::with_store_lock`. That is what
 /// makes the claim atomic against a concurrent `wt tree new` with no locking
 /// beyond what `wt tree new` already does: two callers serialize on
@@ -134,7 +159,7 @@ pub struct Claimed {
 /// none and builds cold. It also means the common case — the spare's HEAD
 /// already matches `plan.start_point` — commits to disk with no `git` call
 /// beyond the branch creation below.
-pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
+fn claim_locked(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
     store::with_store_lock(root, |s| {
         let Some(idx) = s
             .trees
@@ -162,6 +187,7 @@ pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
             t.name = plan.name.clone();
             t.branch = plan.branch.clone();
             t.parent_branch = plan.parent_branch.clone();
+            t.parent_revision = plan.parent_revision.clone();
             t.created = Utc::now();
             t.state = if needs_steps {
                 TreeState::Provisioning

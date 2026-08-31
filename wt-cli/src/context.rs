@@ -26,10 +26,14 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
         .max_by_key(|t| t.path.components().count())
     {
         let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
-        let mut lines = vec![format!(
-            "This directory is the wt tree \"{}\" (branch {}) of repo {}.",
-            tree.name, branch, tree.repo
-        )];
+        let mut lines = vec![
+            format!(
+                "This directory is the wt tree \"{}\" (branch {}) of repo {}.",
+                tree.name, branch, tree.repo
+            ),
+            "To start a new PR stacked on this one, run `wt pr new`; never `gt create` here."
+                .to_string(),
+        ];
         let plans = tree.path.join("plans");
         if plans.is_dir() {
             lines.push(format!(
@@ -37,6 +41,11 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
                  that directory and it survives teardown, so plans belong nowhere else.",
                 plans.display()
             ));
+        }
+        if tree.pending_restack {
+            lines.push(
+                "This branch needs a restack — commit or stash, then run `wt sync`.".to_string(),
+            );
         }
         if let Some(repo) = store.repos.get(&tree.repo) {
             // Any failure here — no Graphite, an unreadable database, a
@@ -53,7 +62,7 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
     if let Some((repo_name, _)) = store.repos.iter().find(|(_, r)| cwd.starts_with(&r.base)) {
         println!(
             "This directory is {repo_name}'s base checkout. It stays on trunk; do not edit or \
-             commit here. Run `wt tree new {repo_name} --name \"...\"` to start work in a disposable \
+             commit here. Run `wt new {repo_name} --name \"...\"` to start work in a disposable \
              tree."
         );
     }
@@ -61,7 +70,7 @@ pub fn session_context(root: &Path, cwd: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn holder_desc(h: &NeighborHolder) -> String {
+pub(crate) fn holder_desc(h: &NeighborHolder) -> String {
     match h {
         NeighborHolder::Tree { name } => format!("tree \"{name}\""),
         NeighborHolder::Base => "the repo's base checkout".to_string(),
@@ -86,7 +95,7 @@ fn stack_position_lines(position: &stack::Position) -> Vec<String> {
             lines.push(format!(
                 "This tree is mid-stack: '{parent}' belongs to tree \"{name}\", not this one. \
                  Don't rebase or restack '{parent}' from here — do that in tree \"{name}\", or \
-                 run `wt gt restack` to walk the whole stack in the right order."
+                 run `wt restack` to walk the whole stack in the right order."
             ));
         }
     }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -101,6 +102,23 @@ pub fn worktree_add(base: &Path, tree_path: &Path, branch: &str, start_point: &s
             branch,
             start_point,
         ],
+        base,
+    )?;
+    if !out.status.success() {
+        bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Checks out a branch that already exists, instead of creating one —
+/// `wt adopt-branch`'s path, where every other worktree-creation route
+/// passes `-b` because the branch doesn't exist yet.
+pub fn worktree_add_existing(base: &Path, tree_path: &Path, branch: &str) -> Result<()> {
+    let out = run(
+        &["worktree", "add", &tree_path.to_string_lossy(), branch],
         base,
     )?;
     if !out.status.success() {
@@ -307,6 +325,46 @@ pub fn current_branch(path: &Path) -> Result<String> {
 
 pub fn rev_parse(path: &Path, rev: &str) -> Result<String> {
     stdout_trimmed(&["rev-parse", rev], path)
+}
+
+/// Every local branch's current tip, in one process call — local branches
+/// are shared across every worktree of `path`'s repo, so this answers for
+/// all of them regardless of which one, if any, has a given branch checked
+/// out right now.
+pub fn live_heads(path: &Path) -> Result<HashMap<String, String>> {
+    let out = run(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short) %(objectname)",
+            "refs/heads/",
+        ],
+        path,
+    )?;
+    if !out.status.success() {
+        bail!(
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut heads = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some((name, sha)) = line.split_once(' ') {
+            heads.insert(name.to_string(), sha.to_string());
+        }
+    }
+    Ok(heads)
+}
+
+pub fn is_ancestor(path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let out = run(&["merge-base", "--is-ancestor", ancestor, descendant], path)?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "git merge-base --is-ancestor {ancestor} {descendant} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 pub fn merge_ff_only(path: &Path, rev: &str) -> Result<()> {
@@ -721,5 +779,39 @@ mod tests {
 
         fs::remove_dir_all(&base).ok();
         fs::remove_dir_all(&sub).ok();
+    }
+
+    #[test]
+    fn live_heads_reports_every_local_branch_regardless_of_checkout() {
+        let repo = fixture_repo();
+        run(&["branch", "untouched"], &repo).unwrap();
+        let trunk = current_branch(&repo).unwrap();
+        let trunk_head = rev_parse(&repo, "HEAD").unwrap();
+
+        let heads = live_heads(&repo).unwrap();
+        assert_eq!(heads.get(&trunk), Some(&trunk_head));
+        assert_eq!(heads.get("untouched"), Some(&trunk_head));
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn is_ancestor_true_before_a_commit_false_after_it_diverges() {
+        let repo = fixture_repo();
+        let base_branch = current_branch(&repo).unwrap();
+        let base_head = rev_parse(&repo, "HEAD").unwrap();
+        run(&["checkout", "-qb", "child"], &repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "child\n").unwrap();
+        run(&["commit", "-aqm", "child edit"], &repo).unwrap();
+        let child_head = rev_parse(&repo, "HEAD").unwrap();
+
+        assert!(is_ancestor(&repo, &base_head, &child_head).unwrap());
+
+        run(&["checkout", "-q", &base_branch], &repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "diverged\n").unwrap();
+        run(&["commit", "-aqm", "diverged"], &repo).unwrap();
+        let diverged_head = rev_parse(&repo, "HEAD").unwrap();
+
+        assert!(!is_ancestor(&repo, &diverged_head, &child_head).unwrap());
+        fs::remove_dir_all(&repo).ok();
     }
 }
