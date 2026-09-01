@@ -12,7 +12,13 @@ use uuid::Uuid;
 
 use crate::git;
 
-pub const STORE_VERSION: u32 = 2;
+pub const STORE_VERSION: u32 = 3;
+
+/// The oldest `state.json` version `load` still reads. Every field added
+/// since then carries a serde default, so an old file parses as-is; `load`
+/// bumps the version in memory only, and the next locked mutation persists
+/// it.
+const MIN_LOADABLE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Store {
@@ -66,15 +72,37 @@ pub struct Tree {
         skip_serializing_if = "Option::is_none"
     )]
     pub provision_pid: Option<u32>,
-    /// The branch this tree was created onto with `--onto`, kept apart from
+    /// This tree's parent branch in its Graphite stack, kept apart from
     /// Graphite's own record of parentage so a teardown check still knows a
     /// tree's stack position when Graphite's database is missing or stale.
+    /// Maintained for the tree's life, not just written at creation.
     #[serde(
         rename = "parentBranch",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_branch: Option<String>,
+    /// `parent_branch`'s head commit at the moment this tree was created,
+    /// used to detect a needed restack without querying Graphite's db.
+    #[serde(
+        rename = "parentRevision",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_revision: Option<String>,
+    /// A restack of this tree's branch is known-needed but hasn't run yet.
+    /// The session hook reads this instead of deriving `needs_restack`,
+    /// which needs a live-head and merge-base check too expensive to pay on
+    /// every prompt; the restack walk and `wt sync` are what set and clear
+    /// it.
+    #[serde(rename = "pendingRestack", default, skip_serializing_if = "is_false")]
+    pub pending_restack: bool,
+    /// This branch's pull request number, recorded once `wt submit`
+    /// succeeds. A PR's state is read fresh from the `.graphite_pr_info`
+    /// sidecar instead — recording a snapshot of it here would just go
+    /// stale.
+    #[serde(rename = "prNumber", default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
     /// An unclaimed hot spare: provisioned ahead of time, sitting on a
     /// detached HEAD, hidden from listings and never reaped. Claiming one
     /// clears this, and the row becomes an ordinary tree.
@@ -130,15 +158,19 @@ pub fn load(root: &Path) -> Result<Store> {
     let path = state_path(root);
     match fs::read(&path) {
         Ok(bytes) => {
-            let store: Store = serde_json::from_slice(&bytes)
+            let mut store: Store = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            if store.version != STORE_VERSION {
+            if store.version < MIN_LOADABLE_VERSION || store.version > STORE_VERSION {
                 bail!(
-                    "{} has version {}, but wt supports version {STORE_VERSION}",
+                    "{} has version {}, but wt reads versions {MIN_LOADABLE_VERSION}-{STORE_VERSION}",
                     path.display(),
                     store.version
                 );
             }
+            // Bumped in memory only: `load` runs without the store lock, so
+            // saving here could race a concurrent locked writer and clobber
+            // its update. The next `with_store_lock` mutation persists v3.
+            store.version = STORE_VERSION;
             Ok(store)
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Store::default()),
@@ -291,6 +323,9 @@ mod tests {
             log_path: None,
             provision_pid: None,
             parent_branch: None,
+            parent_revision: None,
+            pending_restack: false,
+            pr_number: None,
             spare: false,
         }
     }
@@ -311,6 +346,31 @@ mod tests {
     }
 
     #[test]
+    fn pending_restack_round_trips_and_stays_out_of_json_when_false() {
+        let root = temp_root();
+        let mut store = Store::default();
+        let mut tree = sample_tree("needs one", "josh/needs-one");
+        tree.pending_restack = true;
+        store.trees.push(tree);
+        save(&root, &store).unwrap();
+
+        let on_disk = fs::read_to_string(state_path(&root)).unwrap();
+        assert!(on_disk.contains("\"pendingRestack\": true"), "{on_disk}");
+
+        let loaded = load(&root).unwrap();
+        assert!(loaded.trees[0].pending_restack);
+
+        // A tree with no pending restack writes nothing for it at all —
+        // the field is opt-in noise, not a default every row carries.
+        let mut store = Store::default();
+        store.trees.push(sample_tree("clean", "josh/clean"));
+        save(&root, &store).unwrap();
+        let on_disk = fs::read_to_string(state_path(&root)).unwrap();
+        assert!(!on_disk.contains("pendingRestack"), "{on_disk}");
+        assert!(!load(&root).unwrap().trees[0].pending_restack);
+    }
+
+    #[test]
     fn missing_state_json_is_empty_store() {
         let root = temp_root();
         let store = load(&root).unwrap();
@@ -324,6 +384,40 @@ mod tests {
         fs::write(state_path(&root), r#"{"version": 99}"#).unwrap();
         let err = load(&root).unwrap_err();
         assert!(err.to_string().contains("version 99"), "message was: {err}");
+    }
+
+    #[test]
+    fn load_upgrades_a_v2_store_in_memory_without_writing_to_disk() {
+        let root = temp_root();
+        let tree = sample_tree("scratch test", "josh/scratch-test");
+        let v2 = serde_json::json!({
+            "version": 2,
+            "repos": {},
+            "trees": [tree],
+        });
+        fs::write(state_path(&root), serde_json::to_vec(&v2).unwrap()).unwrap();
+
+        let loaded = load(&root).unwrap();
+        assert_eq!(loaded.version, STORE_VERSION);
+        assert_eq!(loaded.trees.len(), 1);
+        assert_eq!(loaded.trees[0].parent_revision, None);
+
+        // `load` runs without the store lock, so it must never write —
+        // doing so could race and clobber a concurrent locked writer.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(state_path(&root)).unwrap()).unwrap();
+        assert_eq!(on_disk["version"], 2);
+
+        // The next real mutation, taken under the lock, persists the
+        // upgrade to disk.
+        with_store_lock(&root, |s| {
+            s.trees.push(sample_tree("second", "josh/second"));
+            Ok(())
+        })
+        .unwrap();
+        let on_disk_after_mutation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(state_path(&root)).unwrap()).unwrap();
+        assert_eq!(on_disk_after_mutation["version"], STORE_VERSION);
     }
 
     #[test]

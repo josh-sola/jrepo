@@ -13,7 +13,7 @@ use crate::store::{self, Repo, Store};
 /// Fetches every registered repo (or just `repo_filter`) and fast-forwards
 /// its trunk when safe. With `stack`, also walks every Graphite stack in the
 /// repo that spans more than one worktree, restacking it bottom-up — the
-/// same walk `wt gt restack` runs, just over every such stack instead of one.
+/// same walk `wt restack` runs, just over every such stack instead of one.
 /// Never destructive: a repo that fails to sync is reported and skipped
 /// rather than aborting the rest.
 pub fn sync(
@@ -86,36 +86,118 @@ pub fn sync(
     Ok(())
 }
 
+/// Drains one tree's own restack debt: `wt restack`/`wt repo sync
+/// --stack` walk a whole stack and mark what they can't reach; this is the
+/// other half, run from (or naming) the one tree whose turn has come. If
+/// its branch doesn't need a restack — by the stored flag or a fresh
+/// check — this says so and does nothing else.
+pub fn sync_tree(root: &Path, selector: Option<String>) -> Result<()> {
+    sync_tree_with(root, selector, "gt")
+}
+
+fn sync_tree_with(root: &Path, selector: Option<String>, gt_bin: &str) -> Result<()> {
+    let store = store::load(root)?;
+    let tree = resolve_tree(&store, selector.as_deref())?;
+    let repo = store
+        .repos
+        .get(&tree.repo)
+        .with_context(|| format!("repo '{}' is not registered", tree.repo))?;
+    let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
+
+    let entry = stack::load(&tree.repo, repo, &store)?.and_then(|s| s.get(&branch).cloned());
+    let Some(entry) = entry else {
+        println!("'{branch}' doesn't need a restack");
+        return Ok(());
+    };
+    if !entry.shows_needs_restack() {
+        println!("'{branch}' doesn't need a restack");
+        return Ok(());
+    }
+
+    let step = restack::step_for(&entry, &store, repo);
+    let reasons = restack::readiness(&step);
+    if !reasons.is_empty() {
+        bail!("can't restack '{branch}': {}", reasons.join(", "));
+    }
+
+    match restack::restack_one_with(root, &tree.repo, &step, gt_bin)? {
+        restack::RestackAttempt::Restacked => println!("restacked '{branch}'"),
+        restack::RestackAttempt::Blocked(reason) => bail!("restack stopped: {reason}"),
+    }
+
+    let children = mark_children_pending(root, &tree.repo, &branch)?;
+    if children.is_empty() {
+        println!("nothing else is stacked on '{branch}'");
+    } else {
+        println!(
+            "now pending a restack of their own: {}",
+            children.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The tree a bare `wt sync` (or `wt submit`) acts on: the one named by
+/// `selector`, or the one containing the current directory when it's
+/// omitted.
+pub(crate) fn resolve_tree<'a>(
+    store: &'a Store,
+    selector: Option<&str>,
+) -> Result<&'a store::Tree> {
+    if let Some(sel) = selector {
+        return store::resolve(&store.trees, sel);
+    }
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    store
+        .trees
+        .iter()
+        .filter(|t| !t.spare && cwd.starts_with(&t.path))
+        .max_by_key(|t| t.path.components().count())
+        .with_context(|| {
+            "the current directory isn't inside a tree; pass a tree name, or run this from \
+             inside one"
+        })
+}
+
+/// Every tree whose parent branch is `branch`: their restack was only
+/// correct against `branch`'s old position, which just moved.
+fn mark_children_pending(root: &Path, repo_name: &str, branch: &str) -> Result<Vec<String>> {
+    store::with_store_lock(root, |s| {
+        let mut marked = Vec::new();
+        for t in &mut s.trees {
+            if t.repo == repo_name && t.parent_branch.as_deref() == Some(branch) {
+                t.pending_restack = true;
+                marked.push(t.branch.clone());
+            }
+        }
+        Ok(marked)
+    })
+}
+
 /// Restacks every stack in `repo` that has branches held by more than one
 /// worktree — a single-tree stack has no cross-worktree problem for this
-/// walk to solve. Stops at the first failure, same as `wt gt restack`, leaving
-/// later stacks in the repo unwalked rather than pressing on past a tree
-/// left mid-rebase.
+/// walk to solve. A tree that isn't ready only skips its own branch and
+/// whatever sits on top of it, marked `pending_restack` for a later `wt
+/// sync`; a real `gt` conflict still stops the whole sync, same as before,
+/// leaving later stacks in the repo unwalked.
 fn sync_stack(root: &Path, name: &str, repo: &Repo) -> Result<()> {
     let store = store::load(root)?;
     let Some(stacks) = stack::load(name, repo, &store)? else {
-        println!("{name}: no Graphite stack info, skipping the restack walk");
+        println!("{name}: no trees yet, skipping the restack walk");
         return Ok(());
     };
 
     let to_walk = stacks_to_walk(&stacks, &store, repo);
+    let mut restacked = 0;
+    let mut pending = 0;
     for (r, steps) in &to_walk {
-        let offenders = restack::preflight(steps);
-        if !offenders.is_empty() {
-            for o in &offenders {
-                println!(
-                    "{name}: refusing to restack the stack rooted at '{r}' — {} ({}): {}",
-                    o.label,
-                    o.dir.display(),
-                    o.reasons.join(", ")
-                );
-            }
-            bail!(
-                "stack rooted at '{r}' has {} tree(s) not ready for a restack",
-                offenders.len()
-            );
+        let outcome = restack::walk(root, name, steps)?;
+        restacked += outcome.restacked.len();
+        pending += outcome.pending.len();
+        for line in outcome.describe() {
+            println!("{name}: '{r}' stack: {line}");
         }
-        restack::execute(steps)?;
     }
 
     let walked = to_walk.len();
@@ -125,8 +207,10 @@ fn sync_stack(root: &Path, name: &str, repo: &Repo) -> Result<()> {
             "no multi-tree stacks to restack".to_string()
         } else {
             format!(
-                "restacked {walked} multi-tree stack{}",
-                if walked == 1 { "" } else { "s" }
+                "walked {walked} multi-tree stack{} — {restacked} branch{} restacked, \
+                 {pending} pending",
+                if walked == 1 { "" } else { "s" },
+                if restacked == 1 { "" } else { "es" },
             )
         }
     );
@@ -337,6 +421,7 @@ fn sync_one(
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -358,20 +443,7 @@ mod tests {
         );
     }
 
-    fn sqlite(db: &Path, sql: &str) {
-        let out = Command::new("/usr/bin/sqlite3")
-            .arg(db)
-            .arg(sql)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "sqlite3 {sql} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn sample_tree(name: &str, branch: &str, path: PathBuf) -> Tree {
+    fn sample_tree(name: &str, branch: &str, parent_branch: Option<&str>, path: PathBuf) -> Tree {
         Tree {
             id: Uuid::now_v7(),
             repo: "r".into(),
@@ -385,14 +457,19 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
-            parent_branch: None,
+            parent_branch: parent_branch.map(str::to_string),
+            parent_revision: None,
+            pending_restack: false,
+            pr_number: None,
             spare: false,
         }
     }
 
-    /// Two independent stacks off the same repo: `master -> s1a`, held by a
-    /// single tree, and `root2 -> s2a -> s2b`, split across two. Only the
-    /// second has a cross-worktree problem for `--stack` to solve.
+    /// Two independent stacks off the same repo: `s1a` (parent trunk), held
+    /// by a single tree, and `s2a -> s2b`, split across two — `s2a`'s parent
+    /// names a branch no tree ever backed, so `s2a` is the graph's root for
+    /// that stack. Only the second stack has a cross-worktree problem for
+    /// `--stack` to solve.
     fn fixture() -> (PathBuf, Repo, Store, Stacks) {
         let dir = std::env::temp_dir().join(format!("wt-sync-stack-test-{}", Uuid::now_v7()));
         let base = dir.join("base");
@@ -403,7 +480,7 @@ mod tests {
         fs::write(base.join("f.txt"), "0\n").unwrap();
         git(&["add", "-A"], &base);
         git(&["commit", "-qm", "init"], &base);
-        for b in ["s1a", "root2", "s2a", "s2b"] {
+        for b in ["s1a", "s2a", "s2b"] {
             git(&["branch", b], &base);
         }
 
@@ -423,23 +500,6 @@ mod tests {
             &base,
         );
 
-        let common_dir = base.join(".git");
-        let db = common_dir.join(".graphite_metadata.db");
-        sqlite(
-            &db,
-            "CREATE TABLE branch_metadata (\
-             branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
-             parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
-             children TEXT, branch_revision TEXT, validation_result TEXT, \
-             parent_head_revision TEXT);",
-        );
-        sqlite(
-            &db,
-            "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
-             ('master', NULL, 'TRUNK'), ('s1a', 'master', NULL), ('root2', NULL, NULL), \
-             ('s2a', 'root2', NULL), ('s2b', 's2a', NULL);",
-        );
-
         let repo = Repo {
             base: base.clone(),
             last_fetch: None,
@@ -448,9 +508,24 @@ mod tests {
         let mut store = Store::default();
         store.repos.insert("r".to_string(), repo.clone());
         store.trees = vec![
-            sample_tree("tree-s1a", "s1a", fs::canonicalize(&tree_s1a).unwrap()),
-            sample_tree("tree-s2a", "s2a", fs::canonicalize(&tree_s2a).unwrap()),
-            sample_tree("tree-s2b", "s2b", fs::canonicalize(&tree_s2b).unwrap()),
+            sample_tree(
+                "tree-s1a",
+                "s1a",
+                Some("master"),
+                fs::canonicalize(&tree_s1a).unwrap(),
+            ),
+            sample_tree(
+                "tree-s2a",
+                "s2a",
+                Some("root2"),
+                fs::canonicalize(&tree_s2a).unwrap(),
+            ),
+            sample_tree(
+                "tree-s2b",
+                "s2b",
+                Some("s2a"),
+                fs::canonicalize(&tree_s2b).unwrap(),
+            ),
         ];
 
         let stacks = stack::load("r", &repo, &store).unwrap().unwrap();
@@ -462,13 +537,11 @@ mod tests {
         let (dir, repo, store, stacks) = fixture();
 
         let walked = stacks_to_walk(&stacks, &store, &repo);
-        assert_eq!(
-            walked.len(),
-            1,
-            "only root2's stack spans more than one tree"
-        );
+        assert_eq!(walked.len(), 1, "only s2a's stack spans more than one tree");
         let (root, steps) = &walked[0];
-        assert_eq!(root, "root2");
+        // `root2` names no tree of its own, so `s2a` — the lowest branch a
+        // tree actually backs — is the graph's root for this stack.
+        assert_eq!(root, "s2a");
         let branches: Vec<&str> = steps.iter().map(|s| s.branch.as_str()).collect();
         assert_eq!(branches, vec!["s2a", "s2b"]);
 
@@ -590,5 +663,102 @@ mod tests {
         }
 
         cleanup_submodule_fixture(&base);
+    }
+
+    fn fake_gt_always_succeeds(dir: &Path) -> PathBuf {
+        let script = dir.join("gt");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    /// `b` is pending a restack (flag set by hand, standing in for a walk
+    /// that marked it earlier) and `c`'s parent is `b`. Draining `b` should
+    /// restack it, clear its own flag, and mark `c` pending in turn — its
+    /// old restack is only correct against where `b` used to be.
+    #[test]
+    fn sync_tree_drains_a_pending_branch_and_marks_its_children_pending() {
+        let dir = std::env::temp_dir().join(format!("wt-sync-tree-test-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        git(&["init", "-q", "-b", "master"], &base);
+        git(&["config", "user.email", "t@t"], &base);
+        git(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git(&["add", "-A"], &base);
+        git(&["commit", "-qm", "init"], &base);
+
+        let tree_b_path = dir.join("tree-b");
+        git(
+            &["worktree", "add", tree_b_path.to_str().unwrap(), "-b", "b"],
+            &base,
+        );
+
+        let root = dir.join("wtroot");
+        let repo = Repo {
+            base: base.clone(),
+            last_fetch: None,
+        };
+        store::with_store_lock(&root, |s| {
+            s.repos.insert("r".to_string(), repo.clone());
+            let mut tree_b = sample_tree("tree-b", "b", Some("a"), tree_b_path.clone());
+            tree_b.pending_restack = true;
+            let tree_c = sample_tree("tree-c", "c", Some("b"), dir.join("tree-c-no-worktree"));
+            s.trees = vec![tree_b, tree_c];
+            Ok(())
+        })
+        .unwrap();
+
+        let gt = fake_gt_always_succeeds(&dir);
+        sync_tree_with(&root, Some("tree-b".to_string()), gt.to_str().unwrap()).unwrap();
+
+        let store = store::load(&root).unwrap();
+        let by_branch = |b: &str| store.trees.iter().find(|t| t.branch == b).unwrap();
+        assert!(!by_branch("b").pending_restack, "b was just drained");
+        assert!(by_branch("c").pending_restack, "b just moved under c");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sync_tree_says_so_plainly_when_nothing_is_needed() {
+        let dir = std::env::temp_dir().join(format!("wt-sync-tree-noop-test-{}", Uuid::now_v7()));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        git(&["init", "-q", "-b", "master"], &base);
+        git(&["config", "user.email", "t@t"], &base);
+        git(&["config", "user.name", "t"], &base);
+        fs::write(base.join("f.txt"), "0\n").unwrap();
+        git(&["add", "-A"], &base);
+        git(&["commit", "-qm", "init"], &base);
+
+        let tree_a_path = dir.join("tree-a");
+        git(
+            &["worktree", "add", tree_a_path.to_str().unwrap(), "-b", "a"],
+            &base,
+        );
+
+        let root = dir.join("wtroot");
+        let repo = Repo {
+            base: base.clone(),
+            last_fetch: None,
+        };
+        store::with_store_lock(&root, |s| {
+            s.repos.insert("r".to_string(), repo.clone());
+            s.trees = vec![sample_tree("tree-a", "a", Some("master"), tree_a_path)];
+            Ok(())
+        })
+        .unwrap();
+
+        // A never-invoked `gt` proves the no-restack path never shells out.
+        let gt = dir.join("gt-never-run");
+        sync_tree_with(&root, Some("tree-a".to_string()), gt.to_str().unwrap()).unwrap();
+
+        let store = store::load(&root).unwrap();
+        assert!(!store.trees[0].pending_restack);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

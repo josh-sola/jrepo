@@ -1,8 +1,12 @@
-//! Read-only access to Graphite's stack graph: a private SQLite file plus a
-//! JSON sidecar, both in the git common dir. `wt` only ever reads them —
-//! every mutation goes through `gt`. Any missing or unexpected piece (the
-//! `sqlite3` binary, either file, a schema change) degrades to "no stack
-//! info" rather than an error.
+//! Read-only access to Graphite's own records: a private SQLite file plus a
+//! JSON sidecar, both in the git common dir. `wt`'s own state is the primary
+//! source for stack shape; these survive for two consumers: the
+//! delete-guard union in `tree.rs` (a branch with no wt tree of its own,
+//! tracked by `gt` before wt recorded parent edges or created out of band,
+//! exists only here), and the drift findings `wt upkeep doctor` reports.
+//! `wt` only ever reads them — every mutation goes through `gt`. Any
+//! missing or unexpected piece (the `sqlite3` binary, either file, a schema
+//! change) degrades to "no stack info" rather than an error.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -76,23 +80,21 @@ fn query_json(git_common_dir: &Path, sql: &str) -> Result<String> {
 struct BranchRow {
     branch_name: String,
     parent_branch_name: Option<String>,
-    parent_branch_revision: Option<String>,
-    state: Option<String>,
 }
 
 /// Graphite's GitHub mirror for one branch's pull request, read from
 /// `.graphite_pr_info`. `state` is `OPEN`, `MERGED`, or `CLOSED`.
 #[derive(Debug, Clone, Deserialize)]
-struct PrInfo {
+pub(crate) struct PrInfo {
     #[serde(rename = "headRefName")]
     head_ref_name: String,
     #[serde(rename = "prNumber")]
-    pr_number: u64,
-    state: String,
+    pub(crate) pr_number: u64,
+    pub(crate) state: String,
     #[serde(rename = "reviewDecision")]
-    review_decision: Option<String>,
+    pub(crate) review_decision: Option<String>,
     #[serde(rename = "isDraft")]
-    is_draft: bool,
+    pub(crate) is_draft: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +107,6 @@ struct PrInfoFile {
 pub struct Node {
     pub parent: Option<String>,
     pub children: Vec<String>,
-    pub state: Option<String>,
     /// A GitHub-merged or closed PR is never reported as needing a
     /// restack — Graphite has one annotation slot per branch and `(merged)`
     /// masks `(needs restack)` — so this is `None` whenever PR state can't
@@ -125,115 +126,28 @@ pub struct Graph {
 fn fetch_rows(git_common_dir: &Path) -> Result<Vec<BranchRow>> {
     let json = query_json(
         git_common_dir,
-        "SELECT branch_name, parent_branch_name, parent_branch_revision, state \
-         FROM branch_metadata",
+        "SELECT branch_name, parent_branch_name FROM branch_metadata",
     )?;
     serde_json::from_str(&json).context("parsing branch_metadata")
 }
 
-fn nodes_from_rows(rows: &[BranchRow]) -> BTreeMap<String, Node> {
-    let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
-    for row in rows {
-        let node = nodes.entry(row.branch_name.clone()).or_default();
-        node.parent = row.parent_branch_name.clone();
-        node.state = row.state.clone();
-    }
-    // Only recorded into a parent that has its own row: `parent_branch_name`
-    // can dangle (a deleted branch Graphite never dropped the reference to).
-    for row in rows {
-        if let Some(parent) = &row.parent_branch_name
-            && nodes.contains_key(parent)
-        {
-            nodes
-                .get_mut(parent)
-                .unwrap()
-                .children
-                .push(row.branch_name.clone());
-        }
-    }
-    nodes
-}
-
-/// One query for the whole graph — cheap enough to run on every `wt`
-/// invocation that wants it, and `-readonly` so it never contends with a
-/// concurrent `gt` write or leaves `-wal`/`-shm` files behind in the shared
-/// git dir.
-pub fn graph(git_common_dir: &Path) -> Result<Graph> {
-    let rows = fetch_rows(git_common_dir)?;
-    let mut nodes = nodes_from_rows(&rows);
-
-    let pr_infos = read_pr_info(git_common_dir);
-    if let Some(prs) = &pr_infos {
-        for pr in prs.values() {
-            if let Some(node) = nodes.get_mut(&pr.head_ref_name) {
-                node.pr_number = Some(pr.pr_number);
-                node.pr_state = Some(pr.state.clone());
-                node.pr_review_decision = pr.review_decision.clone();
-                node.pr_draft = Some(pr.is_draft);
-            }
-        }
-    }
-
-    if let Ok(heads) = live_heads(git_common_dir) {
-        for row in &rows {
-            let needs = needs_restack(git_common_dir, row, &heads, pr_infos.as_ref());
-            if let Some(node) = nodes.get_mut(&row.branch_name) {
-                node.needs_restack = needs;
-            }
-        }
-    }
-
-    Ok(Graph { nodes })
-}
-
-/// Parent/child edges only, skipping the pull-request read and the
-/// needs-restack computation `graph` pays for the whole database — each
-/// branch whose cached fork point has gone stale costs `graph` a
-/// `merge-base` subprocess, which is fine for `wt gt stack` but too slow for a
-/// hook that runs on every prompt. Callers that only need "what is this
-/// branch's parent, what sits on top of it" want this instead.
+/// Graphite's own parent/child edges, with no pull-request read and no
+/// needs-restack computation — `wt`'s own state answers those. This
+/// survives for the delete-guard union in `tree.rs` and doctor's drift
+/// findings: a branch `gt` tracked before wt recorded parent edges, or one
+/// created out of band, can exist only in this db, never in a wt tree.
 pub fn graph_light(git_common_dir: &Path) -> Result<Graph> {
     let rows = fetch_rows(git_common_dir)?;
-    Ok(Graph {
-        nodes: nodes_from_rows(&rows),
-    })
+    Ok(Graph::from_edges(
+        rows.into_iter()
+            .map(|r| (r.branch_name, r.parent_branch_name)),
+    ))
 }
 
-/// A branch needs a restack when its parent's current head is not an
-/// ancestor of it, unless the branch's own pull request is already merged
-/// or closed — Graphite's `(merged)` annotation masks `(needs restack)`, so
-/// a merged branch is never reported as needing one regardless of its
-/// actual git shape.
-fn needs_restack(
-    git_common_dir: &Path,
-    row: &BranchRow,
-    heads: &HashMap<String, String>,
-    pr_infos: Option<&HashMap<String, PrInfo>>,
-) -> Option<bool> {
-    let parent = row.parent_branch_name.as_deref()?;
-    let parent_head = heads.get(parent)?;
-    let branch_head = heads.get(&row.branch_name)?;
-
-    // If the parent hasn't moved since this branch last recorded its fork
-    // point, that fork point is trivially still on the parent's line, and
-    // therefore still an ancestor of this branch too — no need to pay for
-    // `merge-base` on the ~80% of branches this is true for.
-    let is_ancestor = if row.parent_branch_revision.as_deref() == Some(parent_head.as_str()) {
-        true
-    } else {
-        is_ancestor(git_common_dir, parent_head, branch_head).ok()?
-    };
-
-    if is_ancestor {
-        return Some(false);
-    }
-    let masked = pr_infos?
-        .get(&row.branch_name)
-        .is_some_and(|pr| matches!(pr.state.as_str(), "MERGED" | "CLOSED"));
-    Some(!masked)
-}
-
-fn read_pr_info(git_common_dir: &Path) -> Option<HashMap<String, PrInfo>> {
+/// `.graphite_pr_info` is a plain JSON sidecar `gt` writes after submit,
+/// independent of the sqlite db's schema — so this is read on its own,
+/// never gated on `available`.
+pub(crate) fn read_pr_info(git_common_dir: &Path) -> Option<HashMap<String, PrInfo>> {
     let bytes = std::fs::read(git_common_dir.join(PR_INFO_FILE)).ok()?;
     let file: PrInfoFile = serde_json::from_slice(&bytes).ok()?;
     Some(
@@ -244,60 +158,38 @@ fn read_pr_info(git_common_dir: &Path) -> Option<HashMap<String, PrInfo>> {
     )
 }
 
-fn git_common_dir_cmd(git_common_dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .arg("--git-dir")
-        .arg(git_common_dir)
-        .args(args)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))
-}
-
-/// Every local branch's current tip, in one process call. Works from any
-/// path, including one with no worktree checked out, since `--git-dir`
-/// bypasses git's usual repository discovery.
-fn live_heads(git_common_dir: &Path) -> Result<HashMap<String, String>> {
-    let out = git_common_dir_cmd(
-        git_common_dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short) %(objectname)",
-            "refs/heads/",
-        ],
-    )?;
-    if !out.status.success() {
-        bail!(
-            "git for-each-ref failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut heads = HashMap::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some((name, sha)) = line.split_once(' ') {
-            heads.insert(name.to_string(), sha.to_string());
-        }
-    }
-    Ok(heads)
-}
-
-fn is_ancestor(git_common_dir: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let out = git_common_dir_cmd(
-        git_common_dir,
-        &["merge-base", "--is-ancestor", ancestor, descendant],
-    )?;
-    match out.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!(
-            "git merge-base --is-ancestor {ancestor} {descendant} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-    }
-}
-
 impl Graph {
+    /// Builds a graph from `(branch, parent)` edges — the shape Graphite's
+    /// db rows and wt's own tree records both reduce to, so either can build
+    /// one without its own copy of the parent/child derivation below.
+    pub fn from_edges<I>(edges: I) -> Graph
+    where
+        I: IntoIterator<Item = (String, Option<String>)>,
+    {
+        let edges: Vec<(String, Option<String>)> = edges.into_iter().collect();
+        let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
+        for (branch, parent) in &edges {
+            nodes.entry(branch.clone()).or_default().parent = parent.clone();
+        }
+        // Only recorded into a parent that has its own node: a parent name
+        // can dangle — a branch no tree or db row backs, such as trunk, or
+        // one deleted out from under a stale reference.
+        for (branch, parent) in &edges {
+            if let Some(parent) = parent
+                && nodes.contains_key(parent)
+            {
+                nodes.get_mut(parent).unwrap().children.push(branch.clone());
+            }
+        }
+        Graph { nodes }
+    }
+
     pub fn get(&self, branch: &str) -> Option<&Node> {
         self.nodes.get(branch)
+    }
+
+    pub fn get_mut(&mut self, branch: &str) -> Option<&mut Node> {
+        self.nodes.get_mut(branch)
     }
 
     pub fn contains(&self, branch: &str) -> bool {
@@ -494,11 +386,11 @@ mod tests {
     }
 
     #[test]
-    fn graph_is_empty_not_an_error_when_branch_metadata_has_the_right_schema_but_no_rows() {
+    fn graph_light_is_empty_not_an_error_when_branch_metadata_has_the_right_schema_but_no_rows() {
         let dir = temp_common_dir();
         make_db(&dir, &[]);
         assert!(available(&dir));
-        let g = graph(&dir).unwrap();
+        let g = graph_light(&dir).unwrap();
         assert_eq!(g.branch_names().count(), 0);
         fs::remove_dir_all(&dir).ok();
     }
@@ -512,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_derives_children_from_parent_edges_not_the_children_column() {
+    fn graph_light_derives_children_from_parent_edges_not_the_children_column() {
         let dir = temp_common_dir();
         make_db(
             &dir,
@@ -522,53 +414,21 @@ mod tests {
                 ("b", Some("a"), None),
             ],
         );
-        let g = graph(&dir).unwrap();
+        let g = graph_light(&dir).unwrap();
         assert_eq!(g.get("master").unwrap().children, vec!["a".to_string()]);
         assert_eq!(g.get("a").unwrap().children, vec!["b".to_string()]);
         assert!(g.get("b").unwrap().children.is_empty());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn graph_light_has_the_same_edges_as_graph_but_no_restack_info() {
-        let dir = temp_common_dir();
-        make_db(
-            &dir,
-            &[
-                ("master", None, Some("TRUNK")),
-                ("a", Some("master"), None),
-                ("b", Some("a"), None),
-            ],
-        );
-        let g = graph_light(&dir).unwrap();
-        assert_eq!(g.get("master").unwrap().children, vec!["a".to_string()]);
-        assert_eq!(g.get("a").unwrap().parent.as_deref(), Some("master"));
-        assert_eq!(g.get("b").unwrap().parent.as_deref(), Some("a"));
         assert_eq!(g.get("a").unwrap().needs_restack, None);
         assert_eq!(g.get("a").unwrap().pr_number, None);
         fs::remove_dir_all(&dir).ok();
     }
 
     fn graph_of(edges: &[(&str, Option<&str>)]) -> Graph {
-        let mut nodes = BTreeMap::new();
-        for (name, parent) in edges {
-            nodes
-                .entry((*name).to_string())
-                .or_insert_with(Node::default)
-                .parent = parent.map(str::to_string);
-        }
-        for (name, parent) in edges {
-            if let Some(p) = parent
-                && nodes.contains_key(*p)
-            {
-                nodes
-                    .get_mut(*p)
-                    .unwrap()
-                    .children
-                    .push((*name).to_string());
-            }
-        }
-        Graph { nodes }
+        Graph::from_edges(
+            edges
+                .iter()
+                .map(|(name, parent)| ((*name).to_string(), parent.map(str::to_string))),
+        )
     }
 
     #[test]
@@ -657,159 +517,5 @@ mod tests {
         let mut sorted = order.clone();
         sorted.sort();
         assert_eq!(sorted, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    fn run_git(args: &[&str], cwd: &Path) {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    /// A real repo with `master` and `child` (parent `master`), where
-    /// `master` has since moved past the commit `child` forked from —
-    /// the shape that requires an actual `merge-base` check, not just the
-    /// recorded-revision prefilter.
-    fn fixture_with_stale_child() -> (PathBuf, String) {
-        let dir = temp_common_dir();
-        fs::create_dir_all(&dir).unwrap();
-        run_git(&["init", "-q", "-b", "master"], &dir);
-        run_git(&["config", "user.email", "t@t"], &dir);
-        run_git(&["config", "user.name", "t"], &dir);
-        fs::write(dir.join("f.txt"), "0\n").unwrap();
-        run_git(&["add", "-A"], &dir);
-        run_git(&["commit", "-qm", "c0"], &dir);
-        let fork_point = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&dir)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-
-        run_git(&["checkout", "-qb", "child"], &dir);
-        fs::write(dir.join("child.txt"), "1\n").unwrap();
-        run_git(&["add", "-A"], &dir);
-        run_git(&["commit", "-qm", "c1"], &dir);
-
-        run_git(&["checkout", "-q", "master"], &dir);
-        fs::write(dir.join("f.txt"), "1\n").unwrap();
-        run_git(&["add", "-A"], &dir);
-        run_git(&["commit", "-qm", "c2"], &dir);
-
-        let common_dir = dir.join(".git");
-        make_db(
-            &common_dir,
-            &[
-                ("master", None, Some("TRUNK")),
-                ("child", Some("master"), None),
-            ],
-        );
-        run_sqlite(
-            &db_path(&common_dir),
-            &format!(
-                "UPDATE branch_metadata SET parent_branch_revision = '{fork_point}' \
-                 WHERE branch_name = 'child';"
-            ),
-        );
-        (common_dir, fork_point)
-    }
-
-    fn write_pr_info(common_dir: &Path, branch: &str, state: &str) {
-        fs::write(
-            common_dir.join(PR_INFO_FILE),
-            format!(
-                r#"{{"prInfos": [{{"headRefName": "{branch}", "prNumber": 1,
-                 "state": "{state}", "reviewDecision": null, "isDraft": false}}]}}"#
-            ),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn needs_restack_is_true_when_parent_moved_past_the_fork_point_and_the_pr_is_open() {
-        let (common_dir, _) = fixture_with_stale_child();
-        write_pr_info(&common_dir, "child", "OPEN");
-        let g = graph(&common_dir).unwrap();
-        assert_eq!(g.get("child").unwrap().needs_restack, Some(true));
-        assert_eq!(g.get("master").unwrap().needs_restack, None);
-        fs::remove_dir_all(common_dir.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn needs_restack_is_masked_by_a_merged_pr() {
-        let (common_dir, _) = fixture_with_stale_child();
-        write_pr_info(&common_dir, "child", "MERGED");
-        let g = graph(&common_dir).unwrap();
-        assert_eq!(g.get("child").unwrap().needs_restack, Some(false));
-        assert_eq!(g.get("child").unwrap().pr_state.as_deref(), Some("MERGED"));
-        fs::remove_dir_all(common_dir.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn needs_restack_is_unknown_without_readable_pr_info() {
-        let (common_dir, _) = fixture_with_stale_child();
-        // No `.graphite_pr_info` written — masking can't be ruled out.
-        let g = graph(&common_dir).unwrap();
-        assert_eq!(g.get("child").unwrap().needs_restack, None);
-        fs::remove_dir_all(common_dir.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn needs_restack_is_false_when_the_recorded_fork_point_is_still_current() {
-        // `child` freshly branched off `master`'s current tip: the prefilter
-        // alone settles this without a `merge-base` call.
-        let dir = temp_common_dir();
-        fs::create_dir_all(&dir).unwrap();
-        run_git(&["init", "-q", "-b", "master"], &dir);
-        run_git(&["config", "user.email", "t@t"], &dir);
-        run_git(&["config", "user.name", "t"], &dir);
-        fs::write(dir.join("f.txt"), "0\n").unwrap();
-        run_git(&["add", "-A"], &dir);
-        run_git(&["commit", "-qm", "c0"], &dir);
-        let head = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&dir)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        run_git(&["checkout", "-qb", "child"], &dir);
-        fs::write(dir.join("child.txt"), "1\n").unwrap();
-        run_git(&["add", "-A"], &dir);
-        run_git(&["commit", "-qm", "c1"], &dir);
-
-        let common_dir = dir.join(".git");
-        make_db(
-            &common_dir,
-            &[
-                ("master", None, Some("TRUNK")),
-                ("child", Some("master"), None),
-            ],
-        );
-        run_sqlite(
-            &db_path(&common_dir),
-            &format!(
-                "UPDATE branch_metadata SET parent_branch_revision = '{head}' \
-                 WHERE branch_name = 'child';"
-            ),
-        );
-        let g = graph(&common_dir).unwrap();
-        assert_eq!(g.get("child").unwrap().needs_restack, Some(false));
-        fs::remove_dir_all(dir).ok();
     }
 }

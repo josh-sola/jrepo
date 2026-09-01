@@ -508,8 +508,8 @@ fn assert_success(out: &Output, label: &str) {
 
 /// Registers `base` as `name`'s repo, then turns off hot spares. The suite
 /// runs every test in parallel across every core; a background spare build
-/// on top of each test's own `wt tree new` calls would multiply the number of
-/// concurrent `git worktree add`s and installs many times over, and one
+/// on top of each test's own tree-creation calls would multiply the number
+/// of concurrent `git worktree add`s and installs many times over, and one
 /// that inherits a step a test deliberately made spin forever would never
 /// exit. Tests that mean to exercise spares opt back in with
 /// `enable_spares`.
@@ -603,8 +603,8 @@ fn spare_rows(root: &Path, repo: &str) -> Vec<serde_json::Value> {
 }
 
 /// Blocks until at least one of `repo`'s spares is `ready` or `failed`,
-/// returning that row. A test builds a spare through `wt repo sync` rather than
-/// `wt tree new`, so the claim it means to test is a separate, later step.
+/// returning that row. A test builds a spare through `wt repo sync` rather
+/// than claiming it, so the claim it means to test is a separate, later step.
 fn wait_for_settled_spare(root: &Path, repo: &str, timeout_secs: u64) -> serde_json::Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
@@ -662,7 +662,7 @@ fn build_and_wait_spare(root: &Path, repo: &str, timeout_secs: u64) -> serde_jso
     wait_for_settled_spare(root, repo, timeout_secs)
 }
 
-/// Claims `repo`'s one ready spare with a real `wt tree new` and waits for the
+/// Claims `repo`'s one ready spare with a real `wt new` and waits for the
 /// resulting tree — the shared setup behind the top-up assertions, which
 /// only differ in what they check afterward. Returns the claimed spare's
 /// original id.
@@ -671,7 +671,7 @@ fn build_claim_and_wait(root: &Path, repo: &str, name: &str) -> String {
     assert_eq!(spare["state"], "ready");
     let original_id = spare["id"].as_str().unwrap().to_string();
 
-    let out = run_wt(root, &["tree", "new", repo, "--name", name]);
+    let out = run_wt(root, &["new", repo, "--name", name]);
     assert_success(&out, "new (claim)");
     assert_success(&run_wt(root, &["tree", "wait", name]), "wait");
     original_id
@@ -757,8 +757,15 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
         "│   └── spare --",
         "│       ├── refresh --",
         "│       └── drop --",
+        "├── new --",
+        "├── pr --",
+        "│   └── new --",
+        "├── sync --",
+        "├── submit --",
+        "├── ls --",
+        "├── stack --",
+        "├── restack --",
         "├── tree --",
-        "│   ├── new --",
         "│   ├── ls --",
         "│   ├── path --",
         "│   ├── name --",
@@ -766,12 +773,10 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
         "│   ├── status --",
         "│   ├── wait --",
         "│   └── env --",
-        "├── gt --",
-        "│   ├── stack --",
-        "│   └── restack --",
         "├── upkeep --",
         "│   ├── gc --",
         "│   └── doctor --",
+        "├── adopt-branch --",
         "├── llm --",
         "│   ├── pi --",
         "│   ├── claude --",
@@ -788,7 +793,7 @@ fn recursive_help_shows_the_public_hierarchy_and_hides_compatibility_routes() {
         .collect::<Vec<_>>();
     assert_eq!(
         root_commands.len(),
-        8,
+        15,
         "unexpected root commands:\n{stdout}"
     );
     for hidden in [
@@ -823,34 +828,123 @@ fn hidden_window_index_dispatches_to_tmux() {
 }
 
 #[test]
-fn hidden_legacy_routes_still_accept_help() {
+fn legacy_init_and_launch_routes_still_accept_help() {
     let tmp = unique_dir("legacy-help");
     let root = tmp.join("wt-root");
     let cases: &[(&str, &[&str])] = &[
         ("init", &["init", "--help"]),
-        ("adopt", &["adopt", "--help"]),
         ("launch", &["launch", "--help"]),
-        ("new", &["new", "--help"]),
-        ("ls", &["ls", "--help"]),
-        ("path", &["path", "--help"]),
-        ("name", &["name", "--help"]),
-        ("rm", &["rm", "--help"]),
-        ("status", &["status", "--help"]),
-        ("wait", &["wait", "--help"]),
-        ("env refresh", &["env", "refresh", "--help"]),
-        ("stack", &["stack", "--help"]),
-        ("restack", &["restack", "--help"]),
-        ("gc", &["gc", "--help"]),
-        ("doctor", &["doctor", "--help"]),
-        ("sync", &["sync", "--help"]),
-        ("spare", &["spare", "--help"]),
-        ("claude", &["claude", "--help"]),
-        ("codex", &["codex", "--help"]),
     ];
 
     for (name, args) in cases {
         assert_success(&run_wt(&root, args), &format!("legacy {name} --help"));
     }
+}
+
+fn find_tree_json<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    state["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap_or_else(|| panic!("tree {name:?} not found in state.json: {state}"))
+}
+
+fn load_state(root: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(root.join("state.json")).unwrap()).unwrap()
+}
+
+fn last_line_path(out: &Output) -> PathBuf {
+    PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    )
+}
+
+/// `wt new`'s defining behavior: it always tracks the new branch with
+/// Graphite against trunk and records that edge, with no `--onto` needed
+/// to ask for it.
+#[test]
+fn new_top_level_command_tracks_the_new_stack_on_trunk() {
+    let tmp = unique_dir("new-stack-root");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "stack root"]);
+    assert_success(&out, "new");
+    let tree_path = last_line_path(&out);
+    assert!(
+        tree_path.join(".git").exists(),
+        "worktree not created at {}",
+        tree_path.display()
+    );
+
+    let state = load_state(&root);
+    let tree = find_tree_json(&state, "stack root");
+    assert_eq!(tree["parentBranch"], "master");
+    assert!(
+        tree["parentRevision"].is_string(),
+        "parentRevision missing: {tree}"
+    );
+}
+
+/// `wt pr new` with no `--onto` stacks on the branch of the tree containing
+/// the current directory, tracking and recording that edge the same way an
+/// explicit `--onto` does.
+#[test]
+fn pr_new_with_no_onto_stacks_on_the_cwd_tree() {
+    let tmp = unique_dir("pr-new-cwd");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt(&root, &["new", "myrepo", "--name", "root pr"]);
+    assert_success(&out, "new");
+    let root_tree_path = last_line_path(&out);
+
+    let out = run_wt_in(&root, &root_tree_path, &["pr", "new", "--name", "child pr"]);
+    assert_success(&out, "pr new");
+    let child_tree_path = last_line_path(&out);
+    assert!(
+        child_tree_path.join(".git").exists(),
+        "worktree not created at {}",
+        child_tree_path.display()
+    );
+    assert_ne!(child_tree_path, root_tree_path);
+
+    let state = load_state(&root);
+    let root_branch = find_tree_json(&state, "root pr")["branch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = find_tree_json(&state, "child pr");
+    assert_eq!(child["parentBranch"], root_branch);
+    assert!(
+        child["parentRevision"].is_string(),
+        "parentRevision missing: {child}"
+    );
+}
+
+/// `wt pr new` outside any tree, with no `--onto`, has no branch to inherit
+/// and must say so rather than falling back to trunk.
+#[test]
+fn pr_new_with_no_onto_outside_a_tree_errors_clearly() {
+    let tmp = unique_dir("pr-new-outside");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt(&root, &["pr", "new", "--name", "orphan pr"]);
+    assert!(!out.status.success(), "expected failure outside a tree");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("isn't inside a tree"),
+        "message was: {stderr}"
+    );
 }
 
 #[test]
@@ -861,7 +955,7 @@ fn repo_adopt_and_tree_lifecycle_round_trip() {
 
     init_repo(&root, "myrepo", &base);
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "scratch test"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "scratch test"]);
     assert_success(&out, "new");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
@@ -903,6 +997,85 @@ fn repo_adopt_and_tree_lifecycle_round_trip() {
     assert_success(&out, "ls --json after rm");
     let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(entries.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn adopt_branch_materializes_a_tree_for_an_existing_branch() {
+    let tmp = unique_dir("adopt-branch");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    git(&["branch", "josh/feature"], &base);
+
+    let out = run_wt(&root, &["adopt-branch", "josh/feature", "--repo", "myrepo"]);
+    assert_success(&out, "adopt-branch");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
+    assert!(
+        tree_path.join(".git").exists(),
+        "worktree not created at {}",
+        tree_path.display()
+    );
+
+    // Provisioning finishes in the background; a fixture with zero steps
+    // is a race without this, not a guaranteed pass.
+    assert_success(&run_wt(&root, &["tree", "wait", "feature"]), "wait");
+
+    let out = run_wt(&root, &["tree", "ls", "--json"]);
+    assert_success(&out, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["name"], "feature",
+        "the branch prefix must be stripped"
+    );
+    assert_eq!(entries[0]["branch"], "josh/feature");
+    assert_eq!(entries[0]["state"], "ready");
+}
+
+#[test]
+fn adopt_branch_refuses_a_branch_already_checked_out_elsewhere() {
+    let tmp = unique_dir("adopt-branch-refuse");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &[
+                "new",
+                "myrepo",
+                "--name",
+                "already-here",
+                "--branch",
+                "josh/feature",
+            ],
+        ),
+        "new",
+    );
+
+    let out = run_wt(&root, &["adopt-branch", "josh/feature", "--repo", "myrepo"]);
+    assert!(
+        !out.status.success(),
+        "adopt-branch must refuse a branch already checked out elsewhere"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already checked out"),
+        "stderr was: {stderr}"
+    );
+
+    let out = run_wt(&root, &["tree", "ls", "--json"]);
+    assert_success(&out, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        1,
+        "a refused adopt must register no second tree"
+    );
 }
 
 fn git_status_porcelain(path: &Path) -> String {
@@ -971,10 +1144,7 @@ fn shared_symlinks_stay_invisible_to_git_status_in_base_and_tree() {
         "base git status not clean after init:\n{base_status}"
     );
 
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "gitignore check"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "gitignore check"]);
     assert_success(&out, "new");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
@@ -1044,10 +1214,7 @@ fn plans_default_share_stays_invisible_to_git_status_with_no_manifest_and_no_git
         "base should still get a plans symlink with no .worktreeinclude"
     );
 
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "no manifest check"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "no manifest check"]);
     assert_success(&out, "new");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
@@ -1078,10 +1245,10 @@ fn new_with_unslugifiable_name_errors_clearly() {
 
     init_repo(&root, "myrepo", &base);
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "???"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "???"]);
     assert!(
         !out.status.success(),
-        "expected 'wt tree new --name ???' to fail without --branch"
+        "expected 'wt new --name ???' to fail without --branch"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1151,11 +1318,11 @@ fn go_ambiguous_name_across_repos_preserves_the_ambiguity_error() {
     init_repo(&root, "repo-a", &base_a);
     init_repo(&root, "repo-b", &base_b);
     assert_success(
-        &run_wt(&root, &["tree", "new", "repo-a", "--name", "same name"]),
+        &run_wt(&root, &["new", "repo-a", "--name", "same name"]),
         "new in repo-a",
     );
     assert_success(
-        &run_wt(&root, &["tree", "new", "repo-b", "--name", "same name"]),
+        &run_wt(&root, &["new", "repo-b", "--name", "same name"]),
         "new in repo-b",
     );
 
@@ -1221,11 +1388,8 @@ fn unflagged_legacy_launch_rewrites_its_repo_and_selects_pi() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(
-            &root,
-            &["tree", "new", "myrepo", "--name", "legacy launch target"],
-        ),
-        "tree new",
+        &run_wt(&root, &["new", "myrepo", "--name", "legacy launch target"]),
+        "new",
     );
     assert_success(
         &run_wt(&root, &["tree", "wait", "legacy launch target"]),
@@ -1290,7 +1454,7 @@ fn go_runs_a_hook_only_when_its_feature_block_is_present() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "hook target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "hook target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "hook target"]), "wait");
@@ -1346,7 +1510,7 @@ fn go_pi_forwards_name_arguments_and_planter_environment() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "pi target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
@@ -1402,7 +1566,7 @@ fn go_pi_tmux_window_sets_planter_tab_index() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "pi target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
@@ -1441,7 +1605,7 @@ fn go_pi_tmux_window_without_pane_launches_without_position() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "pi target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
@@ -1473,7 +1637,7 @@ fn go_codex_uses_planter_positioning_without_claude_decoration() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "codex target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "codex target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "codex target"]), "wait");
@@ -1547,7 +1711,7 @@ fn go_codex_with_explicit_remote_stays_direct() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "remote target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "remote target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "remote target"]), "wait");
@@ -1611,10 +1775,7 @@ fn go_codex_falls_back_without_planter_environment_after_invalid_bridge() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(
-            &root,
-            &["tree", "new", "myrepo", "--name", "fallback target"],
-        ),
+        &run_wt(&root, &["new", "myrepo", "--name", "fallback target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "fallback target"]), "wait");
@@ -1670,7 +1831,7 @@ fn go_claude_keeps_its_decoration_and_planter() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "claude target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "claude target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "claude target"]), "wait");
@@ -1724,10 +1885,7 @@ fn name_matches_longest_registered_path_prefix() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "name lookup test"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "name lookup test"]);
     assert_success(&out, "new");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let tree_path = PathBuf::from(stdout.lines().last().unwrap().trim());
@@ -1854,7 +2012,6 @@ fn rm_never_touches_shared_submodule_config() {
     let out = run_wt(
         &root,
         &[
-            "tree",
             "new",
             "myrepo",
             "--name",
@@ -1965,7 +2122,7 @@ fn rm_keeps_registry_entry_when_removal_genuinely_fails() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "locked tree"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "locked tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2025,7 +2182,7 @@ fn rm_unregisters_drifted_tree_whose_path_is_already_gone() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "drifted tree"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "drifted tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2061,10 +2218,7 @@ fn rm_delete_branch_removes_branch_only_when_safe() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "branch cleanup"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "branch cleanup"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2093,7 +2247,6 @@ fn rm_delete_branch_removes_branch_only_when_safe() {
     let out = run_wt(
         &root,
         &[
-            "tree",
             "new",
             "myrepo",
             "--name",
@@ -2164,7 +2317,7 @@ fn gc_dry_run_reports_then_real_run_reaps_clean_tree_and_deletes_branch() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "gc clean"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "gc clean"]);
     assert_success(&out, "new");
     let clean_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2175,7 +2328,7 @@ fn gc_dry_run_reports_then_real_run_reaps_clean_tree_and_deletes_branch() {
     );
     assert_success(&run_wt(&root, &["tree", "wait", "gc clean"]), "wait");
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "gc ahead"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "gc ahead"]);
     assert_success(&out, "new");
     let ahead_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2254,10 +2407,13 @@ fn gc_reaps_a_tree_whose_branch_has_graphite_children_but_keeps_the_branch() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
+    let bin_dir = write_fake_gt_noop(&tmp.join("bin"));
     assert_success(
-        &run_wt(
+        &run_wt_with_path(
             &root,
-            &["tree", "new", "myrepo", "--name", "tree a", "--branch", "a"],
+            &tmp,
+            &bin_dir,
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
         ),
         "new tree a",
     );
@@ -2307,10 +2463,13 @@ fn rm_delete_branch_refuses_a_mid_stack_branch_and_force_still_bypasses_it() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
+    let bin_dir = write_fake_gt_noop(&tmp.join("bin"));
     assert_success(
-        &run_wt(
+        &run_wt_with_path(
             &root,
-            &["tree", "new", "myrepo", "--name", "tree a", "--branch", "a"],
+            &tmp,
+            &bin_dir,
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
         ),
         "new tree a",
     );
@@ -2367,11 +2526,11 @@ fn status_and_wait_track_background_provisioning_through_a_real_step() {
 
     init_repo(&root, "myrepo", &base);
     let mut cmd = Command::new(wt_bin());
-    cmd.args(["tree", "new", "myrepo", "--name", "provisioned tree"])
+    cmd.args(["new", "myrepo", "--name", "provisioned tree"])
         .env("WT_ROOT", &root)
         .env("WT_CONFIG", config_path_for(&root))
         .env("GIT_ALLOW_PROTOCOL", "file");
-    let out = cmd.output().expect("spawn wt tree new");
+    let out = cmd.output().expect("spawn wt new");
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2440,7 +2599,7 @@ fn doctor_reports_stale_and_unregistered_entries_and_fix_prunes_stale_ones() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "will go stale"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "will go stale"]);
     assert_success(&out, "new");
     let stale_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -2820,7 +2979,7 @@ fn claude_on_a_tree_selector_skips_the_base_notice() {
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "claude target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "claude target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "claude target"]), "wait");
@@ -2863,7 +3022,7 @@ fn pi_resolves_a_target_and_forwards_arguments_unchanged() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
-    let new = run_wt(&root, &["tree", "new", "myrepo", "--name", "pi target"]);
+    let new = run_wt(&root, &["new", "myrepo", "--name", "pi target"]);
     assert_success(&new, "new");
     assert_success(&run_wt(&root, &["tree", "wait", "pi target"]), "wait");
     let tree = PathBuf::from(
@@ -2942,7 +3101,7 @@ fn codex_resolves_a_tree_or_current_tree_like_claude() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
-    let new = run_wt(&root, &["tree", "new", "myrepo", "--name", "codex target"]);
+    let new = run_wt(&root, &["new", "myrepo", "--name", "codex target"]);
     assert_success(&new, "new");
     assert_success(&run_wt(&root, &["tree", "wait", "codex target"]), "wait");
     let tree = PathBuf::from(
@@ -3012,15 +3171,9 @@ fn go_new_and_lift_reject_every_agent_flag_conflict() {
         vec!["go", "--pi", "--codex"],
         vec!["go", "--pi", "--claude"],
         vec!["go", "--codex", "--claude"],
-        vec![
-            "tree", "new", "myrepo", "--name", "target", "--pi", "--codex",
-        ],
-        vec![
-            "tree", "new", "myrepo", "--name", "target", "--pi", "--claude",
-        ],
-        vec![
-            "tree", "new", "myrepo", "--name", "target", "--codex", "--claude",
-        ],
+        vec!["new", "myrepo", "--name", "target", "--pi", "--codex"],
+        vec!["new", "myrepo", "--name", "target", "--pi", "--claude"],
+        vec!["new", "myrepo", "--name", "target", "--codex", "--claude"],
         vec!["repo", "lift", "--name", "target", "--pi", "--codex"],
         vec!["repo", "lift", "--name", "target", "--pi", "--claude"],
         vec!["repo", "lift", "--name", "target", "--codex", "--claude"],
@@ -3054,7 +3207,6 @@ fn new_and_lift_open_the_selected_agent_with_raw_arguments() {
             &base,
             &bin_dir,
             &[
-                "tree",
                 "new",
                 "myrepo",
                 "--name",
@@ -3117,7 +3269,7 @@ fn new_and_lift_open_pi_with_raw_arguments() {
             &base,
             &bin_dir,
             &[
-                "tree", "new", "myrepo", "--name", "pi new", "--pi", "--", "--model", "custom",
+                "new", "myrepo", "--name", "pi new", "--pi", "--", "--model", "custom",
             ],
         ),
         "new --pi",
@@ -3177,15 +3329,12 @@ fn repo_adopt_blocks_commits_in_base_but_not_in_a_tree() {
         "a commit in base should be blocked"
     );
     assert!(
-        String::from_utf8_lossy(&commit.stderr).contains("wt tree new"),
-        "the block message should point at `wt tree new`: {}",
+        String::from_utf8_lossy(&commit.stderr).contains("wt new"),
+        "the block message should point at `wt new`: {}",
         String::from_utf8_lossy(&commit.stderr)
     );
 
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "commit ok here"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "commit ok here"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -3526,7 +3675,7 @@ fn rm_refuses_a_provisioning_tree_without_force_then_stops_it_with_force() {
         ],
     );
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "spinning tree"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "spinning tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -3594,7 +3743,7 @@ fn rm_force_removes_a_tree_whose_recorded_pid_is_long_gone() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "dead pid tree"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "dead pid tree"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -3625,7 +3774,7 @@ fn status_flags_a_provisioning_tree_whose_recorded_pid_is_dead() {
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "wedged tree"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "wedged tree"]);
     assert_success(&out, "new");
     assert_success(&run_wt(&root, &["tree", "wait", "wedged tree"]), "wait");
 
@@ -3883,7 +4032,7 @@ fn lift_pop_conflict_leaves_the_stash_intact() {
 }
 
 #[test]
-fn tree_env_and_legacy_env_refresh_overwrite_a_stale_env_file() {
+fn tree_env_overwrites_a_stale_env_file() {
     let tmp = unique_dir("env-refresh");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
@@ -3909,10 +4058,7 @@ fn tree_env_and_legacy_env_refresh_overwrite_a_stale_env_file() {
 
     init_repo(&root, "myrepo", &base);
 
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "env refresh target"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "env refresh target"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -3948,15 +4094,6 @@ fn tree_env_and_legacy_env_refresh_overwrite_a_stale_env_file() {
         "tree env should overwrite the tree's stale copy"
     );
 
-    std::fs::write(base.join(".env"), "A=3\n").unwrap();
-    let legacy = run_wt(&root, &["env", "refresh", "env refresh target"]);
-    assert_success(&legacy, "legacy env refresh");
-    assert_eq!(
-        std::fs::read_to_string(tree_path.join(".env")).unwrap(),
-        "A=3\n",
-        "legacy env refresh should reach the same copy operation"
-    );
-
     assert_success(
         &run_wt(
             &root,
@@ -3967,21 +4104,21 @@ fn tree_env_and_legacy_env_refresh_overwrite_a_stale_env_file() {
 }
 
 #[test]
-fn gt_stack_and_restack_reach_their_nested_handlers() {
+fn stack_and_restack_reach_their_top_level_handlers() {
     let tmp = unique_dir("gt-dispatch");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
     init_repo(&root, "myrepo", &base);
 
-    let stack = run_wt_in(&root, &base, &["gt", "stack", "--json"]);
-    assert_success(&stack, "gt stack");
+    let stack = run_wt_in(&root, &base, &["stack", "--json"]);
+    assert_success(&stack, "stack");
     let stack_json: serde_json::Value = serde_json::from_slice(&stack.stdout).unwrap();
     assert_eq!(stack_json["available"], false);
 
-    let restack = run_wt_in(&root, &base, &["gt", "restack", "--dry-run"]);
-    assert_success(&restack, "gt restack");
+    let restack = run_wt_in(&root, &base, &["restack", "--dry-run"]);
+    assert_success(&restack, "restack");
     assert!(
-        String::from_utf8_lossy(&restack.stdout).contains("no Graphite stack info"),
+        String::from_utf8_lossy(&restack.stdout).contains("no stack info"),
         "{}",
         String::from_utf8_lossy(&restack.stdout)
     );
@@ -4033,7 +4170,7 @@ fn go_with_no_tree_offers_the_cwd_repo_first_then_newest_first() {
 
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "older tree"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "older tree"]),
         "new older",
     );
     assert_success(
@@ -4041,7 +4178,7 @@ fn go_with_no_tree_offers_the_cwd_repo_first_then_newest_first() {
         "wait older",
     );
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "newer tree"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "newer tree"]),
         "new newer",
     );
     assert_success(
@@ -4122,7 +4259,7 @@ fn go_with_no_tree_and_a_cancelled_picker_exits_cleanly() {
 
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "cancel target"]),
+        &run_wt(&root, &["new", "myrepo", "--name", "cancel target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "cancel target"]), "wait");
@@ -4171,10 +4308,7 @@ fn launch_preview_prints_a_provisioned_trees_details() {
 
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(
-            &root,
-            &["tree", "new", "myrepo", "--name", "preview target"],
-        ),
+        &run_wt(&root, &["new", "myrepo", "--name", "preview target"]),
         "new",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "preview target"]), "wait");
@@ -4195,6 +4329,50 @@ fn launch_preview_prints_a_provisioned_trees_details() {
     assert!(stdout.contains(&tree_path), "missing path: {stdout}");
 }
 
+#[test]
+fn launch_preview_shows_a_stack_section_for_a_tree_with_a_parent_and_a_pending_restack() {
+    let tmp = unique_dir("launch-preview-stack");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "root pr", "--branch", "a"],
+        ),
+        "new root pr",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "child pr", "--branch", "b"],
+        ),
+        "new child pr",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "root pr"]), "wait root");
+    assert_success(&run_wt(&root, &["tree", "wait", "child pr"]), "wait child");
+
+    mutate_tree_json(&root, "child pr", |t| {
+        t["parentBranch"] = serde_json::json!("a");
+        t["pendingRestack"] = serde_json::json!(true);
+    });
+
+    let out = run_wt(&root, &["__launch-preview", "child pr"]);
+    assert_success(&out, "__launch-preview");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(stdout.contains("stack"), "missing stack section: {stdout}");
+    assert!(
+        stdout.contains("parent") && stdout.contains("root pr"),
+        "missing parent line naming the holding tree: {stdout}"
+    );
+    assert!(
+        stdout.contains("needs a restack"),
+        "missing pending restack line: {stdout}"
+    );
+}
+
 fn sqlite(db: &Path, sql: &str) {
     let out = Command::new("/usr/bin/sqlite3")
         .arg(db)
@@ -4208,24 +4386,28 @@ fn sqlite(db: &Path, sql: &str) {
     );
 }
 
+/// A `gt` that does nothing and exits 0 — for a tree creation call in a
+/// test that builds its own `.graphite_metadata.db` fixture by hand and
+/// needs the real `gt track` not to touch it first.
+fn write_fake_gt_noop(bin_dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(bin_dir).unwrap();
+    let path = bin_dir.join("gt");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir.to_path_buf()
+}
+
 /// Hand-builds a `.graphite_metadata.db` in `base`'s git dir tracking
 /// `master -> a -> b -> c`, with no row for `c` needing to resolve to a
 /// worktree — the same shape `stack.rs`'s own fixtures use.
-fn write_graphite_stack(base: &Path) {
-    let db = base.join(".git").join(".graphite_metadata.db");
-    sqlite(
-        &db,
-        "CREATE TABLE branch_metadata (\
-         branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
-         parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
-         children TEXT, branch_revision TEXT, validation_result TEXT, \
-         parent_head_revision TEXT);",
-    );
-    sqlite(
-        &db,
-        "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
-         ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL), ('c', 'b', NULL);",
-    );
+/// Adds a new tree row to `state.json` directly — for `c` below, which has
+/// no worktree of its own, so there's nothing to create it with.
+fn append_tree_json(root: &Path, tree: serde_json::Value) {
+    let state_path = root.join("state.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    value["trees"].as_array_mut().unwrap().push(tree);
+    std::fs::write(&state_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 }
 
 #[test]
@@ -4238,20 +4420,39 @@ fn session_context_reports_stack_position_in_a_mid_stack_tree() {
     assert_success(
         &run_wt(
             &root,
-            &["tree", "new", "myrepo", "--name", "tree a", "--branch", "a"],
+            &["new", "myrepo", "--name", "tree a", "--branch", "a"],
         ),
         "new tree a",
     );
     assert_success(
         &run_wt(
             &root,
-            &["tree", "new", "myrepo", "--name", "tree b", "--branch", "b"],
+            &["new", "myrepo", "--name", "tree b", "--branch", "b"],
         ),
         "new tree b",
     );
     assert_success(&run_wt(&root, &["tree", "wait", "tree a"]), "wait tree a");
     assert_success(&run_wt(&root, &["tree", "wait", "tree b"]), "wait tree b");
-    write_graphite_stack(&base);
+    // `wt new` roots each tree on trunk on its own; b's edge onto a still
+    // has to be set by hand, the way `wt pr new --onto a` would have. `c`
+    // has no worktree at all, so it can only be added straight to
+    // `state.json`.
+    mutate_tree_json(&root, "tree b", |t| {
+        t["parentBranch"] = serde_json::json!("a");
+    });
+    append_tree_json(
+        &root,
+        serde_json::json!({
+            "id": Uuid::now_v7().to_string(),
+            "repo": "myrepo",
+            "name": "tree c",
+            "branch": "c",
+            "path": tmp.join("tree-c-never-created").to_string_lossy(),
+            "created": "2020-01-01T00:00:00Z",
+            "state": "ready",
+            "parentBranch": "b",
+        }),
+    );
 
     let path_out = run_wt(&root, &["tree", "path", "tree b"]);
     assert_success(&path_out, "path tree b");
@@ -4286,18 +4487,29 @@ fn session_context_stack_lines_are_absent_without_graphite() {
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
-    assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "plain tree"]),
-        "new",
+    // `wt new` always records a parent onto trunk, so it can't produce the
+    // shape this test needs. Writing the row by hand — no worktree, no
+    // `parentBranch` — is the only way to get a tree with no stack position
+    // at all, the same trick the mid-stack test above uses for its own
+    // parentless branch.
+    let tree_path = tmp.join("plain-tree-never-created");
+    append_tree_json(
+        &root,
+        serde_json::json!({
+            "id": Uuid::now_v7().to_string(),
+            "repo": "myrepo",
+            "name": "plain tree",
+            "branch": "josh/plain-tree",
+            "path": tree_path.to_string_lossy(),
+            "created": "2020-01-01T00:00:00Z",
+            "state": "ready",
+        }),
     );
-    assert_success(&run_wt(&root, &["tree", "wait", "plain tree"]), "wait");
-    // No `.graphite_metadata.db` written — this repo never ran `gt`.
 
-    let path_out = run_wt(&root, &["tree", "path", "plain tree"]);
-    assert_success(&path_out, "path");
-    let tree_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
-
-    let out = run_wt(&root, &["__session-context", "--path", &tree_path]);
+    let out = run_wt(
+        &root,
+        &["__session-context", "--path", &tree_path.to_string_lossy()],
+    );
     assert_success(&out, "__session-context");
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -4408,7 +4620,7 @@ fn a_ready_spare_at_the_same_commit_is_claimed_instantly_with_no_step_rerun() {
     // so it would add its own marker line unless spares are off first.
     set_spares(&root, "myrepo", 0);
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "instant claim"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "instant claim"]);
     assert_success(&out, "new (instant claim)");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -4472,7 +4684,7 @@ fn a_spare_behind_a_moved_trunk_is_claimed_but_reruns_its_steps() {
     push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
     git(&["fetch", "-q", "origin"], &base);
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "warm claim"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "warm claim"]);
     assert_success(&out, "new (warm claim)");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -4515,8 +4727,8 @@ fn two_concurrent_new_calls_against_one_spare_both_succeed_and_only_one_claims_i
     assert_eq!(spare["state"], "ready");
     let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
 
-    let child_a = spawn_wt(&root, &["tree", "new", "myrepo", "--name", "concurrent a"]);
-    let child_b = spawn_wt(&root, &["tree", "new", "myrepo", "--name", "concurrent b"]);
+    let child_a = spawn_wt(&root, &["new", "myrepo", "--name", "concurrent a"]);
+    let child_b = spawn_wt(&root, &["new", "myrepo", "--name", "concurrent b"]);
     let out_a = child_a.wait_with_output().expect("wait concurrent a");
     let out_b = child_b.wait_with_output().expect("wait concurrent b");
     assert_success(&out_a, "new concurrent a");
@@ -4621,7 +4833,7 @@ fn a_broken_spare_pointing_at_a_deleted_directory_falls_back_to_a_cold_build() {
         t["path"] = serde_json::json!("/nonexistent-deleted-spare-dir");
     });
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "cold fallback"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "cold fallback"]);
     assert_success(&out, "new (cold fallback)");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -4762,7 +4974,7 @@ fn spares_set_to_zero_creates_no_spare_and_the_cold_path_is_unchanged() {
 
     assert_eq!(spare_rows(&root, "myrepo").len(), 0);
 
-    let out = run_wt(&root, &["tree", "new", "myrepo", "--name", "cold as usual"]);
+    let out = run_wt(&root, &["new", "myrepo", "--name", "cold as usual"]);
     assert_success(&out, "new");
     let tree_path = PathBuf::from(
         String::from_utf8_lossy(&out.stdout)
@@ -4777,7 +4989,7 @@ fn spares_set_to_zero_creates_no_spare_and_the_cold_path_is_unchanged() {
     assert_eq!(
         spare_rows(&root, "myrepo").len(),
         0,
-        "spares: 0 must never build one, even after wt tree new's own top-up call"
+        "spares: 0 must never build one, even after wt new's own top-up call"
     );
 
     assert_success(
@@ -4857,10 +5069,7 @@ fn a_dirty_spare_working_tree_falls_back_to_cold_and_leaves_the_spare_row_untouc
     git(&["fetch", "-q", "origin"], &base);
     std::fs::write(spare_path.join("README.md"), "dirty local edit\n").unwrap();
 
-    let out = run_wt(
-        &root,
-        &["tree", "new", "myrepo", "--name", "dirty fallback"],
-    );
+    let out = run_wt(&root, &["new", "myrepo", "--name", "dirty fallback"]);
     assert_success(&out, "new (dirty fallback)");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -4971,6 +5180,240 @@ fn ls_hides_spares_all_shows_them_and_json_carries_the_spare_field() {
     assert!(
         stdout.contains("spare"),
         "the STATE column should render a ready spare as 'spare': {stdout}"
+    );
+}
+
+#[test]
+fn stack_ls_groups_a_multi_tree_chain_and_shows_a_solo_tree_as_one_line() {
+    let tmp = unique_dir("stack-ls");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "root pr", "--branch", "a"],
+        ),
+        "new root pr",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "child pr", "--branch", "b"],
+        ),
+        "new child pr",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "solo pr", "--branch", "c"],
+        ),
+        "new solo pr",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "root pr"]), "wait root");
+    assert_success(&run_wt(&root, &["tree", "wait", "child pr"]), "wait child");
+    assert_success(&run_wt(&root, &["tree", "wait", "solo pr"]), "wait solo");
+
+    // `wt new` roots each tree on trunk on its own; the edge onto `a`
+    // still has to be set by hand, the way `wt pr new --onto a` would have.
+    mutate_tree_json(&root, "child pr", |t| {
+        t["parentBranch"] = serde_json::json!("a");
+    });
+
+    let out = run_wt(&root, &["ls"]);
+    assert_success(&out, "ls");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(stdout.contains("myrepo:"), "missing repo header: {stdout}");
+    let root_line = stdout.lines().find(|l| l.contains("root pr")).unwrap();
+    let child_line = stdout.lines().find(|l| l.contains("child pr")).unwrap();
+    let solo_line = stdout.lines().find(|l| l.contains("solo pr")).unwrap();
+
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    assert!(
+        indent(child_line) > indent(root_line),
+        "child must be indented under its parent:\n{stdout}"
+    );
+    assert_eq!(
+        indent(solo_line),
+        indent(root_line),
+        "a solo tree sits at the same depth as any other root:\n{stdout}"
+    );
+    assert!(root_line.contains("(a)"), "{root_line}");
+    assert!(child_line.contains("(b)"), "{child_line}");
+    assert!(solo_line.contains("(c)"), "{solo_line}");
+}
+
+#[test]
+fn stack_ls_json_carries_the_stack_fields() {
+    let tmp = unique_dir("stack-ls-json");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "solo pr", "--branch", "a"],
+        ),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "solo pr"]), "wait");
+
+    let out = run_wt(&root, &["ls", "--json"]);
+    assert_success(&out, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    for field in [
+        "id",
+        "repo",
+        "name",
+        "branch",
+        "startingBranch",
+        "path",
+        "created",
+        "state",
+        "dirty",
+        "spare",
+        "parentBranch",
+        "children",
+        "prNumber",
+        "prState",
+        "pendingRestack",
+        "needsRestack",
+    ] {
+        assert!(
+            entry.get(field).is_some(),
+            "missing field {field:?} in {entry}"
+        );
+    }
+    assert_eq!(entry["children"], serde_json::json!([]));
+}
+
+/// A `gt` stand-in for `wt submit` tests: records its own invocation and
+/// writes a `.graphite_pr_info` sidecar, so the real `gt` binary — and the
+/// network it would reach for — is never touched.
+fn write_fake_gt_submit(bin_dir: &Path, common_dir: &Path, log: &Path) {
+    std::fs::create_dir_all(bin_dir).unwrap();
+    let path = bin_dir.join("gt");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncat > '{}/.graphite_pr_info' << 'EOF'\n\
+             {{\"prInfos\": [{{\"headRefName\": \"a\", \"prNumber\": 101, \"state\": \"OPEN\", \
+             \"reviewDecision\": null, \"isDraft\": true}}, {{\"headRefName\": \"b\", \
+             \"prNumber\": 102, \"state\": \"OPEN\", \"reviewDecision\": null, \"isDraft\": \
+             true}}]}}\nEOF\nexit 0\n",
+            log.display(),
+            common_dir.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn submit_runs_gt_with_the_expected_flags_and_records_pr_numbers() {
+    let tmp = unique_dir("submit");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "root pr", "--branch", "a"],
+        ),
+        "new root pr",
+    );
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "child pr", "--branch", "b"],
+        ),
+        "new child pr",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "root pr"]), "wait root");
+    assert_success(&run_wt(&root, &["tree", "wait", "child pr"]), "wait child");
+    mutate_tree_json(&root, "child pr", |t| {
+        t["parentBranch"] = serde_json::json!("a");
+    });
+
+    let path_out = run_wt(&root, &["tree", "path", "child pr"]);
+    assert_success(&path_out, "path");
+    let child_path = PathBuf::from(String::from_utf8_lossy(&path_out.stdout).trim());
+
+    let bin_dir = tmp.join("bin");
+    let log = tmp.join("gt-log.txt");
+    write_fake_gt_submit(&bin_dir, &base.join(".git"), &log);
+
+    let out = run_wt_with_path(
+        &root,
+        &child_path,
+        &bin_dir,
+        &["submit", "--stack", "--draft"],
+    );
+    assert_success(&out, "submit");
+
+    let invocation = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        invocation.contains("submit --no-interactive --no-edit --stack --draft"),
+        "invocation was: {invocation}"
+    );
+    assert!(
+        !invocation.contains("--restack"),
+        "wt submit must never restack a branch another tree holds: {invocation}"
+    );
+
+    let ls = run_wt(&root, &["ls", "--json"]);
+    assert_success(&ls, "ls --json");
+    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let by_name = |name: &str| -> serde_json::Value {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_name("root pr")["prNumber"], 101);
+    assert_eq!(by_name("child pr")["prNumber"], 102);
+}
+
+#[test]
+fn submit_refuses_and_never_shells_out_when_the_tree_is_dirty() {
+    let tmp = unique_dir("submit-dirty");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    assert_success(
+        &run_wt(
+            &root,
+            &["new", "myrepo", "--name", "dirty pr", "--branch", "a"],
+        ),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "dirty pr"]), "wait");
+
+    let path_out = run_wt(&root, &["tree", "path", "dirty pr"]);
+    assert_success(&path_out, "path");
+    let tree_path = PathBuf::from(String::from_utf8_lossy(&path_out.stdout).trim());
+    std::fs::write(tree_path.join("uncommitted.txt"), "x\n").unwrap();
+
+    let bin_dir = tmp.join("bin");
+    let log = tmp.join("gt-log.txt");
+    write_fake_gt_submit(&bin_dir, &base.join(".git"), &log);
+
+    let out = run_wt_with_path(&root, &tree_path, &bin_dir, &["submit"]);
+    assert!(!out.status.success(), "expected failure on a dirty tree");
+    assert!(
+        !log.exists(),
+        "gt must never run once the preflight refuses"
     );
 }
 
