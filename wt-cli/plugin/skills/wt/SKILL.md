@@ -38,7 +38,7 @@ help.
 | `wt llm pi [TREE_OR_REPO] [-- <PI_ARGS>...]` | Run Pi with its working directory set and pass arguments through unchanged. |
 | `wt llm claude [TREE_OR_REPO] [-- <CLAUDE_ARGS>...]` | Run Claude with its working directory set and pass arguments through unchanged. |
 | `wt llm codex [TREE_OR_REPO] [-- <CODEX_ARGS>...]` | Run Codex with its working directory set and pass arguments through unchanged. |
-| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo`, or open the picker with no tree. Pi is the default. |
+| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo` (rooting a new stack on trunk unless `--onto` stacks it on an existing branch), or open the picker with no tree. Pi is the default. |
 | `wt cd <TREE>` | Change the interactive shell directory through the installed shell function. |
 
 `<TREE>` means a tree name, unique name substring, UUID or UUID prefix, or

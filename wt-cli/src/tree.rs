@@ -26,8 +26,8 @@ pub struct NewOptions {
     /// `resolve_onto`.
     pub onto: Option<String>,
     pub profiles: Option<Vec<String>>,
-    /// `wt new`'s always-tracked root: with no `--onto`, treat trunk as the
-    /// Graphite parent instead of leaving the tree untracked.
+    /// `wt new` and `wt go`'s always-tracked root: with no `--onto`, treat
+    /// trunk as the Graphite parent instead of leaving the tree untracked.
     pub track_on_trunk: bool,
 }
 

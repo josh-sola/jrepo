@@ -1350,7 +1350,7 @@ fn cmd_launch(
                     branch,
                     onto,
                     profiles: profile,
-                    track_on_trunk: false,
+                    track_on_trunk: true,
                 },
             )?;
             let id = store::load(root)?
