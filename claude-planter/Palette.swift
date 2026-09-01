@@ -40,6 +40,24 @@ let paletteSlots: [String: Int] = Dictionary(
     uniqueKeysWithValues: palette.enumerated().map { ($1.name, $0) }
 )
 
+func paletteIsValid(_ name: String?) -> Bool {
+    guard let name else { return false }
+    return paletteSlots[name] != nil
+}
+
+/// The names tied for fewest uses among `effectiveColors` — every plant's
+/// explicit color, else its automatic assignment. All names when none is
+/// used yet, or when every slot is tied.
+func eligiblePaletteNames(for effectiveColors: [String]) -> [String] {
+    var counts = Array(repeating: 0, count: palette.count)
+    for name in effectiveColors {
+        if let slot = paletteSlots[name] { counts[slot] += 1 }
+    }
+    let maximum = counts.max() ?? 0
+    let eligible = counts.indices.filter { counts[$0] < maximum }
+    return (eligible.isEmpty ? Array(counts.indices) : eligible).map { palette[$0].name }
+}
+
 private extension NSColor {
     /// Parses a "#rrggbb" literal. Only ever fed this file's own hard-coded
     /// hexes, so a malformed one is a bug here, not bad input to guard against.

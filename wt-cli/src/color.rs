@@ -12,7 +12,7 @@ pub struct PaletteEntry {
 /// Mirrors the canonical `/palette.json` at the repo root; `tools/check-palette`
 /// checks this copy against it. `tint` is a near-black background tuned so no
 /// color reads brighter than its neighbours, so a tab is tinted rather than
-/// coloured. Order is load-bearing: `pick` indexes into it by hash.
+/// coloured. Order is load-bearing: it must match `palette.json`'s order.
 ///
 /// `rustfmt::skip` keeps each entry on one line — `tools/check-palette`
 /// regex-matches this table line by line against `palette.json`.
@@ -32,24 +32,8 @@ pub const PALETTE: [PaletteEntry; 12] = [
     PaletteEntry { name: "pink", primary: "#eb598a", text: "#ffa6c4", tint: "#170a0f" },
 ];
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-/// `std`'s `DefaultHasher` is explicitly unstable across releases, which
-/// would move a tree's color out from under the user on a toolchain bump.
-fn fnv1a64(s: &str) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in s.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-pub fn pick(repo: &str, name: &str) -> &'static PaletteEntry {
-    let key = format!("{repo}/{}", crate::tree::slugify(name));
-    let hash = fnv1a64(&key);
-    &PALETTE[(hash % PALETTE.len() as u64) as usize]
+pub fn lookup(name: &str) -> Option<&'static PaletteEntry> {
+    PALETTE.iter().find(|entry| entry.name == name)
 }
 
 /// Outside tmux one OSC 11 write to stderr is enough: it sticks for the rest
@@ -109,24 +93,20 @@ fn current_tab_format(entry: &PaletteEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
-    fn pick_is_deterministic() {
-        assert_eq!(pick("monorepo", "fix login"), pick("monorepo", "fix login"));
+    fn lookup_finds_every_palette_entry_by_name() {
+        for entry in &PALETTE {
+            assert_eq!(lookup(entry.name), Some(entry));
+        }
     }
 
     #[test]
-    fn pick_ignores_slug_equivalent_spelling() {
-        assert_eq!(pick("monorepo", "fix login"), pick("monorepo", "fix-login"));
-    }
-
-    #[test]
-    fn pick_reaches_every_palette_entry() {
-        let colors: HashSet<&str> = (0..500)
-            .map(|i| pick("monorepo", &format!("t{i}")).name)
-            .collect();
-        assert_eq!(colors.len(), 12, "expected all 12 colors, got {colors:?}");
+    fn lookup_rejects_unknown_or_malformed_names() {
+        assert_eq!(lookup("teal2"), None);
+        assert_eq!(lookup("Blue"), None);
+        assert_eq!(lookup("blue\n"), None);
+        assert_eq!(lookup(""), None);
     }
 
     #[test]

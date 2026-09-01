@@ -2,14 +2,91 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::color;
 use crate::tmux::Windows;
 
 const RESERVED_FILES: [&str; 3] = ["order.json", "prefs.json", "overlay-position.json"];
+const RESOLVE_COLOR_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Asks `planter` to resolve the tree's launch color. Planter is a hard
+/// dependency for `wt go`/`wt llm`: a missing binary, a timeout, a nonzero
+/// exit, or malformed stdout all fail the launch rather than falling back to
+/// a hash, so nothing here is best-effort.
+pub fn resolve_color() -> Result<&'static color::PaletteEntry> {
+    resolve_color_command("planter", &["--resolve-color"])
+}
+
+fn resolve_color_command(program: &str, args: &[&str]) -> Result<&'static color::PaletteEntry> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            anyhow::anyhow!("`planter` is not on PATH; install it before `wt launch`")
+        } else {
+            anyhow::anyhow!("could not start `planter --resolve-color`: {error}")
+        }
+    })?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(RESOLVE_COLOR_TIMEOUT) {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    bail!("`planter --resolve-color` exited with {}", output.status);
+                }
+                bail!(
+                    "`planter --resolve-color` exited with {}: {stderr}",
+                    output.status
+                );
+            }
+            parse_resolved_color(&output.stdout)
+        }
+        Ok(Err(error)) => Err(error).context("waiting for `planter --resolve-color`"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            kill(pid);
+            bail!("`planter --resolve-color` timed out after {RESOLVE_COLOR_TIMEOUT:?}");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("`planter --resolve-color` stopped before returning output")
+        }
+    }
+}
+
+fn parse_resolved_color(stdout: &[u8]) -> Result<&'static color::PaletteEntry> {
+    let output =
+        std::str::from_utf8(stdout).context("`planter --resolve-color` wrote non-UTF-8 stdout")?;
+    let Some(name) = output.strip_suffix('\n') else {
+        bail!("`planter --resolve-color` must print one palette name followed by a newline");
+    };
+    color::lookup(name)
+        .with_context(|| format!("`planter --resolve-color` printed invalid stdout: {output:?}"))
+}
+
+fn kill(pid: u32) {
+    let _ = Command::new("/bin/kill")
+        .args(["-9", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
 
 /// Rewrites the `tab` field of every other live session's planter state
 /// file to the rank `tmux::probe` just computed for it, so a new launch can
@@ -183,6 +260,59 @@ fn write_tab(path: &Path, tab: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    fn resolve_with_shell(script: &str) -> Result<&'static color::PaletteEntry> {
+        resolve_color_command("/bin/sh", &["-c", script])
+    }
+
+    #[test]
+    fn resolver_accepts_every_palette_token() {
+        for entry in &color::PALETTE {
+            assert_eq!(
+                resolve_with_shell(&format!("printf '%s\\n' {}", entry.name)).unwrap(),
+                entry
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_rejects_invalid_or_malformed_stdout() {
+        for script in [
+            "printf 'notacolor\\n'",
+            "printf 'cyan\\nextra\\n'",
+            "printf 'cyan\\n\\n'",
+            "printf cyan",
+        ] {
+            assert!(resolve_with_shell(script).is_err(), "script was: {script}");
+        }
+    }
+
+    #[test]
+    fn resolver_reports_nonzero_status_with_stderr() {
+        let error = resolve_with_shell("printf 'the resolver failed' >&2; exit 23").unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("exit status: 23"), "{text}");
+        assert!(text.contains("the resolver failed"), "{text}");
+    }
+
+    #[test]
+    fn resolver_reports_a_missing_program() {
+        let error = resolve_color_command("/nonexistent/wt-planter", &[]).unwrap_err();
+        assert!(error.to_string().contains("not on PATH"), "{error:#}");
+    }
+
+    #[test]
+    fn resolver_times_out_promptly() {
+        let start = Instant::now();
+        let error = resolve_with_shell("exec sleep 5").unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "resolver took {:?}",
+            start.elapsed()
+        );
+    }
 
     fn candidate(path: &str, tty: Option<&str>, current_tab: Option<i64>) -> Candidate {
         Candidate {

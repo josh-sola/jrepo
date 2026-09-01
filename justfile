@@ -33,9 +33,12 @@ swift:
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT
     swiftc -typecheck claude-planter/main.swift claude-planter/Planter.swift claude-planter/Palette.swift claude-planter/Sprites.swift
+    swiftc -typecheck claude-planter/Planter.swift claude-planter/Palette.swift claude-planter/PlanterTests.swift
     swiftc -typecheck claude-planter/PlanterCodexBridge.swift
     swiftc -O -o "$tmpdir/planter" claude-planter/main.swift claude-planter/Planter.swift claude-planter/Palette.swift claude-planter/Sprites.swift
+    swiftc -O -o "$tmpdir/planter-tests" claude-planter/Planter.swift claude-planter/Palette.swift claude-planter/PlanterTests.swift
     swiftc -O -o "$tmpdir/planter-codex-bridge" claude-planter/PlanterCodexBridge.swift
+    "$tmpdir/planter-tests" "$tmpdir/planter"
     "$tmpdir/planter-codex-bridge" --self-test
 
 install:

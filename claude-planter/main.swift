@@ -541,11 +541,23 @@ func flagValue(_ name: String) -> String? {
     return args[i + 1]
 }
 
+if args.contains("--resolve-color") {
+    guard args == ["--resolve-color"] else {
+        FileHandle.standardError.write(
+            "planter: --resolve-color cannot be combined with other options\n".data(using: .utf8)!
+        )
+        exit(2)
+    }
+    print(ColorResolver.resolve(inheritedColor: ProcessInfo.processInfo.environment["PLANTER_COLOR"]))
+    exit(0)
+}
+
 if args.contains("--help") || args.contains("-h") {
     print("""
     planter — a row of pixel plants, one per coding session
 
       planter                      run the overlay
+      planter --resolve-color      print one launcher-selected palette name
       planter --list               print the live sessions as text
       planter --demo               run the overlay with four fake plants
       planter --preview FILE       render all frames and colours to a PNG

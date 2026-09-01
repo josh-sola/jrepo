@@ -1244,8 +1244,8 @@ fn known_repos(store: &store::Store) -> String {
 }
 
 /// Returns the registered tree, whose name can differ from what the user
-/// typed when the match came through the slug. Its name supplies Claude's
-/// launch label and terminal color for either agent.
+/// typed when the match came through the slug. Its name supplies the launch
+/// label for either agent.
 fn wait_for_tree(root: &Path, id: Uuid, agent: Agent) -> Result<store::Tree> {
     let pending_name = store::load(root)?
         .trees
@@ -1325,7 +1325,7 @@ fn cmd_launch(
         }
     };
 
-    let (tree_path, color_repo, color_name, label) = match plan {
+    let (tree_path, repo, label) = match plan {
         LaunchPlan::Scratch { repo, label } => {
             let base = store
                 .repos
@@ -1334,12 +1334,11 @@ fn cmd_launch(
                 .base
                 .clone();
             eprintln!("opening a scratch session in {repo}'s base");
-            let stripped = label.trim_start_matches('@').to_string();
-            (base, repo, stripped, label)
+            (base, repo, label)
         }
         LaunchPlan::Existing { id } => {
             let tree = wait_for_tree(root, id, agent)?;
-            (tree.path, tree.repo, tree.name.clone(), tree.name)
+            (tree.path, tree.repo, tree.name)
         }
         LaunchPlan::New { repo, name } => {
             let path = tree::new_tree(
@@ -1361,15 +1360,15 @@ fn cmd_launch(
                 .map(|t| t.id)
                 .with_context(|| format!("{} is not a registered tree", path.display()))?;
             let tree = wait_for_tree(root, id, agent)?;
-            (tree.path, tree.repo, tree.name.clone(), tree.name)
+            (tree.path, tree.repo, tree.name)
         }
     };
 
-    let entry = color::pick(&color_repo, &color_name);
+    let entry = planter::resolve_color()?;
 
     let ctx = features::Context {
         tree_path: &tree_path,
-        repo: &color_repo,
+        repo: &repo,
         label: &label,
         color_hex: entry.tint,
         primary_hex: entry.primary,
@@ -1413,8 +1412,22 @@ fn cmd_launch(
     features::set_background(set_background_hook, entry, &ctx);
 
     match agent {
-        Agent::Pi => agent::exec_at(agent, &tree_path, &pi_launch_args(&label, args), &env),
-        Agent::Claude => agent::exec_at(agent, &tree_path, &claude_launch_args(&label, args), &env),
+        Agent::Pi => {
+            let pi_args = pi_launch_args(&label, args);
+            if planter_enabled && planter_eligible {
+                agent::exec_at(agent, &tree_path, &pi_args, &env)
+            } else {
+                agent::exec_at_without_planter_color(agent, &tree_path, &pi_args, &env)
+            }
+        }
+        Agent::Claude => {
+            let claude_args = claude_launch_args(&label, args);
+            if planter_enabled && planter_eligible {
+                agent::exec_at(agent, &tree_path, &claude_args, &env)
+            } else {
+                agent::exec_at_without_planter_color(agent, &tree_path, &claude_args, &env)
+            }
+        }
         Agent::Codex => {
             agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
         }

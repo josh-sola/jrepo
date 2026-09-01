@@ -35,6 +35,9 @@ struct Plant {
     /// of jumping whenever a neighbour appears or the row is reordered.
     var phaseSeed: Int = 0
     var color: String? = nil
+    /// The color actually in play: the explicit `color` when it's valid, else
+    /// the automatic assignment. `nil` until `assignHues` resolves one.
+    var effectiveColor: String? = nil
     /// 1-based row position from the launcher. Sessions without one sort to the
     /// end, in creation order.
     var tab: Int? = nil
@@ -188,6 +191,22 @@ private enum BackgroundSessions {
             if let sessionID = record["sessionId"] as? String { ids.insert(sessionID) }
         }
         return ids
+    }
+}
+
+/// The launcher-facing policy `--resolve-color` and `assignHues` share: keep
+/// an inherited color if it's still valid, otherwise balance across the
+/// least-used slots.
+enum ColorResolver {
+    static func automaticColor(
+        for effectiveColors: [String], choose: ([String]) -> String = { $0.randomElement()! }
+    ) -> String {
+        choose(eligiblePaletteNames(for: effectiveColors))
+    }
+
+    static func resolve(inheritedColor: String?) -> String {
+        if paletteIsValid(inheritedColor) { return inheritedColor! }
+        return automaticColor(for: Store.load().compactMap(\.effectiveColor))
     }
 }
 
@@ -426,7 +445,7 @@ enum Store {
     private static func pruneAutomaticColors(
         _ colors: inout [String: String], keeping liveSessionIDs: Set<String>
     ) {
-        colors = colors.filter { liveSessionIDs.contains($0.key) && paletteSlots[$0.value] != nil }
+        colors = colors.filter { liveSessionIDs.contains($0.key) && paletteIsValid($0.value) }
     }
 
     /// Initial assignments use creation order so display order cannot influence them.
@@ -436,36 +455,36 @@ enum Store {
                 (plants[$1].createdAt, plants[$1].sessionID)
         }
 
-        var counts = Array(repeating: 0, count: palette.count)
+        var effectiveColors: [String] = []
 
         for i in byCreation {
             let sessionID = plants[i].sessionID
             if let name = plants[i].color, let slot = paletteSlots[name] {
                 plants[i].hue = palette[slot].hue
                 plants[i].paletteSlot = slot
-                counts[slot] += 1
+                plants[i].effectiveColor = name
+                effectiveColors.append(name)
                 automaticColors.removeValue(forKey: sessionID)
             } else if let name = automaticColors[sessionID], let slot = paletteSlots[name] {
                 plants[i].hue = palette[slot].hue
                 plants[i].paletteSlot = slot
-                counts[slot] += 1
+                plants[i].effectiveColor = name
+                effectiveColors.append(name)
             }
         }
 
         for i in byCreation {
             let sessionID = plants[i].sessionID
-            if paletteSlots[plants[i].color ?? ""] != nil || paletteSlots[automaticColors[sessionID] ?? ""] != nil {
+            if plants[i].effectiveColor != nil {
                 continue
             }
-            let slot: Int
-            let maximum = counts.max() ?? 0
-            let eligible = counts.indices.filter { counts[$0] < maximum }
-            let choices = eligible.isEmpty ? Array(counts.indices) : eligible
-            slot = choices.randomElement()!
-            automaticColors[sessionID] = palette[slot].name
+            let name = ColorResolver.automaticColor(for: effectiveColors)
+            let slot = paletteSlots[name]!
+            automaticColors[sessionID] = name
             plants[i].hue = palette[slot].hue
             plants[i].paletteSlot = slot
-            counts[slot] += 1
+            plants[i].effectiveColor = name
+            effectiveColors.append(name)
         }
     }
 

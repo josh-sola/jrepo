@@ -406,6 +406,63 @@ fn run_wt_with_path(root: &Path, cwd: &Path, bin_dir: &Path, args: &[&str]) -> O
         .expect("spawn wt")
 }
 
+/// Like `run_wt_with_path`, but with `PLANTER_COLOR` (plus the state-dir
+/// variables `planter --resolve-color` and the bridge both read) set on the
+/// way in, so a test can assert that wt's own inherited color reaches the
+/// resolver, and that the resolver's answer — not the inherited value — is
+/// what ends up as the agent's `PLANTER_COLOR`. Restricted to `bin_dir` plus
+/// the base system directories rather than the host's full `PATH`: a
+/// developer machine can have a real `planter` installed (e.g. under
+/// `~/.local/bin`), and this helper's whole point is a hermetic resolver.
+fn run_wt_with_path_and_planter_color(
+    root: &Path,
+    cwd: &Path,
+    bin_dir: &Path,
+    args: &[&str],
+    planter_color: &str,
+) -> Output {
+    let path = std::env::join_paths([bin_dir, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    Command::new(wt_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("PLANTER_COLOR", planter_color)
+        .env("PLANTER_STATE_DIR", "/tmp/wt-planter-state")
+        .env("CLAUDE_PLANTER_DIR", "/tmp/wt-claude-planter")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .output()
+        .expect("spawn wt")
+}
+
+/// Restricted to `bin_dir` plus the base system directories, rather than the
+/// host's full inherited `PATH`, for a launch test that means to control
+/// exactly which binaries `wt` can find — e.g. a fake `planter` but no real
+/// `claude`/`pi`, which a developer machine can have installed elsewhere on
+/// `PATH` even when `bin_dir` is searched first.
+fn run_wt_with_restricted_path(root: &Path, cwd: &Path, bin_dir: &Path, args: &[&str]) -> Output {
+    let path = std::env::join_paths([bin_dir, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    Command::new(wt_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
+        .output()
+        .expect("spawn wt")
+}
+
 fn write_fake_agent(dir: &Path, name: &str, record: &Path) -> PathBuf {
     let bin_dir = dir.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -420,6 +477,22 @@ fn write_fake_agent(dir: &Path, name: &str, record: &Path) -> PathBuf {
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     bin_dir
+}
+
+/// `body` decides `--resolve-color`'s exit status and stdout/stderr; it can
+/// use `$PLANTER_COLOR` and the state-dir variables since the record line
+/// captures them before `body` runs.
+fn write_fake_planter(bin_dir: &Path, record: &Path, body: &str) {
+    let path = bin_dir.join("planter");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{{\n  printf 'arg=%s\\n' \"$1\"\n  printf 'PLANTER_COLOR=%s\\n' \"${{PLANTER_COLOR-}}\"\n  printf 'PLANTER_STATE_DIR=%s\\n' \"${{PLANTER_STATE_DIR-}}\"\n  printf 'CLAUDE_PLANTER_DIR=%s\\n' \"${{CLAUDE_PLANTER_DIR-}}\"\n}} > '{}'\n{body}\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn write_fake_tmux(bin_dir: &Path, record: &Path) {
@@ -1396,7 +1469,16 @@ fn unflagged_legacy_launch_rewrites_its_repo_and_selects_pi() {
         "tree wait",
     );
 
-    let out = run_wt_without_agents_on_path(&root, &["launch", "legacy launch target", "myrepo"]);
+    let bin_dir = tmp.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+
+    let out = run_wt_with_restricted_path(
+        &root,
+        &base,
+        &bin_dir,
+        &["launch", "legacy launch target", "myrepo"],
+    );
     assert!(
         !out.status.success(),
         "expected the missing Pi binary to fail"
@@ -1413,6 +1495,7 @@ fn unflagged_go_creates_after_a_real_no_match_and_selects_pi() {
     init_repo(&root, "myrepo", &base);
     let record = tmp.join("pi-record");
     let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path(
         &root,
@@ -1461,11 +1544,17 @@ fn go_runs_a_hook_only_when_its_feature_block_is_present() {
 
     let sentinel = tmp.join("sentinel");
     let config_path = config_path_for(&root);
+    let resolver_record = tmp.join("resolver-record");
+    let bin_dir = tmp.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    write_fake_planter(&bin_dir, &resolver_record, "printf 'red\\n'");
 
     // No `features` block: the hook the config could have pointed at never runs.
     std::fs::write(&config_path, "version 1\n").unwrap();
-    let out = run_wt_without_agents_on_path(
+    let out = run_wt_with_restricted_path(
         &root,
+        &base,
+        &bin_dir,
         &["go", "hook target", "--repo", "myrepo", "--claude"],
     );
     assert!(
@@ -1480,8 +1569,10 @@ fn go_runs_a_hook_only_when_its_feature_block_is_present() {
 
     // The same hook, declared under `features`: it runs.
     std::fs::write(&config_path, sentinel_get_position_hook(&sentinel)).unwrap();
-    let out = run_wt_without_agents_on_path(
+    let out = run_wt_with_restricted_path(
         &root,
+        &base,
+        &bin_dir,
         &["go", "hook target", "--repo", "myrepo", "--claude"],
     );
     assert!(
@@ -1492,6 +1583,12 @@ fn go_runs_a_hook_only_when_its_feature_block_is_present() {
     assert!(
         sentinel.exists(),
         "a hook declared under 'features' should have run"
+    );
+    assert!(
+        std::fs::read_to_string(&resolver_record)
+            .unwrap()
+            .contains("arg=--resolve-color"),
+        "resolver was not invoked"
     );
 }
 
@@ -1524,6 +1621,7 @@ fn go_pi_forwards_name_arguments_and_planter_environment() {
     .unwrap();
     let record = tmp.join("pi-record");
     let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path(
         &root,
@@ -1580,6 +1678,7 @@ fn go_pi_tmux_window_sets_planter_tab_index() {
     let bin_dir = write_fake_agent(&tmp, "pi", &record);
     let tmux_record = tmp.join("tmux-record");
     write_fake_tmux(&bin_dir, &tmux_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path_and_tmux_pane(
         &root,
@@ -1617,6 +1716,7 @@ fn go_pi_tmux_window_without_pane_launches_without_position() {
 
     let record = tmp.join("pi-record");
     let bin_dir = write_fake_agent(&tmp, "pi", &record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let out = run_wt_with_path_and_tmux_pane(
         &root,
         &base,
@@ -1656,8 +1756,10 @@ fn go_codex_uses_planter_positioning_without_claude_decoration() {
     let bridge_record = tmp.join("bridge-record");
     let bin_dir = write_fake_agent(&tmp, "codex", &record);
     write_fake_bridge(&bin_dir, &bridge_record, "unix:///tmp/wt-test.sock");
+    let resolver_record = tmp.join("resolver-record");
+    write_fake_planter(&bin_dir, &resolver_record, "printf 'red\\n'");
 
-    let out = run_wt_with_path(
+    let out = run_wt_with_path_and_planter_color(
         &root,
         &base,
         &bin_dir,
@@ -1672,6 +1774,7 @@ fn go_codex_uses_planter_positioning_without_claude_decoration() {
             "user label",
             "/color red",
         ],
+        "inherited",
     );
     assert_success(&out, "go with codex");
 
@@ -1686,16 +1789,27 @@ fn go_codex_uses_planter_positioning_without_claude_decoration() {
         ),
         "{record}"
     );
-    assert!(record.contains("PLANTER_COLOR=") && !record.contains("PLANTER_COLOR=\n"));
+    // The resolver's answer wins over whatever `wt` itself inherited.
+    assert!(record.contains("PLANTER_COLOR=red"), "{record}");
     assert!(record.contains("PLANTER_LABEL=codex target"), "{record}");
     assert!(record.contains("PLANTER_TAB_INDEX=7"), "{record}");
     let bridge_record = std::fs::read_to_string(&bridge_record).unwrap();
     assert!(bridge_record.contains(&format!("cwd={}", tree.display())));
     assert!(bridge_record.contains("arg=--owner-pid"));
+    assert!(
+        bridge_record.contains("PLANTER_COLOR=red"),
+        "{bridge_record}"
+    );
     assert!(bridge_record.contains("PLANTER_LABEL=codex target"));
     assert!(
         bridge_record.contains("PLANTER_TAB_INDEX=7"),
         "{bridge_record}"
+    );
+    assert!(
+        std::fs::read_to_string(&resolver_record)
+            .unwrap()
+            .contains("PLANTER_COLOR=inherited"),
+        "the resolver did not see wt's own inherited PLANTER_COLOR"
     );
     assert!(planter_sentinel.exists(), "Codex should run planter hooks");
     assert!(
@@ -1727,6 +1841,7 @@ fn go_codex_with_explicit_remote_stays_direct() {
     let bridge_record = tmp.join("bridge-record");
     let bin_dir = write_fake_agent(&tmp, "codex", &record);
     write_fake_bridge(&bin_dir, &bridge_record, "unix:///tmp/wt-test.sock");
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path(
         &root,
@@ -1791,6 +1906,7 @@ fn go_codex_falls_back_without_planter_environment_after_invalid_bridge() {
     let bridge_record = tmp.join("bridge-record");
     let bin_dir = write_fake_agent(&tmp, "codex", &record);
     write_fake_bridge(&bin_dir, &bridge_record, "not-a-unix-endpoint");
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path(
         &root,
@@ -1845,6 +1961,7 @@ fn go_claude_keeps_its_decoration_and_planter() {
     .unwrap();
     let record = tmp.join("claude-record");
     let bin_dir = write_fake_agent(&tmp, "claude", &record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
 
     let out = run_wt_with_path(
         &root,
@@ -1876,6 +1993,101 @@ fn go_claude_keeps_its_decoration_and_planter() {
         terminal_sentinel.exists(),
         "Claude should retain terminal hooks"
     );
+}
+
+#[test]
+fn go_fails_before_any_hook_or_agent_when_planter_is_not_on_path() {
+    let tmp = unique_dir("go-no-planter");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "no planter target"]),
+        "new",
+    );
+    assert_success(
+        &run_wt(&root, &["tree", "wait", "no planter target"]),
+        "wait",
+    );
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        go_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    // Nothing at all on PATH: neither `planter` nor `claude` can be found by
+    // any name, so a `claude` exec reached before the color preflight would
+    // fail exactly the same way — the assertions below are what tell them
+    // apart.
+    let out = Command::new(wt_bin())
+        .args(["go", "no planter target", "--repo", "myrepo", "--claude"])
+        .current_dir(&base)
+        .env("WT_ROOT", &root)
+        .env("WT_CONFIG", config_path_for(&root))
+        .env("PATH", "/nonexistent-bin-dir")
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
+        .output()
+        .expect("spawn wt");
+    assert!(!out.status.success(), "go should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`planter` is not on PATH"), "{stderr}");
+    assert!(!planter_sentinel.exists(), "planter hooks should not run");
+    assert!(!terminal_sentinel.exists(), "terminal hooks should not run");
+}
+
+#[test]
+fn go_fails_when_planter_resolve_color_reports_an_error() {
+    let tmp = unique_dir("go-resolver-failure");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["new", "myrepo", "--name", "resolver target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "resolver target"]), "wait");
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        go_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    let resolver_record = tmp.join("resolver-record");
+    write_fake_planter(
+        &bin_dir,
+        &resolver_record,
+        "printf 'resolver is unavailable' >&2; exit 19",
+    );
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "resolver target", "--repo", "myrepo", "--claude"],
+    );
+    assert!(!out.status.success(), "go should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("resolver is unavailable"), "{stderr}");
+    assert!(
+        std::fs::read_to_string(&resolver_record)
+            .unwrap()
+            .contains("arg=--resolve-color")
+    );
+    assert!(!agent_record.exists(), "agent should not start");
+    assert!(!planter_sentinel.exists(), "planter hooks should not run");
+    assert!(!terminal_sentinel.exists(), "terminal hooks should not run");
 }
 
 #[test]
@@ -4214,13 +4426,17 @@ fn go_with_no_tree_offers_the_cwd_repo_first_then_newest_first() {
         capture.display()
     );
     let fzf = write_fake_fzf(&tmp, &script);
+    let bin_dir = tmp.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'yellow\\n'");
+    let path = std::env::join_paths([&bin_dir, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
 
     let out = Command::new(wt_bin())
         .args(["go"])
         .env("WT_ROOT", &root)
         .env("WT_CONFIG", config_path_for(&root))
         .env("WT_FZF", &fzf)
-        .env("PATH", "/nonexistent-bin-dir")
+        .env("PATH", path)
         .output()
         .expect("spawn wt");
 

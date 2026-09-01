@@ -239,8 +239,16 @@ and a background install can run when trunk changes. Set `spares 0` in
 
 ## Features
 
+`wt go`/`wt llm` always asks `planter --resolve-color` for a color once it has
+a ready target. `planter` must be on PATH; the command must exit successfully
+and print exactly one supported palette token followed by a newline. wt uses
+that token for the terminal background and the eligible Planter session
+handoff. A missing binary, a timeout, a failure, or malformed output stops the
+launch before terminal hooks or an agent start — there is no fallback.
+
 Optional terminal and Planter hooks live under `features` in `config.kdl`.
-Without that block, wt does not enable either integration.
+Without that block, wt does not enable either integration, but the color
+preflight above still runs.
 
 ```kdl
 features {
@@ -263,9 +271,10 @@ features {
   when available. A missing or
   failed bridge falls back to direct Codex. Explicit `--remote` endpoints,
   administrative Codex commands, and direct `wt llm codex` remain direct.
-  Eligible sessions receive `PLANTER_COLOR` and `PLANTER_LABEL`, plus
-  `PLANTER_TAB_INDEX` when the position hook succeeds. The bridge preserves
-  `PLANTER_STATE_DIR` or `CLAUDE_PLANTER_DIR`.
+  Eligible sessions receive `PLANTER_COLOR` — the result of the required color
+  preflight, which lets Planter bind the real session to the color wt already
+  used — and `PLANTER_LABEL`, plus `PLANTER_TAB_INDEX` when the position hook
+  succeeds. The bridge preserves `PLANTER_STATE_DIR` or `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background to its tint color: an
   OSC 11 escape sequence outside tmux, and tmux's window-scoped
   `window-style` option inside it, so tmux itself keeps each window's tint
@@ -276,9 +285,9 @@ features {
   in the primary color for its text, bold. It applies to Pi, Claude, and
   Codex sessions launched through `wt go`.
 
-Each tree's color comes from the 12-color palette in `/palette.json` at the
-repo root, keyed by a hash of the repo and tree name so the same tree always
-gets the same color. Each hook is either a wt `builtin` or a `cmd`. Commands
+Each tree's color is whatever `planter --resolve-color` returns, one of the
+12-color palette in `/palette.json` at the repo root. Each hook is either a wt
+`builtin` or a `cmd`. Commands
 receive `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, `WT_COLOR_HEX` (the near-black
 tint used as the terminal background), `WT_COLOR_PRIMARY_HEX` (the color's
 identity hex), and `WT_COLOR_TEXT_HEX` (a lighter hex for labels on a dark

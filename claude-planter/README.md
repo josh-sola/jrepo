@@ -101,6 +101,7 @@ rm -rf ~/.claude/planter     # state too, if you want it gone
 
 ```
 planter --list          print the live sessions as text
+planter --resolve-color print one launcher-selected palette name
 planter --demo          run with four fake plants
 planter --preview FILE  render every frame and colour to a PNG
 planter --scale N       pixel size, default 3
@@ -110,6 +111,21 @@ planter --pack NAME     draw with a pack from ~/.config/planter/NAME
 
 Reordering never changes a plant's colour. Automatic choices are remembered, and
 new plants are assigned in creation order before the saved order is applied.
+
+## Launcher preflight
+
+`planter --resolve-color` is the launcher-facing preflight API. It runs
+headlessly and does not open, activate, or emit any UI. On success it writes
+exactly one palette name from `Palette.swift` followed by one newline, with no
+other stdout text, and exits 0. On failure it exits nonzero and may write
+diagnostics to stderr.
+
+Use its result as `PLANTER_COLOR` when starting the real session. A valid
+inherited `PLANTER_COLOR` is returned unchanged. An absent, empty, or invalid
+value falls back to Planter's normal automatic balancing policy — the same
+least-used-slot logic `assignHues` uses, shared through `ColorResolver`. The
+command uses `PLANTER_STATE_DIR`, then `CLAUDE_PLANTER_DIR`, then
+`~/.claude/planter`, the same state-directory precedence as the overlay.
 
 ## Labels
 

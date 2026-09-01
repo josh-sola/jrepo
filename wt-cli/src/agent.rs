@@ -102,8 +102,33 @@ pub fn exec_target(
 
 /// Only returns on failure: a successful `exec` replaces this process.
 pub fn exec_at(agent: Agent, cwd: &Path, args: &[String], env: &[(&str, &str)]) -> Result<()> {
+    exec_at_with_removed_env(agent, cwd, args, env, &[])
+}
+
+/// Like `exec_at`, but strips any inherited `PLANTER_COLOR` first. Used for an
+/// agent that Planter isn't tracking, so a color left over from the shell it
+/// was launched from never leaks in and is mistaken for a real assignment.
+pub fn exec_at_without_planter_color(
+    agent: Agent,
+    cwd: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+) -> Result<()> {
+    exec_at_with_removed_env(agent, cwd, args, env, &["PLANTER_COLOR"])
+}
+
+fn exec_at_with_removed_env(
+    agent: Agent,
+    cwd: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+    removed_env: &[&str],
+) -> Result<()> {
     let mut cmd = Command::new(agent.executable());
     cmd.current_dir(cwd).args(args);
+    for key in removed_env {
+        cmd.env_remove(key);
+    }
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -125,14 +150,14 @@ pub fn exec_launch_codex(
     planter_enabled: bool,
 ) -> Result<()> {
     if !planter_enabled || !interactive_codex_args(args) {
-        return exec_at(Agent::Codex, cwd, args, &[]);
+        return exec_at_without_planter_color(Agent::Codex, cwd, args, &[]);
     }
 
     let mut bridge = match start_bridge(cwd, env) {
         Ok(bridge) => bridge,
         Err(reason) => {
             eprintln!("wt: planter bridge unavailable ({reason}); starting Codex directly");
-            return exec_at(Agent::Codex, cwd, args, &[]);
+            return exec_at_without_planter_color(Agent::Codex, cwd, args, &[]);
         }
     };
 
@@ -141,7 +166,7 @@ pub fn exec_launch_codex(
         Err(reason) => {
             stop_bridge(&mut bridge);
             eprintln!("wt: planter bridge unavailable ({reason}); starting Codex directly");
-            return exec_at(Agent::Codex, cwd, args, &[]);
+            return exec_at_without_planter_color(Agent::Codex, cwd, args, &[]);
         }
     };
 
