@@ -45,7 +45,9 @@ help.
 branch name. `<TREE_OR_BRANCH>` can also be a branch. For `wt go`, a TREE of
 `#<PR_NUMBER>` (e.g. `wt go '#18736' --repo monorepo`) opens or materializes
 the tree for that pull request's branch instead; `--branch` and `--onto`
-don't apply to it. Ambiguity is an error; never guess.
+don't apply to it. `--onto` on `wt go` and `wt pr new` also accepts
+`#<PR_NUMBER>`, stacking onto that pull request's branch (fetched locally if
+needed); a merged or closed PR is refused. Ambiguity is an error; never guess.
 
 ## Stack workflow
 

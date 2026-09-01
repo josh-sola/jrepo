@@ -4,12 +4,13 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::config;
 use crate::git;
+use crate::github;
 use crate::graphite;
 use crate::restack;
 use crate::stack::{self, Stacks};
@@ -308,14 +309,69 @@ fn create_tree_with(
     create_cold_with(root, &plan, gt_bin)
 }
 
+/// Parses a `#<PR_NUMBER>` selector: `wt go`'s worktree argument, and the
+/// `--onto` selectors on `wt go` and `wt pr new`. `None` when `sel` doesn't
+/// start with `#`, so callers can fall through to their own resolution
+/// tiers instead of treating every non-numeric selector as an error.
+pub(crate) fn parse_pr_selector(sel: &str) -> Option<Result<u64>> {
+    let rest = sel.strip_prefix('#')?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(Err(anyhow!(
+            "a PR selector needs a number after '#', e.g. '#1234'"
+        )));
+    }
+    Some(
+        rest.parse()
+            .with_context(|| format!("PR number '{rest}' is too large")),
+    )
+}
+
+/// PR-number lookup shared by `wt go '#<N>'`, `wt go --onto '#<N>'`, and `wt
+/// pr new --onto '#<N>'`: Graphite's local sidecar first — no network round
+/// trip — then `gh` for a PR it hasn't recorded yet. Callers decide their
+/// own policy on PR state (open vs. merged/closed).
+pub(crate) fn pr_head_branch(base: &Path, number: u64) -> Result<(String, String)> {
+    let common_dir = git::common_dir(base)?;
+    Ok(match graphite::pr_branch_by_number(&common_dir, number) {
+        Some(pr) => (pr.head_ref_name, pr.state),
+        None => {
+            let head = github::pr_head(base, number)?;
+            (head.branch, head.state)
+        }
+    })
+}
+
+/// Resolves a `#<PR_NUMBER>` `--onto` selector into its head branch,
+/// fetching it locally when needed. Shared by `resolve_onto` and
+/// `resolve_pr_parent`, which each already know their repo's base.
+fn resolve_onto_pr(base: &Path, number: u64) -> Result<String> {
+    let (branch, state) = pr_head_branch(base, number)?;
+    if state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed") {
+        bail!(
+            "PR #{number}'s branch '{branch}' is {}; stack onto trunk instead of a {} PR",
+            state.to_lowercase(),
+            state.to_lowercase()
+        );
+    }
+    if !git::branch_exists_local(base, &branch)? {
+        git::fetch_branch(base, &branch)?;
+    }
+    Ok(branch)
+}
+
 /// Resolves `--onto`'s selector into the branch `wt tree new` should create its
 /// worktree from, checked in the same tiered, ambiguity-errors order as
-/// `store::resolve_index`: a `wt` tree in this repo — by the branch it
-/// actually has checked out right now, never `Tree.branch`, which only
-/// records what a tree started on — then a local branch name, then any
-/// other commit-ish. Ambiguity inside a tier is an error, not a fallthrough
-/// to the next tier.
+/// `store::resolve_index`: a `#<PR_NUMBER>` selector, then a `wt` tree in
+/// this repo — by the branch it actually has checked out right now, never
+/// `Tree.branch`, which only records what a tree started on — then a local
+/// branch name, then any other commit-ish. A `#…` selector can't be a tree
+/// name (`wt` tree names come from `--name` summaries), so it's checked
+/// first, unambiguously, ahead of every other tier. Ambiguity inside a tier
+/// is an error, not a fallthrough to the next tier.
 fn resolve_onto(store: &store::Store, repo_name: &str, base: &Path, sel: &str) -> Result<String> {
+    if let Some(result) = parse_pr_selector(sel) {
+        return resolve_onto_pr(base, result?);
+    }
     let trees: Vec<&Tree> = store.trees.iter().filter(|t| t.repo == repo_name).collect();
     if let Some(branch) = resolve_onto_tree(&trees, sel)? {
         return Ok(branch);
@@ -376,6 +432,23 @@ pub(crate) fn resolve_pr_parent(
     cwd: Option<&Path>,
 ) -> Result<(String, String)> {
     if let Some(sel) = onto {
+        if let Some(result) = parse_pr_selector(sel) {
+            let number = result?;
+            let repo_name = cwd
+                .and_then(|c| store::repo_for_cwd(store, c))
+                .with_context(|| {
+                    format!(
+                        "--onto '{sel}' is a PR selector, which needs a repo to look it up in; \
+                         the current directory isn't inside a registered repo, so run `wt pr \
+                         new` from inside a tree or repo"
+                    )
+                })?
+                .to_string();
+            let base = store.repos[&repo_name].base.clone();
+            let branch = resolve_onto_pr(&base, number)?;
+            return Ok((repo_name, branch));
+        }
+
         if let Some(t) = store::resolve_optional(&store.trees, sel)? {
             let branch = store::live_branch(t).unwrap_or_else(|| t.branch.clone());
             return Ok((t.repo.clone(), branch));
@@ -1721,6 +1794,29 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    fn parse_pr_selector_is_none_for_a_selector_without_a_leading_hash() {
+        assert!(parse_pr_selector("stacked").is_none());
+        assert!(parse_pr_selector("some-tree").is_none());
+    }
+
+    #[test]
+    fn parse_pr_selector_parses_a_valid_number() {
+        assert_eq!(parse_pr_selector("#18736").unwrap().unwrap(), 18736);
+    }
+
+    #[test]
+    fn parse_pr_selector_errors_on_a_bare_hash() {
+        let err = parse_pr_selector("#").unwrap().unwrap_err();
+        assert!(err.to_string().contains("needs a number after '#'"));
+    }
+
+    #[test]
+    fn parse_pr_selector_errors_on_non_digit_characters() {
+        let err = parse_pr_selector("#12x3").unwrap().unwrap_err();
+        assert!(err.to_string().contains("needs a number after '#'"));
+    }
 
     #[test]
     fn gc_skips_a_failed_tree() {
@@ -3963,6 +4059,44 @@ mod tests {
             fs::remove_dir_all(&dir).ok();
         }
 
+        fn write_pr_info(common_dir: &Path, branch: &str, number: u64, state: &str) {
+            fs::write(
+                common_dir.join(".graphite_pr_info"),
+                format!(
+                    r#"{{"prInfos": [{{"headRefName": "{branch}", "prNumber": {number}, "state": "{state}", "reviewDecision": null, "isDraft": false}}]}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn resolve_onto_pr_selector_resolves_via_the_graphite_sidecar() {
+            let (dir, repo) = fixture();
+            git_cmd(&["branch", "pr-branch"], &repo.base);
+            let common_dir = git::common_dir(&repo.base).unwrap();
+            write_pr_info(&common_dir, "pr-branch", 18736, "OPEN");
+            let store = store::Store::default();
+
+            let resolved = resolve_onto(&store, "r", &repo.base, "#18736").unwrap();
+            assert_eq!(resolved, "pr-branch");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_onto_with_a_merged_pr_selector_bails() {
+            let (dir, repo) = fixture();
+            git_cmd(&["branch", "pr-branch"], &repo.base);
+            let common_dir = git::common_dir(&repo.base).unwrap();
+            write_pr_info(&common_dir, "pr-branch", 18736, "MERGED");
+            let store = store::Store::default();
+
+            let err = resolve_onto(&store, "r", &repo.base, "#18736").unwrap_err();
+            assert!(err.to_string().contains("merged"), "message was: {err}");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
         #[test]
         fn resolve_pr_parent_with_onto_tree_uses_its_live_branch() {
             let (dir, repo) = fixture();
@@ -4060,6 +4194,38 @@ mod tests {
                 err.to_string().contains("not an arbitrary commit"),
                 "message was: {err}"
             );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_pr_parent_with_pr_selector_resolves_via_the_graphite_sidecar() {
+            let (dir, repo) = fixture();
+            git_cmd(&["branch", "pr-branch"], &repo.base);
+            let common_dir = git::common_dir(&repo.base).unwrap();
+            write_pr_info(&common_dir, "pr-branch", 18736, "OPEN");
+            let mut store = store::Store::default();
+            store.repos.insert("r".into(), repo.clone());
+
+            let (repo_name, branch) =
+                resolve_pr_parent(&store, Some("#18736"), Some(&repo.base)).unwrap();
+            assert_eq!(repo_name, "r");
+            assert_eq!(branch, "pr-branch");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn resolve_pr_parent_with_a_merged_pr_selector_bails() {
+            let (dir, repo) = fixture();
+            git_cmd(&["branch", "pr-branch"], &repo.base);
+            let common_dir = git::common_dir(&repo.base).unwrap();
+            write_pr_info(&common_dir, "pr-branch", 18736, "MERGED");
+            let mut store = store::Store::default();
+            store.repos.insert("r".into(), repo.clone());
+
+            let err = resolve_pr_parent(&store, Some("#18736"), Some(&repo.base)).unwrap_err();
+            assert!(err.to_string().contains("merged"), "message was: {err}");
 
             fs::remove_dir_all(&dir).ok();
         }

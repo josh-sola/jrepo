@@ -395,7 +395,8 @@ struct PrNewArgs {
         long,
         value_name = "TREE_OR_BRANCH",
         help = "Parent tree or local branch to stack onto. Defaults to the branch of the tree \
-                containing the current directory."
+                containing the current directory. '#<PR_NUMBER>' stacks onto that pull \
+                request's branch."
     )]
     onto: Option<String>,
     #[arg(
@@ -611,7 +612,8 @@ struct GoArgs {
     #[arg(
         long,
         value_name = "TREE_OR_REF",
-        help = "Tree branch, local branch, or commit to branch from when creating."
+        help = "Tree branch, local branch, or commit to branch from when creating. \
+                '#<PR_NUMBER>' stacks onto that pull request's branch."
     )]
     onto: Option<String>,
     #[arg(
@@ -1203,19 +1205,14 @@ fn resolve_launch(
         });
     }
 
-    if let Some(rest) = worktree.strip_prefix('#') {
-        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
-            bail!("a PR selector needs a number after '#', e.g. '#1234'");
-        }
+    if let Some(result) = tree::parse_pr_selector(worktree) {
+        let number = result?;
         if has_branch_or_onto {
             bail!(
                 "a PR selector already names its branch, so --branch and --onto don't apply; \
                  drop them or drop the leading '#'"
             );
         }
-        let number: u64 = rest
-            .parse()
-            .with_context(|| format!("PR number '{rest}' is too large"))?;
         let repo = match repo_arg {
             Some(r) => r.to_string(),
             None => cwd_repo.map(str::to_string).with_context(|| {
@@ -1407,16 +1404,7 @@ fn cmd_launch(
                 .expect("resolve_launch already checked this repo is registered")
                 .base
                 .clone();
-            let common_dir = git::common_dir(&base)?;
-            // Graphite's sidecar first — it needs no network round trip —
-            // then fall back to `gh` for a PR it hasn't recorded yet.
-            let (head_branch, state) = match graphite::pr_branch_by_number(&common_dir, number) {
-                Some(pr) => (pr.head_ref_name, pr.state),
-                None => {
-                    let head = github::pr_head(&base, number)?;
-                    (head.branch, head.state)
-                }
-            };
+            let (head_branch, state) = tree::pr_head_branch(&base, number)?;
 
             let id = match store.trees.iter().find(|t| {
                 t.repo == repo
