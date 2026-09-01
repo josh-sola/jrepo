@@ -68,6 +68,19 @@ pub fn fetch_prune(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Non-forced, so a local ref that already exists and diverged is left
+/// alone rather than silently overwritten.
+pub fn fetch_branch(path: &Path, branch: &str) -> Result<()> {
+    let out = run(&["fetch", "origin", &format!("{branch}:{branch}")], path)?;
+    if !out.status.success() {
+        bail!(
+            "git fetch origin {branch}:{branch} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn branch_exists_local(path: &Path, branch: &str) -> Result<bool> {
     ok(
         &[

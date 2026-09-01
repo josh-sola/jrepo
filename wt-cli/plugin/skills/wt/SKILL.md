@@ -38,12 +38,14 @@ help.
 | `wt llm pi [TREE_OR_REPO] [-- <PI_ARGS>...]` | Run Pi with its working directory set and pass arguments through unchanged. |
 | `wt llm claude [TREE_OR_REPO] [-- <CLAUDE_ARGS>...]` | Run Claude with its working directory set and pass arguments through unchanged. |
 | `wt llm codex [TREE_OR_REPO] [-- <CODEX_ARGS>...]` | Run Codex with its working directory set and pass arguments through unchanged. |
-| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo` (rooting a new stack on trunk unless `--onto` stacks it on an existing branch), or open the picker with no tree. Pi is the default. |
+| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo` (rooting a new stack on trunk unless `--onto` stacks it on an existing branch), open the tree for `#<PR_NUMBER>` (materializing one if none holds that PR's branch yet), or open the picker with no tree. Pi is the default. |
 | `wt cd <TREE>` | Change the interactive shell directory through the installed shell function. |
 
 `<TREE>` means a tree name, unique name substring, UUID or UUID prefix, or
-branch name. `<TREE_OR_BRANCH>` can also be a branch. Ambiguity is an error;
-never guess.
+branch name. `<TREE_OR_BRANCH>` can also be a branch. For `wt go`, a TREE of
+`#<PR_NUMBER>` (e.g. `wt go '#18736' --repo monorepo`) opens or materializes
+the tree for that pull request's branch instead; `--branch` and `--onto`
+don't apply to it. Ambiguity is an error; never guess.
 
 ## Stack workflow
 

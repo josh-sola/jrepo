@@ -87,7 +87,7 @@ struct BranchRow {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PrInfo {
     #[serde(rename = "headRefName")]
-    head_ref_name: String,
+    pub(crate) head_ref_name: String,
     #[serde(rename = "prNumber")]
     pub(crate) pr_number: u64,
     pub(crate) state: String,
@@ -156,6 +156,15 @@ pub(crate) fn read_pr_info(git_common_dir: &Path) -> Option<HashMap<String, PrIn
             .map(|pr| (pr.head_ref_name.clone(), pr))
             .collect(),
     )
+}
+
+/// `wt go '#<N>'`'s local-first lookup: the sidecar keys on head branch, so
+/// finding a PR by number means scanning its values rather than exposing the
+/// map's shape to the caller.
+pub(crate) fn pr_branch_by_number(git_common_dir: &Path, number: u64) -> Option<PrInfo> {
+    read_pr_info(git_common_dir)?
+        .into_values()
+        .find(|pr| pr.pr_number == number)
 }
 
 impl Graph {
@@ -517,5 +526,50 @@ mod tests {
         let mut sorted = order.clone();
         sorted.sort();
         assert_eq!(sorted, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn write_pr_info(common_dir: &Path, prs: &[(&str, u64, &str)]) {
+        fs::create_dir_all(common_dir).unwrap();
+        let entries: Vec<String> = prs
+            .iter()
+            .map(|(branch, number, state)| {
+                format!(
+                    r#"{{"headRefName": "{branch}", "prNumber": {number},
+                     "state": "{state}", "reviewDecision": null, "isDraft": false}}"#
+                )
+            })
+            .collect();
+        fs::write(
+            common_dir.join(PR_INFO_FILE),
+            format!(r#"{{"prInfos": [{}]}}"#, entries.join(",")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pr_branch_by_number_finds_the_matching_entry() {
+        let dir = temp_common_dir();
+        write_pr_info(
+            &dir,
+            &[("josh/a", 100, "OPEN"), ("josh/b", 18736, "MERGED")],
+        );
+        let pr = pr_branch_by_number(&dir, 18736).unwrap();
+        assert_eq!(pr.head_ref_name, "josh/b");
+        assert_eq!(pr.state, "MERGED");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pr_branch_by_number_is_none_when_no_pr_matches() {
+        let dir = temp_common_dir();
+        write_pr_info(&dir, &[("josh/a", 100, "OPEN")]);
+        assert!(pr_branch_by_number(&dir, 18736).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pr_branch_by_number_is_none_without_a_sidecar_file() {
+        let dir = temp_common_dir();
+        assert!(pr_branch_by_number(&dir, 18736).is_none());
     }
 }

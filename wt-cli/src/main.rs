@@ -5,6 +5,7 @@ mod context;
 mod env_refresh;
 mod features;
 mod git;
+mod github;
 mod graphite;
 mod migrate;
 mod pick;
@@ -86,7 +87,7 @@ enum Command {
     },
     /// Open a session in a tree, creating it when requested.
     #[command(
-        long_about = "Open Pi in an existing tree or create one when no match is found with --repo. Select another agent with --claude or --codex.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository.\n\nExamples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go --codex -- --model gpt-5"
+        long_about = "Open Pi in an existing tree or create one when no match is found with --repo. Select another agent with --claude or --codex.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository. A TREE of '#<PR_NUMBER>' opens the tree holding that pull request's branch, or materializes one if none exists yet; --branch and --onto don't apply.\n\nExamples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go '#18736' --repo monorepo\n  wt go --codex -- --model gpt-5"
     )]
     Go(GoArgs),
     /// Change directory to a tree through installed shell integration.
@@ -592,7 +593,7 @@ struct AgentArgs {
 struct GoArgs {
     #[arg(
         value_name = "TREE",
-        help = "Existing tree name, UUID, UUID prefix, unique name substring, or branch; creates a new tree name when --repo is supplied. Omit for the picker."
+        help = "Existing tree name, UUID, UUID prefix, unique name substring, or branch; creates a new tree name when --repo is supplied. '#<PR_NUMBER>' opens or materializes the tree for that pull request's branch. Omit for the picker."
     )]
     worktree: Option<String>,
     #[arg(
@@ -1157,20 +1158,28 @@ enum LaunchPlan {
         repo: String,
         name: String,
     },
+    /// A PR is never created here — `cmd_launch` resolves its head branch
+    /// (Graphite's sidecar, then `gh`) and either finds the tree already
+    /// holding it or materializes one via `tree::adopt_branch`.
+    Pr {
+        repo: String,
+        number: u64,
+    },
 }
 
 fn resolve_launch(
     store: &store::Store,
     worktree: &str,
     repo_arg: Option<&str>,
-    has_branch_or_profile: bool,
+    has_branch_or_onto: bool,
+    has_profile: bool,
     cwd_repo: Option<&str>,
 ) -> Result<LaunchPlan> {
     if let Some(label) = worktree.strip_prefix('@') {
         if label.is_empty() {
             bail!("a scratch session needs a name after '@', e.g. '@poking-around'");
         }
-        if has_branch_or_profile {
+        if has_branch_or_onto || has_profile {
             bail!(
                 "a scratch session opens in the repo's base and creates nothing, so --branch, \
                  --onto, and --profile don't apply; drop them or drop the leading '@'"
@@ -1192,6 +1201,34 @@ fn resolve_launch(
             repo,
             label: worktree.to_string(),
         });
+    }
+
+    if let Some(rest) = worktree.strip_prefix('#') {
+        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("a PR selector needs a number after '#', e.g. '#1234'");
+        }
+        if has_branch_or_onto {
+            bail!(
+                "a PR selector already names its branch, so --branch and --onto don't apply; \
+                 drop them or drop the leading '#'"
+            );
+        }
+        let number: u64 = rest
+            .parse()
+            .with_context(|| format!("PR number '{rest}' is too large"))?;
+        let repo = match repo_arg {
+            Some(r) => r.to_string(),
+            None => cwd_repo.map(str::to_string).with_context(|| {
+                format!(
+                    "'{worktree}' has no repo, and the current directory isn't inside a \
+                     registered repo; pass one: wt go {worktree} --repo <REPO>"
+                )
+            })?,
+        };
+        if !store.repos.contains_key(&repo) {
+            bail!("unknown repo '{repo}'. Known repos: {}", known_repos(store));
+        }
+        return Ok(LaunchPlan::Pr { repo, number });
     }
 
     if let Some(repo) = repo_arg
@@ -1307,7 +1344,8 @@ fn cmd_launch(
             &store,
             w,
             repo.as_deref(),
-            branch.is_some() || onto.is_some() || profile.is_some(),
+            branch.is_some() || onto.is_some(),
+            profile.is_some(),
             cwd_repo,
         )?,
         None => {
@@ -1359,6 +1397,64 @@ fn cmd_launch(
                 .find(|t| t.path == path)
                 .map(|t| t.id)
                 .with_context(|| format!("{} is not a registered tree", path.display()))?;
+            let tree = wait_for_tree(root, id, agent)?;
+            (tree.path, tree.repo, tree.name)
+        }
+        LaunchPlan::Pr { repo, number } => {
+            let base = store
+                .repos
+                .get(&repo)
+                .expect("resolve_launch already checked this repo is registered")
+                .base
+                .clone();
+            let common_dir = git::common_dir(&base)?;
+            // Graphite's sidecar first — it needs no network round trip —
+            // then fall back to `gh` for a PR it hasn't recorded yet.
+            let (head_branch, state) = match graphite::pr_branch_by_number(&common_dir, number) {
+                Some(pr) => (pr.head_ref_name, pr.state),
+                None => {
+                    let head = github::pr_head(&base, number)?;
+                    (head.branch, head.state)
+                }
+            };
+
+            let id = match store.trees.iter().find(|t| {
+                t.repo == repo
+                    && !t.spare
+                    && (t.branch == head_branch
+                        || store::live_branch(t).as_deref() == Some(head_branch.as_str()))
+            }) {
+                Some(t) => t.id,
+                None => {
+                    if state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed")
+                    {
+                        bail!(
+                            "PR #{number}'s branch '{head_branch}' is {}, and no tree holds it; \
+                             nothing to open",
+                            state.to_lowercase()
+                        );
+                    }
+                    if !git::branch_exists_local(&base, &head_branch)? {
+                        git::fetch_branch(&base, &head_branch)?;
+                    }
+                    let path = tree::adopt_branch(
+                        root,
+                        config_path,
+                        tree::AdoptBranchOptions {
+                            repo: Some(repo.clone()),
+                            branch: head_branch,
+                            name: None,
+                            profiles: profile,
+                        },
+                    )?;
+                    store::load(root)?
+                        .trees
+                        .iter()
+                        .find(|t| t.path == path)
+                        .map(|t| t.id)
+                        .with_context(|| format!("{} is not a registered tree", path.display()))?
+                }
+            };
             let tree = wait_for_tree(root, id, agent)?;
             (tree.path, tree.repo, tree.name)
         }
@@ -2586,7 +2682,7 @@ mod tests {
         );
         let store = store_with(&[("monorepo", "/base")], vec![t.clone()]);
 
-        match resolve_launch(&store, "fix login", None, false, None).unwrap() {
+        match resolve_launch(&store, "fix login", None, false, false, None).unwrap() {
             LaunchPlan::Existing { id } => assert_eq!(id, t.id),
             _ => panic!("expected an existing tree"),
         }
@@ -2595,7 +2691,7 @@ mod tests {
     #[test]
     fn resolve_launch_no_match_without_repo_errors_and_creates_nothing() {
         let store = store_with(&[("monorepo", "/base")], vec![]);
-        let err = resolve_launch(&store, "ghost", None, false, None).unwrap_err();
+        let err = resolve_launch(&store, "ghost", None, false, false, None).unwrap_err();
         assert!(
             err.to_string().contains("no tree matches 'ghost'"),
             "message was: {err}"
@@ -2616,7 +2712,7 @@ mod tests {
         );
         let store = store_with(&[("repo-a", "/a"), ("repo-b", "/b")], vec![a, b]);
 
-        let err = resolve_launch(&store, "shared name", None, false, None).unwrap_err();
+        let err = resolve_launch(&store, "shared name", None, false, false, None).unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "message was: {err}");
     }
 
@@ -2634,7 +2730,7 @@ mod tests {
         );
         let store = store_with(&[("repo-a", "/a"), ("repo-b", "/b")], vec![a.clone(), b]);
 
-        match resolve_launch(&store, "shared name", None, false, Some("repo-a")).unwrap() {
+        match resolve_launch(&store, "shared name", None, false, false, Some("repo-a")).unwrap() {
             LaunchPlan::Existing { id } => assert_eq!(id, a.id),
             _ => panic!("expected the cwd repo's tree"),
         }
@@ -2644,7 +2740,7 @@ mod tests {
     fn resolve_launch_plain_name_with_repo_creates_when_no_tree_matches() {
         let store = store_with(&[("monorepo", "/base")], vec![]);
 
-        match resolve_launch(&store, "fix login", Some("monorepo"), false, None).unwrap() {
+        match resolve_launch(&store, "fix login", Some("monorepo"), false, false, None).unwrap() {
             LaunchPlan::New { repo, name } => {
                 assert_eq!(repo, "monorepo");
                 assert_eq!(name, "fix login");
@@ -2656,7 +2752,8 @@ mod tests {
     #[test]
     fn resolve_launch_scratch_with_unknown_repo_errors() {
         let store = store_with(&[], vec![]);
-        let err = resolve_launch(&store, "@poking-around", Some("bogus"), false, None).unwrap_err();
+        let err = resolve_launch(&store, "@poking-around", Some("bogus"), false, false, None)
+            .unwrap_err();
         assert!(
             err.to_string().contains("unknown repo"),
             "message was: {err}"
@@ -2666,8 +2763,15 @@ mod tests {
     #[test]
     fn resolve_launch_scratch_with_branch_or_profile_errors() {
         let store = store_with(&[("monorepo", "/base")], vec![]);
-        let err =
-            resolve_launch(&store, "@poking-around", Some("monorepo"), true, None).unwrap_err();
+        let err = resolve_launch(
+            &store,
+            "@poking-around",
+            Some("monorepo"),
+            true,
+            false,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("--branch"), "message was: {err}");
     }
 
@@ -2675,7 +2779,16 @@ mod tests {
     fn resolve_launch_scratch_infers_repo_from_cwd() {
         let store = store_with(&[("monorepo", "/base")], vec![]);
 
-        match resolve_launch(&store, "@poking-around", None, false, Some("monorepo")).unwrap() {
+        match resolve_launch(
+            &store,
+            "@poking-around",
+            None,
+            false,
+            false,
+            Some("monorepo"),
+        )
+        .unwrap()
+        {
             LaunchPlan::Scratch { repo, label } => {
                 assert_eq!(repo, "monorepo");
                 assert_eq!(label, "@poking-around");
@@ -2687,8 +2800,60 @@ mod tests {
     #[test]
     fn resolve_launch_scratch_without_repo_or_cwd_errors() {
         let store = store_with(&[("monorepo", "/base")], vec![]);
-        let err = resolve_launch(&store, "@poking-around", None, false, None).unwrap_err();
+        let err = resolve_launch(&store, "@poking-around", None, false, false, None).unwrap_err();
         assert!(err.to_string().contains("repo"), "message was: {err}");
+    }
+
+    #[test]
+    fn resolve_launch_pr_selector_with_repo_yields_a_pr_plan() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+
+        match resolve_launch(&store, "#18736", Some("monorepo"), false, false, None).unwrap() {
+            LaunchPlan::Pr { repo, number } => {
+                assert_eq!(repo, "monorepo");
+                assert_eq!(number, 18736);
+            }
+            _ => panic!("expected a PR plan"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_pr_selector_infers_repo_from_cwd() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+
+        match resolve_launch(&store, "#18736", None, false, false, Some("monorepo")).unwrap() {
+            LaunchPlan::Pr { repo, number } => {
+                assert_eq!(repo, "monorepo");
+                assert_eq!(number, 18736);
+            }
+            _ => panic!("expected a PR plan"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_pr_selector_without_repo_or_cwd_errors() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err = resolve_launch(&store, "#18736", None, false, false, None).unwrap_err();
+        assert!(err.to_string().contains("repo"), "message was: {err}");
+    }
+
+    #[test]
+    fn resolve_launch_pr_selector_needs_digits_after_the_hash() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err =
+            resolve_launch(&store, "#12x3", Some("monorepo"), false, false, None).unwrap_err();
+        assert!(err.to_string().contains("number"), "message was: {err}");
+
+        let err = resolve_launch(&store, "#", Some("monorepo"), false, false, None).unwrap_err();
+        assert!(err.to_string().contains("number"), "message was: {err}");
+    }
+
+    #[test]
+    fn resolve_launch_pr_selector_rejects_branch_and_onto() {
+        let store = store_with(&[("monorepo", "/base")], vec![]);
+        let err =
+            resolve_launch(&store, "#18736", Some("monorepo"), true, false, None).unwrap_err();
+        assert!(err.to_string().contains("--branch"), "message was: {err}");
     }
 
     fn parse(args: &[&str]) -> std::result::Result<Cli, clap::Error> {
