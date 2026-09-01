@@ -1,6 +1,6 @@
 ---
 name: wt
-description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, finding an existing one, checking background provisioning, or opening a Pi, Claude, or Codex session. Read before creating a worktree by hand with `git worktree add`.
+description: Use when starting or resuming work in a large repo managed by wt (monorepo, helm, toy-apps) — creating a disposable worktree, stacking a pull request on an existing branch, submitting or restacking a Graphite stack, finding an existing tree, checking background provisioning, or opening a Pi, Claude, or Codex session. Read before creating a worktree by hand with `git worktree add` or running `gt` directly.
 ---
 
 # wt
@@ -44,6 +44,24 @@ help.
 `<TREE>` means a tree name, unique name substring, UUID or UUID prefix, or
 branch name. `<TREE_OR_BRANCH>` can also be a branch. Ambiguity is an error;
 never guess.
+
+## Stack workflow
+
+The usual life of a stack, end to end:
+
+```sh
+wt new myrepo --name "feature base"    # root a new stack on trunk
+wt tree wait "feature base"            # let provisioning finish
+# edit and commit inside the tree
+wt pr new --name "follow-up" --onto "feature base"  # stack the next PR
+# edit and commit inside the new tree
+wt submit "follow-up"                  # submit it and its downstack ancestors
+wt ls                                  # see stacks and pending restacks
+wt restack "feature base"              # after trunk or a parent moves
+```
+
+`wt submit` refuses while anything in scope is pending restack; run `wt sync`
+on the one tree or `wt restack` on the stack first.
 
 ## Working rules
 
