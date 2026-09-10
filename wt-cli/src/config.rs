@@ -30,6 +30,7 @@ pub enum Hook {
 pub struct Features {
     pub planter: Option<Planter>,
     pub terminal: Option<Terminal>,
+    pub herdr: Option<Herdr>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -42,6 +43,10 @@ pub struct Planter {
 pub struct Terminal {
     pub set_background: Option<Hook>,
 }
+
+/// Presence alone enables herdr placement for `wt go`; it has no hooks yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Herdr {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoConfig {
@@ -268,6 +273,8 @@ const HEADER_COMMENT: &str = "\
 //     }\n\
 //     terminal {\n\
 //         set-background { builtin \"osc11\" }\n\
+//     }\n\
+//     herdr {\n\
 //     }\n\
 // }\n\
 \n";
@@ -765,6 +772,33 @@ fn parse_terminal_block(text: &str, node: &KdlNode) -> Result<Terminal> {
     Ok(terminal)
 }
 
+/// No hooks exist yet, so any child is unknown; the block's presence is
+/// the whole signal `herdr::active` reads.
+fn parse_herdr_block(text: &str, node: &KdlNode) -> Result<Herdr> {
+    reject_properties(text, node)?;
+    if !positional_entries(node).is_empty() {
+        return Err(config_error(
+            text,
+            node.span(),
+            "'herdr' does not take arguments",
+        ));
+    }
+
+    if let Some(children) = node.children()
+        && let Some(child) = children.nodes().first()
+    {
+        return Err(config_error(
+            text,
+            child.span(),
+            format!(
+                "unknown node '{}' inside 'herdr'; it has no hooks yet",
+                child.name().value()
+            ),
+        ));
+    }
+    Ok(Herdr {})
+}
+
 fn parse_features_block(text: &str, node: &KdlNode) -> Result<Features> {
     reject_properties(text, node)?;
     if !positional_entries(node).is_empty() {
@@ -783,13 +817,14 @@ fn parse_features_block(text: &str, node: &KdlNode) -> Result<Features> {
         match child.name().value() {
             "planter" => features.planter = Some(parse_planter_block(text, child)?),
             "terminal" => features.terminal = Some(parse_terminal_block(text, child)?),
+            "herdr" => features.herdr = Some(parse_herdr_block(text, child)?),
             other => {
                 return Err(config_error(
                     text,
                     child.span(),
                     format!(
                         "unknown node '{other}' inside 'features'; valid features: planter, \
-                         terminal"
+                         terminal, herdr"
                     ),
                 ));
             }
@@ -1446,6 +1481,29 @@ mod tests {
             terminal.set_background,
             Some(Hook::Builtin("osc11".to_string()))
         );
+    }
+
+    #[test]
+    fn parses_an_empty_herdr_block() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    herdr {\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let config = load(&path).unwrap();
+        assert_eq!(config.features.herdr, Some(Herdr {}));
+    }
+
+    #[test]
+    fn herdr_with_a_child_node_errors() {
+        let dir = temp_dir();
+        let path = dir.join("config.kdl");
+        let text = "version 1\n\nfeatures {\n    herdr {\n        bogus {\n        }\n    }\n}\n";
+        fs::write(&path, text).unwrap();
+
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no hooks yet"), "message was:\n{msg}");
     }
 
     #[test]

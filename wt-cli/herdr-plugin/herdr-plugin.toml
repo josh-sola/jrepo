@@ -1,0 +1,19 @@
+id = "dev.wt"
+name = "wt"
+version = "0.1.0"
+description = "Pick a wt worktree and open its agent in a herdr workspace."
+min_herdr_version = "0.9.0"
+
+[[panes]]
+id = "pick"
+title = "wt"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["wt", "go"]
+
+[[actions]]
+id = "pick"
+title = "Pick a worktree"
+contexts = ["workspace"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "dev.wt", "--entrypoint", "pick"]

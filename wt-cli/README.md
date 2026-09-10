@@ -86,7 +86,7 @@ Pass `--pi`, `--claude`, or `--codex` to `wt tree new` or `wt repo lift` to
 open an agent after provisioning. Without an agent flag, the command only
 creates the tree. Arguments after `--` require an agent flag.
 
-Open an existing tree in Pi, or choose one from the picker:
+Open an existing tree in Pi, or pick one in the launch screen:
 
 ```sh
 wt go "fix login"
@@ -97,6 +97,32 @@ Pi is the default. Pass `--pi`, `--claude`, or `--codex` to select an agent
 explicitly. `wt go <name> --repo <repo>` creates a named tree when no existing
 tree matches. `--onto` works here too. A name beginning with `@` opens a
 scratch agent session in a base checkout without creating a tree.
+
+### The launch screen
+
+A bare `wt go`, or one narrowed only by `--pi`/`--claude`/`--codex`,
+`--profile`, `--repo`, `--branch`, `--onto`, or trailing agent arguments,
+opens a full-screen picker instead of failing for want of a tree name. Any
+of those flags preselect the matching field. It needs a real terminal on
+both stdin and stdout; without one, `wt go` fails instead of hanging.
+
+Type to fuzzy-filter the tree list by repo, name, or branch. The right pane
+previews the highlighted tree — the same detail `wt tree status` shows.
+
+| Key | Effect |
+| --- | --- |
+| type | filter, or edit the focused field |
+| ↑ / ↓ | move the tree selection |
+| Tab / Shift-Tab | cycle focus: filter → profile → args |
+| Ctrl-P / Ctrl-L / Ctrl-X | select Pi / Claude / Codex |
+| Enter | launch the highlighted tree |
+| Esc | cancel |
+
+Typing `@label` hides the list and Enter opens a scratch session, same as
+typing it as `wt go`'s argument. Typing a name that matches no tree and
+pressing Enter opens a small form — name, repo (required, defaulting to the
+current repo), branch, and onto — that creates the tree on submit. Esc from
+that form returns to the list without canceling the picker.
 
 Change the current shell's directory:
 
@@ -190,9 +216,9 @@ that token for the terminal background and the eligible Planter session
 handoff. A missing binary, a timeout, a failure, or malformed output stops the
 launch before terminal hooks or an agent start — there is no fallback.
 
-Optional terminal and Planter hooks live under `features` in `config.kdl`.
-Without that block, wt does not enable either integration, but the color
-preflight above still runs.
+Optional Planter hooks, terminal hooks, and herdr placement live under
+`features` in `config.kdl`. Without a given block, wt does not enable that
+integration, but the color preflight above still runs.
 
 ```kdl
 features {
@@ -202,6 +228,8 @@ features {
     }
     terminal {
         set-background { builtin "osc11" }
+    }
+    herdr {
     }
 }
 ```
@@ -238,6 +266,38 @@ lighter hex for labels on a dark ground), and wt stops them after two seconds.
 A hook error, timeout, or invalid result is treated as absent; it never prevents
 the agent session from starting. The builtins are `tmux-window`,
 `planter-state`, and `osc11`.
+
+### herdr
+
+The `herdr` block above has no hooks; its presence alone turns on placement.
+With it set, and `HERDR_ENV` in the environment (true inside any herdr-managed
+pane), `wt go` does not exec the agent in the calling pane. Instead it finds
+or creates a herdr workspace named after the tree — a new one via `herdr
+worktree open`, or a new tab in the existing one via `herdr tab create` — and
+types `wt go <tree> --here ...` into that workspace's pane, which is the run
+that actually waits for provisioning and execs the agent. A scratch launch
+(`@label`) is placed the same way, keyed by workspace label instead of tree
+path, since it has no tree of its own.
+
+Pass `--here` to run the agent in the current pane instead, the same as
+without the `herdr` feature block. The placed command always includes it, so
+a placed run never tries to place again.
+
+`wt-cli/herdr-plugin/` is a herdr plugin manifest that opens the picker in a
+popup. `./install.sh` links it with `herdr plugin link` when `herdr` is on
+PATH. Bind the action to open it:
+
+```toml
+[[keys.command]]
+key = "prefix+alt+w"
+type = "plugin_action"
+command = "dev.wt.pick"
+description = "wt: pick a worktree"
+```
+
+Leave herdr's own `remove_worktree` key action unbound. It calls herdr's
+`worktree.remove`, which deletes the git worktree directly and bypasses wt's
+own store; use `wt tree rm` instead.
 
 ## Integrations
 

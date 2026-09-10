@@ -5,8 +5,8 @@ mod context;
 mod env_refresh;
 mod features;
 mod git;
+mod herdr;
 mod migrate;
-mod pick;
 mod planter;
 mod proc;
 mod provision;
@@ -16,6 +16,7 @@ mod store;
 mod sync;
 mod tmux;
 mod tree;
+mod tui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -103,9 +104,6 @@ enum Command {
     /// the caller's tmux session.
     #[command(name = "__window-index", hide = true)]
     WindowIndex,
-    /// Prints a tree's details for the `wt go` fzf preview window.
-    #[command(name = "__launch-preview", hide = true)]
-    LaunchPreview { selector: String },
 }
 
 #[derive(Subcommand)]
@@ -479,6 +477,11 @@ struct GoArgs {
     #[arg(long, help = "Open Claude instead of Pi.")]
     claude: bool,
     #[arg(
+        long,
+        help = "Run the agent in this terminal instead of placing it in a herdr workspace."
+    )]
+    here: bool,
+    #[arg(
         last = true,
         value_name = "AGENT_ARGS",
         help = "Arguments passed through unchanged to the selected agent after --."
@@ -672,6 +675,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 branch: args.branch,
                 onto: args.onto,
                 profile: args.profile,
+                here: args.here,
             },
             Agent::from_flags(args.pi, args.codex, args.claude).unwrap_or(Agent::Pi),
             &args.args,
@@ -694,7 +698,6 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             println!("{}", tmux::index()?);
             Ok(())
         }
-        Command::LaunchPreview { selector } => cmd_launch_preview(root, config_path, &selector),
     }
 }
 
@@ -1074,6 +1077,7 @@ struct LaunchArgs {
     branch: Option<String>,
     onto: Option<String>,
     profile: Option<Vec<String>>,
+    here: bool,
 }
 
 fn cmd_launch(
@@ -1085,10 +1089,11 @@ fn cmd_launch(
 ) -> Result<()> {
     let LaunchArgs {
         worktree,
-        repo,
-        branch,
-        onto,
-        profile,
+        mut repo,
+        mut branch,
+        mut onto,
+        mut profile,
+        here,
     } = launch;
     let store = store::load(root)?;
     let config = config::load(config_path)?;
@@ -1096,31 +1101,52 @@ fn cmd_launch(
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let cwd_repo = store::repo_for_cwd(&store, &cwd);
 
-    let plan = match worktree.as_deref() {
-        Some(w) => resolve_launch(
-            &store,
-            w,
-            repo.as_deref(),
-            branch.is_some() || onto.is_some(),
-            profile.is_some(),
-            cwd_repo,
-        )?,
+    let (plan, agent, args_owned) = match worktree {
+        Some(w) => {
+            let plan = resolve_launch(
+                &store,
+                &w,
+                repo.as_deref(),
+                branch.is_some() || onto.is_some(),
+                profile.is_some(),
+                cwd_repo,
+            )?;
+            (plan, agent, args.to_vec())
+        }
         None => {
-            if branch.is_some() || onto.is_some() || profile.is_some() {
-                bail!(
-                    "the picker only opens trees that already exist, so --branch, --onto, and \
-                     --profile need a tree name to create one: wt go <TREE> --repo <REPO> \
-                     --branch <BRANCH>"
-                );
-            }
-            match pick::pick_tree(&store, cwd_repo)? {
-                Some(id) => LaunchPlan::Existing { id },
+            let seed = tui::Seed {
+                repo: repo.clone(),
+                branch: branch.clone(),
+                onto: onto.clone(),
+                profile: profile.clone(),
+                agent,
+                args: args.to_vec(),
+            };
+            let request = match tui::pick(&store, &config, cwd_repo, seed)? {
+                Some(request) => request,
                 None => return Ok(()),
-            }
+            };
+            repo = request.repo;
+            branch = request.branch;
+            onto = request.onto;
+            profile = request.profile;
+            let plan = resolve_launch(
+                &store,
+                &request.selector,
+                repo.as_deref(),
+                branch.is_some() || onto.is_some(),
+                profile.is_some(),
+                cwd_repo,
+            )?;
+            (plan, request.agent, request.args)
         }
     };
+    let args = args_owned.as_slice();
+    let profile_for_inner = profile.clone();
 
-    let (tree_path, repo, label) = match plan {
+    // Materializes a new tree without waiting for provisioning, so a herdr
+    // placement can hand off before it finishes.
+    let (tree_path, repo, label, tree_id) = match plan {
         LaunchPlan::Scratch { repo, label } => {
             let base = store
                 .repos
@@ -1129,11 +1155,15 @@ fn cmd_launch(
                 .base
                 .clone();
             eprintln!("opening a scratch session in {repo}'s base");
-            (base, repo, label)
+            (base, repo, label, None)
         }
         LaunchPlan::Existing { id } => {
-            let tree = wait_for_tree(root, id, agent)?;
-            (tree.path, tree.repo, tree.name)
+            let tree = store::load(root)?
+                .trees
+                .into_iter()
+                .find(|t| t.id == id)
+                .with_context(|| format!("tree {id} is no longer registered"))?;
+            (tree.path, tree.repo, tree.name, Some(id))
         }
         LaunchPlan::New { repo, name } => {
             let path = tree::new_tree(
@@ -1147,15 +1177,42 @@ fn cmd_launch(
                     profiles: profile,
                 },
             )?;
-            let id = store::load(root)?
+            let tree = store::load(root)?
                 .trees
-                .iter()
+                .into_iter()
                 .find(|t| t.path == path)
-                .map(|t| t.id)
                 .with_context(|| format!("{} is not a registered tree", path.display()))?;
+            let id = tree.id;
+            (tree.path, tree.repo, tree.name, Some(id))
+        }
+    };
+
+    if herdr::active(&config, here) {
+        let exe =
+            std::env::current_exe().context("locating this binary's path for herdr placement")?;
+        let exe = exe.to_string_lossy().into_owned();
+        let selector = match tree_id {
+            Some(id) => id.to_string(),
+            None => label.clone(),
+        };
+        let repo_for_scratch = tree_id.is_none().then_some(repo.as_str());
+        let inner = herdr::inner_argv(
+            &exe,
+            &selector,
+            repo_for_scratch,
+            agent,
+            profile_for_inner.as_deref(),
+            args,
+        );
+        return herdr::place(&tree_path, &label, tree_id.is_none(), &inner);
+    }
+
+    let (tree_path, repo, label) = match tree_id {
+        Some(id) => {
             let tree = wait_for_tree(root, id, agent)?;
             (tree.path, tree.repo, tree.name)
         }
+        None => (tree_path, repo, label),
     };
 
     let entry = planter::resolve_color()?;
@@ -1434,65 +1491,62 @@ pub(crate) fn status_state_str(t: &store::Tree) -> String {
 /// Each git-backed section degrades to `(unavailable)` on its own instead
 /// of failing the whole preview: a tree still provisioning may have no
 /// usable git dir yet.
-fn cmd_launch_preview(root: &Path, config_path: &Path, selector: &str) -> Result<()> {
-    let store = store::load(root)?;
-    let t = store::resolve(&store.trees, selector)?;
-    let config = config::load(config_path)?;
-
-    println!("\x1b[1m{}\x1b[0m\x1b[2m  ·  {}\x1b[0m", t.name, t.repo);
-    println!("\x1b[2m{}\x1b[0m", t.branch);
-    println!("{}", collapse_home(&t.path));
-    println!();
+pub(crate) fn launch_preview_lines(config: &config::Config, t: &store::Tree) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("{}  ·  {}", t.name, t.repo));
+    lines.push(t.branch.clone());
+    lines.push(collapse_home(&t.path));
+    lines.push(String::new());
 
     let mut state_line = status_state_str(t);
     if t.state == store::TreeState::Provisioning {
         state_line.push_str(&format!("  {}", step_str(t)));
     }
-    println!("state    {state_line}");
+    lines.push(format!("state    {state_line}"));
     let age = (Utc::now() - t.created).num_seconds();
-    println!("created  {} ago", format_duration(age));
+    lines.push(format!("created  {} ago", format_duration(age)));
 
     let porcelain = git::status_porcelain(&t.path);
     match &porcelain {
-        Ok(files) if files.is_empty() => println!("dirty    clean"),
-        Ok(files) if files.len() == 1 => println!("dirty    1 file"),
-        Ok(files) => println!("dirty    {} files", files.len()),
-        Err(_) => println!("dirty    (unavailable)"),
+        Ok(files) if files.is_empty() => lines.push("dirty    clean".to_string()),
+        Ok(files) if files.len() == 1 => lines.push("dirty    1 file".to_string()),
+        Ok(files) => lines.push(format!("dirty    {} files", files.len())),
+        Err(_) => lines.push("dirty    (unavailable)".to_string()),
     }
-    println!();
+    lines.push(String::new());
 
-    match config::repo(&config, &t.repo).ok().map(|r| r.trunk.clone()) {
+    match config::repo(config, &t.repo).ok().map(|r| r.trunk.clone()) {
         Some(trunk) => {
-            println!("commits beyond origin/{trunk}");
+            lines.push(format!("commits beyond origin/{trunk}"));
             match git::log_oneline(&t.path, &format!("origin/{trunk}..HEAD"), 10) {
-                Ok(lines) if lines.is_empty() => println!("  (none)"),
-                Ok(lines) => {
-                    for line in lines {
-                        println!("  {line}");
+                Ok(commits) if commits.is_empty() => lines.push("  (none)".to_string()),
+                Ok(commits) => {
+                    for line in commits {
+                        lines.push(format!("  {line}"));
                     }
                 }
-                Err(_) => println!("  (unavailable)"),
+                Err(_) => lines.push("  (unavailable)".to_string()),
             }
         }
         None => {
-            println!("commits beyond origin/trunk");
-            println!("  (unavailable)");
+            lines.push("commits beyond origin/trunk".to_string());
+            lines.push("  (unavailable)".to_string());
         }
     }
 
     if let Ok(files) = &porcelain
         && !files.is_empty()
     {
-        println!();
+        lines.push(String::new());
         for line in files.iter().take(12) {
-            println!("  {line}");
+            lines.push(format!("  {line}"));
         }
         if files.len() > 12 {
-            println!("  … {} more", files.len() - 12);
+            lines.push(format!("  … {} more", files.len() - 12));
         }
     }
 
-    Ok(())
+    lines
 }
 
 fn collapse_home(path: &Path) -> String {
