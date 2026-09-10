@@ -46,6 +46,11 @@ fn run_herdr(args: &[String]) -> Result<Value> {
         bail!("`{bin} {}` failed: {text}", args.join(" "));
     }
 
+    // `pane run` succeeds with no output at all; only calls whose result is
+    // read later need a JSON body.
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Null);
+    }
     let value: Value = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("parsing `{bin} {}` output as JSON", args.join(" ")))?;
     value
