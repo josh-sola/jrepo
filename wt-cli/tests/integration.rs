@@ -164,6 +164,7 @@ fn hermetic_git_config() -> &'static Path {
                  [maintenance]\n\tauto = false\n\
                  [core]\n\tfsmonitor = false\n\
                  [protocol]\n\tversion = 2\n\
+                 [protocol \"file\"]\n\tallow = always\n\
                  [user]\n\temail = wt-cli-test@example.com\n\tname = wt-cli-test\n\
                  [commit]\n\tgpgsign = false\n\
                  [init]\n\ttemplateDir = {}\n",
@@ -191,6 +192,24 @@ fn git(args: &[&str], cwd: &Path) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn git_stdout(args: &[&str], cwd: &Path) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {:?} in {} failed: {}",
+        args,
+        cwd.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A throwaway "origin" plus a work clone with one commit, wired up so
@@ -2997,7 +3016,7 @@ fn sync_skips_fast_forward_when_base_is_on_another_branch() {
 /// The scratch clone this builds through needs
 /// `protocol.file.allow=always` for its own submodule population; `base`
 /// itself never does, since its submodule was trusted once at `add` time.
-fn push_submodule_bump_to_origin(base_bare: &Path, submodule_path: &str, tmp: &Path) {
+fn push_submodule_bump_to_origin(base_bare: &Path, submodule_path: &str, tmp: &Path) -> String {
     let clone_dir = tmp.join(format!("advance-submodule-{}", Uuid::now_v7()));
     git(
         &[
@@ -3036,6 +3055,7 @@ fn push_submodule_bump_to_origin(base_bare: &Path, submodule_path: &str, tmp: &P
         &sub_dir,
     );
     git(&["push", "-q", "origin", "master"], &sub_dir);
+    let submodule_commit = git_stdout(&["rev-parse", "HEAD"], &sub_dir);
 
     git(&["add", submodule_path], &clone_dir);
     git(
@@ -3051,6 +3071,61 @@ fn push_submodule_bump_to_origin(base_bare: &Path, submodule_path: &str, tmp: &P
         &clone_dir,
     );
     git(&["push", "-q", "origin", "master"], &clone_dir);
+    submodule_commit
+}
+
+fn assert_submodule_lacks_commit(tree: &Path, commit: &str) {
+    let out = Command::new("git")
+        .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+        .current_dir(tree.join("vendor/sub"))
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("spawn git cat-file");
+    assert!(
+        !out.status.success(),
+        "checkout unexpectedly has submodule commit {commit} before update"
+    );
+}
+
+#[test]
+fn sync_refreshes_a_recursive_submodule_spare_in_place() {
+    let tmp = unique_dir("sync-recursive-submodule-spare");
+    let base = fixture_repo_with_submodule(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    let spare_id = spare["id"].as_str().unwrap().to_string();
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+    git(&["config", "submodule.recurse", "true"], &base);
+
+    let submodule_commit =
+        push_submodule_bump_to_origin(&tmp.join("origin.git"), "vendor/sub", &tmp);
+    assert_submodule_lacks_commit(&spare_path, &submodule_commit);
+    assert_submodule_lacks_commit(&base, &submodule_commit);
+
+    assert_success(&run_wt(&root, &["repo", "sync", "myrepo"]), "sync");
+    let refreshed = wait_for_settled_spare(&root, "myrepo", 60);
+    assert_eq!(refreshed["state"], "ready");
+    assert_eq!(refreshed["id"], spare_id);
+    assert_eq!(refreshed["path"], spare_path.to_string_lossy().as_ref());
+    assert_eq!(
+        git_stdout(&["rev-parse", "HEAD"], &spare_path.join("vendor/sub")),
+        submodule_commit
+    );
+    assert_eq!(
+        git_stdout(&["rev-parse", "HEAD"], &spare_path),
+        git_stdout(&["rev-parse", "origin/master"], &base)
+    );
+    assert!(status_porcelain(&spare_path).is_empty());
+    assert_eq!(
+        git_stdout(&["rev-parse", "HEAD"], &base.join("vendor/sub")),
+        submodule_commit
+    );
+    assert!(status_porcelain(&base).is_empty());
 }
 
 /// A superproject that has already fast-forwarded past a submodule bump
@@ -3114,6 +3189,30 @@ fn sync_repairs_a_stale_submodule_pointer_and_still_fast_forwards() {
         !stdout.contains("dirty") && !stdout.contains("repaired"),
         "a second sync should find nothing left to fix: {stdout}"
     );
+}
+
+#[test]
+fn sync_fetches_parent_when_recursive_submodule_fetch_would_fail() {
+    let tmp = unique_dir("sync-submodule-fetch");
+    let base = fixture_repo_with_submodule(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    git(&["config", "submodule.recurse", "true"], &base);
+    git(&["config", "fetch.recurseSubmodules", "true"], &base);
+    git(
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            tmp.join("missing-submodule-remote").to_str().unwrap(),
+        ],
+        &base.join("vendor/sub"),
+    );
+    push_new_commit_to_origin(&tmp.join("origin.git"), &tmp, "advance.txt");
+
+    assert_success(&run_wt(&root, &["repo", "sync", "myrepo"]), "sync");
+    assert!(base.join("advance.txt").exists());
 }
 
 fn status_porcelain(path: &Path) -> String {
@@ -4463,6 +4562,61 @@ fn a_ready_spare_at_the_same_commit_is_claimed_instantly_with_no_step_rerun() {
 
     assert_success(
         &run_wt(&root, &["tree", "rm", "instant claim", "--delete-branch"]),
+        "cleanup tree",
+    );
+}
+
+#[test]
+fn a_recursive_submodule_spare_is_claimed_in_place_after_a_trunk_bump() {
+    let tmp = unique_dir("spare-recursive-submodule-claim");
+    let base = fixture_repo_with_submodule(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    enable_spares(&root, "myrepo", 1);
+
+    let spare = build_and_wait_spare(&root, "myrepo", 60);
+    assert_eq!(spare["state"], "ready");
+    let spare_path = PathBuf::from(spare["path"].as_str().unwrap());
+    set_spares(&root, "myrepo", 0);
+    git(&["config", "submodule.recurse", "true"], &base);
+
+    let submodule_commit =
+        push_submodule_bump_to_origin(&tmp.join("origin.git"), "vendor/sub", &tmp);
+    git(&["fetch", "--no-recurse-submodules", "-q", "origin"], &base);
+    assert_submodule_lacks_commit(&spare_path, &submodule_commit);
+
+    let out = run_wt(
+        &root,
+        &["tree", "new", "myrepo", "--name", "submodule claim"],
+    );
+    assert_success(&out, "new (submodule claim)");
+    let tree_path = PathBuf::from(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(tree_path, spare_path, "claim must reuse the ready spare");
+    assert_success(&run_wt(&root, &["tree", "wait", "submodule claim"]), "wait");
+
+    let rows = spare_rows(&root, "myrepo");
+    assert!(
+        rows.is_empty(),
+        "the claimed spare must no longer be registered"
+    );
+    assert_eq!(
+        git_stdout(&["rev-parse", "HEAD"], &tree_path),
+        git_stdout(&["rev-parse", "origin/master"], &base)
+    );
+    assert_eq!(
+        git_stdout(&["rev-parse", "HEAD"], &tree_path.join("vendor/sub")),
+        submodule_commit
+    );
+    assert!(status_porcelain(&tree_path).is_empty());
+
+    assert_success(
+        &run_wt(&root, &["tree", "rm", "submodule claim", "--delete-branch"]),
         "cleanup tree",
     );
 }
