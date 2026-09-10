@@ -33,7 +33,7 @@ fn resolve_color_command(program: &str, args: &[&str]) -> Result<&'static color:
         .stderr(Stdio::piped());
     let child = command.spawn().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            anyhow::anyhow!("`planter` is not on PATH; install it before `wt launch`")
+            anyhow::anyhow!("`planter` is not on PATH; install it before `wt go`")
         } else {
             anyhow::anyhow!("could not start `planter --resolve-color`: {error}")
         }

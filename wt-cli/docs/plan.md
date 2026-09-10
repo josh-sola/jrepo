@@ -1,5 +1,9 @@
 # `wt` — enriched worktree tooling
 
+> Historical design record. The names, data model, and decisions below describe
+> the original implementation and are not maintained as the product changes.
+> See `../README.md` or `wt help -r` for the current interface.
+
 **Goal.** Make a fully working checkout of a large repo cheap enough to create that
 starting fresh work is never a reason to hesitate. One base clone per repo, kept at
 `origin/master`; all work in disposable trees that arrive with dependencies installed,
@@ -41,15 +45,12 @@ Each decision names the fact that forces it.
 
 **Settled: every repo is adopted in place, and `~/repos/wt/<repo>/base` is a symlink to
 the real checkout.** This holds for monorepo, helm, and toy-apps alike — helm has five
-worktrees already attached and its own Graphite stacks, and toy-apps has `planhub/.venv`
-whose console scripts hardcode their absolute path.
+worktrees already attached, and toy-apps has `planhub/.venv` whose console
+scripts hardcode their absolute path.
 
 The layout you sketched puts base at `~/repos/wt/<repo>/base`. Getting there by
 cloning fresh, or by moving the existing checkout, both break things:
 
-- **A fresh clone splits Graphite.** Graphite keeps its stack database in the clone's
-  git dir (`.git/.graphite_metadata.db`, `.graphite_repo_config`). A second clone means
-  trees created by `wt` cannot see or stack on branches in your existing checkout.
 - **Moving the checkout breaks absolute paths.** `git worktree repair` would fix the 24
   linked worktrees' pointers, but every `.venv` console script and every
   `node_modules/.bin` shim in the moved tree hardcodes the old path.

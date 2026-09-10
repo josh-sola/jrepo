@@ -66,10 +66,6 @@ pub fn provision_spare(root: &Path, config_path: &Path, repo_name: &str) -> Resu
             step_total: None,
             log_path: Some(log_path.clone()),
             provision_pid: Some(std::process::id()),
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
             spare: true,
         });
         Ok(true)
@@ -128,28 +124,8 @@ pub struct Claimed {
     pub needs_steps: bool,
 }
 
-/// Turns a ready spare into `plan`'s tree, then tracks it with Graphite if
-/// it has a parent.
 pub fn claim(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
-    let claimed = claim_locked(root, plan)?;
-
-    // A spare has no branch, so it never went through the cold path's `gt
-    // track`; a claimed spare with a parent needs that same call or it
-    // silently drops out of the stack it was meant to join. Run after the
-    // lock is released: `gt` is an external process that can be slow or
-    // hang, and holding the store flock across it would block every other
-    // `wt` invocation for as long as it runs.
-    if let (Some(claimed), Some(parent)) = (&claimed, &plan.parent_branch) {
-        let store = store::load(root)?;
-        let ctx = tree::RepoCtx {
-            name: &plan.repo_name,
-            repo: &plan.repo,
-            config: &plan.repo_config,
-        };
-        tree::track_with_graphite(&store, &ctx, &plan.name, &claimed.path, parent, "gt");
-    }
-
-    Ok(claimed)
+    claim_locked(root, plan)
 }
 
 /// This runs entirely inside one `store::with_store_lock`. That is what
@@ -186,8 +162,6 @@ fn claim_locked(root: &Path, plan: &TreePlan) -> Result<Option<Claimed>> {
             t.spare = false;
             t.name = plan.name.clone();
             t.branch = plan.branch.clone();
-            t.parent_branch = plan.parent_branch.clone();
-            t.parent_revision = plan.parent_revision.clone();
             t.created = Utc::now();
             t.state = if needs_steps {
                 TreeState::Provisioning
@@ -282,8 +256,8 @@ fn reap_dead_spares(root: &Path, repo_name: &str) -> Result<()> {
 
 /// Removes a spare directly by uuid. Deliberately not `tree::rm_tree`:
 /// `store::resolve` filters spares out at every tier, and an unclaimed
-/// spare has no branch and no Graphite history for that function's guards
-/// to check in the first place. Only `top_up`'s own reaping and `wt repo spare
+/// spare has no branch for that function's safeguards to check in the first
+/// place. Only `top_up`'s own reaping and `wt repo spare
 /// drop` ever call this, always with an id already known to be a spare's.
 fn remove_spare(root: &Path, id: Uuid) -> Result<()> {
     let store = store::load(root)?;
