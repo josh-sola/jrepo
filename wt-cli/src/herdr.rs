@@ -23,9 +23,7 @@ fn herdr_bin() -> String {
     env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 
-/// Runs one `herdr` CLI call and returns its `.result`. herdr's own CLI
-/// errors are JSON on stderr with exit 1; that text is folded into the error
-/// here rather than the raw JSON, since it already reads as a sentence.
+/// Runs one `herdr` CLI call and returns its `.result`.
 fn run_herdr(args: &[String]) -> Result<Value> {
     let bin = herdr_bin();
     let output = Command::new(&bin)
@@ -40,11 +38,12 @@ fn run_herdr(args: &[String]) -> Result<Value> {
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let text = herdr_error_text(&stderr);
+        if text.is_empty() {
             bail!("`{bin} {}` failed: {}", args.join(" "), output.status);
         }
-        bail!("`{bin} {}` failed: {stderr}", args.join(" "));
+        bail!("`{bin} {}` failed: {text}", args.join(" "));
     }
 
     let value: Value = serde_json::from_slice(&output.stdout)
@@ -55,28 +54,76 @@ fn run_herdr(args: &[String]) -> Result<Value> {
         .ok_or_else(|| anyhow!("`{bin} {}` printed no 'result' field", args.join(" ")))
 }
 
+/// herdr's CLI errors are JSON on stderr and are decoded to `code: message`;
+/// anything else is kept as plain text.
+fn herdr_error_text(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|v| {
+            let error = v.get("error")?;
+            let code = error.get("code")?.as_str()?;
+            let message = error.get("message")?.as_str()?;
+            Some(format!("{code}: {message}"))
+        })
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
 /// `scratch` selects the workspace-by-label lookup a `@label` launch needs,
 /// since it has no tree path to match against.
-pub fn place(cwd: &Path, label: &str, scratch: bool, inner_argv: &[String]) -> Result<()> {
+pub fn place(
+    cwd: &Path,
+    base: &Path,
+    repo: &str,
+    label: &str,
+    scratch: bool,
+    inner_argv: &[String],
+) -> Result<()> {
     let cwd = cwd.to_string_lossy().to_string();
     let pane_id = if scratch {
         place_scratch(&cwd, label)?
     } else {
-        place_tree(&cwd, label)?
+        place_tree(&cwd, &base.to_string_lossy(), repo, label)?
     };
     run_herdr(&pane_rename_argv(&pane_id, label))?;
     run_herdr(&pane_run_argv(&pane_id, &shell_join(inner_argv)))?;
     Ok(())
 }
 
-fn place_tree(cwd: &str, label: &str) -> Result<String> {
+/// herdr rejects `worktree open` unless it is issued from the repo's parent
+/// workspace (`linked_worktree_source`), so that workspace is found or
+/// created first; a rejected open still falls back to a plain workspace so
+/// the user is never left with nothing.
+fn place_tree(cwd: &str, base: &str, repo: &str, label: &str) -> Result<String> {
     let list = run_herdr(&worktree_list_argv(cwd))?;
     let worktrees = array_field(&list, "worktrees")?;
-    match workspace_for_tree_path(worktrees, cwd) {
-        Some(workspace_id) => {
-            pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?)
+    if let Some(workspace_id) = workspace_for_tree_path(worktrees, cwd) {
+        return pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?);
+    }
+
+    let workspace_list = run_herdr(&workspace_list_argv())?;
+    let workspaces = array_field(&workspace_list, "workspaces")?;
+    if let Some(workspace_id) = workspace_for_checkout_path(workspaces, cwd)
+        .or_else(|| workspace_for_label(workspaces, label))
+    {
+        return pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?);
+    }
+
+    let parent_workspace_id = match parent_workspace_id(worktrees) {
+        Some(id) => id,
+        None => {
+            let parent = parent_path(worktrees).unwrap_or_else(|| base.to_string());
+            let created = run_herdr(&parent_workspace_create_argv(&parent, repo))?;
+            workspace_id_from(&created)?
         }
-        None => pane_id_from(&run_herdr(&worktree_open_argv(cwd, label))?),
+    };
+
+    match run_herdr(&worktree_open_argv(&parent_workspace_id, cwd, label)) {
+        Ok(result) => pane_id_from(&result),
+        Err(e) => {
+            eprintln!("herdr worktree open failed ({e}); opening a plain workspace instead");
+            pane_id_from(&run_herdr(&workspace_create_argv(cwd, label))?)
+        }
     }
 }
 
@@ -108,6 +155,37 @@ fn pane_id_from(result: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("herdr response missing .root_pane.pane_id: {result}"))
 }
 
+fn workspace_id_from(result: &Value) -> Result<String> {
+    result
+        .get("workspace")
+        .and_then(|w| w.get("workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("herdr response missing .workspace.workspace_id: {result}"))
+}
+
+/// The parent checkout is the entry with `is_linked_worktree: false`; a
+/// null id means one must be created.
+fn parent_workspace_id(worktrees: &[Value]) -> Option<String> {
+    worktrees.iter().find_map(|w| {
+        if w.get("is_linked_worktree").and_then(Value::as_bool) != Some(false) {
+            return None;
+        }
+        w.get("open_workspace_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn parent_path(worktrees: &[Value]) -> Option<String> {
+    worktrees.iter().find_map(|w| {
+        if w.get("is_linked_worktree").and_then(Value::as_bool) != Some(false) {
+            return None;
+        }
+        w.get("path").and_then(Value::as_str).map(str::to_string)
+    })
+}
+
 /// `herdr worktree list`'s `worktrees[].path` matched exactly against the
 /// canonical tree path decides reuse vs a new workspace; `open_workspace_id`
 /// is null both when nothing matched and when the worktree exists but has no
@@ -118,6 +196,23 @@ fn workspace_for_tree_path(worktrees: &[Value], canonical_path: &str) -> Option<
             return None;
         }
         w.get("open_workspace_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// A workspace made by the fallback never appears in `worktree list`, so it
+/// is matched by `.worktree.checkout_path` instead.
+fn workspace_for_checkout_path(workspaces: &[Value], canonical_path: &str) -> Option<String> {
+    workspaces.iter().find_map(|w| {
+        let checkout_path = w
+            .get("worktree")
+            .and_then(|wt| wt.get("checkout_path"))
+            .and_then(Value::as_str);
+        if checkout_path != Some(canonical_path) {
+            return None;
+        }
+        w.get("workspace_id")
             .and_then(Value::as_str)
             .map(str::to_string)
     })
@@ -154,12 +249,14 @@ fn workspace_list_argv() -> Vec<String> {
     vec!["workspace".to_string(), "list".to_string()]
 }
 
-fn worktree_open_argv(cwd: &str, label: &str) -> Vec<String> {
+fn worktree_open_argv(parent_workspace_id: &str, path: &str, label: &str) -> Vec<String> {
     vec![
         "worktree".to_string(),
         "open".to_string(),
+        "--workspace".to_string(),
+        parent_workspace_id.to_string(),
         "--path".to_string(),
-        cwd.to_string(),
+        path.to_string(),
         "--label".to_string(),
         label.to_string(),
         "--focus".to_string(),
@@ -175,6 +272,20 @@ fn workspace_create_argv(cwd: &str, label: &str) -> Vec<String> {
         "--label".to_string(),
         label.to_string(),
         "--focus".to_string(),
+    ]
+}
+
+/// `--no-focus` because the parent workspace exists only so the open has
+/// somewhere to attach.
+fn parent_workspace_create_argv(cwd: &str, repo: &str) -> Vec<String> {
+    vec![
+        "workspace".to_string(),
+        "create".to_string(),
+        "--cwd".to_string(),
+        cwd.to_string(),
+        "--label".to_string(),
+        repo.to_string(),
+        "--no-focus".to_string(),
     ]
 }
 
@@ -315,16 +426,115 @@ mod tests {
     #[test]
     fn worktree_open_argv_matches_the_cli() {
         assert_eq!(
-            worktree_open_argv("/repos/a", "fix login"),
+            worktree_open_argv("w9", "/repos/a", "fix login"),
             vec![
                 "worktree",
                 "open",
+                "--workspace",
+                "w9",
                 "--path",
                 "/repos/a",
                 "--label",
                 "fix login",
                 "--focus"
             ]
+        );
+    }
+
+    #[test]
+    fn parent_workspace_create_argv_matches_the_cli() {
+        assert_eq!(
+            parent_workspace_create_argv("/repos/base", "myrepo"),
+            vec![
+                "workspace",
+                "create",
+                "--cwd",
+                "/repos/base",
+                "--label",
+                "myrepo",
+                "--no-focus"
+            ]
+        );
+    }
+
+    #[test]
+    fn parent_workspace_id_matches_the_non_linked_entry() {
+        let worktrees = vec![
+            json!({"path": "/repos/a", "is_linked_worktree": true, "open_workspace_id": "w1"}),
+            json!({"path": "/repos/base", "is_linked_worktree": false, "open_workspace_id": "w9"}),
+        ];
+        assert_eq!(parent_workspace_id(&worktrees), Some("w9".to_string()));
+    }
+
+    #[test]
+    fn parent_workspace_id_is_none_when_the_parent_has_no_open_workspace() {
+        let worktrees = vec![
+            json!({"path": "/repos/base", "is_linked_worktree": false, "open_workspace_id": null}),
+        ];
+        assert_eq!(parent_workspace_id(&worktrees), None);
+        assert_eq!(parent_workspace_id(&[]), None);
+    }
+
+    #[test]
+    fn parent_path_matches_the_non_linked_entry() {
+        let worktrees = vec![
+            json!({"path": "/repos/a", "is_linked_worktree": true}),
+            json!({"path": "/repos/base", "is_linked_worktree": false}),
+        ];
+        assert_eq!(parent_path(&worktrees), Some("/repos/base".to_string()));
+        assert_eq!(parent_path(&[]), None);
+    }
+
+    #[test]
+    fn workspace_id_from_reads_the_nested_field() {
+        let result = json!({"workspace": {"workspace_id": "w9"}});
+        assert_eq!(workspace_id_from(&result).unwrap(), "w9");
+    }
+
+    #[test]
+    fn workspace_id_from_errors_when_missing() {
+        let result = json!({"workspace": {}});
+        assert!(workspace_id_from(&result).is_err());
+    }
+
+    #[test]
+    fn workspace_for_checkout_path_matches_exact_path() {
+        let workspaces = vec![
+            json!({"workspace_id": "w1", "worktree": {"checkout_path": "/repos/a"}}),
+            json!({"workspace_id": "w2", "worktree": {"checkout_path": "/repos/b"}}),
+        ];
+        assert_eq!(
+            workspace_for_checkout_path(&workspaces, "/repos/a"),
+            Some("w1".to_string())
+        );
+        assert_eq!(
+            workspace_for_checkout_path(&workspaces, "/repos/nope"),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_for_checkout_path_is_none_without_a_worktree_field() {
+        let workspaces = vec![json!({"workspace_id": "w1", "label": "@scratch"})];
+        assert_eq!(workspace_for_checkout_path(&workspaces, "/repos/a"), None);
+    }
+
+    #[test]
+    fn herdr_error_text_decodes_a_json_error() {
+        let stderr =
+            r#"{"id":"2","error":{"code":"already_open","message":"worktree is already open"}}"#;
+        assert_eq!(
+            herdr_error_text(stderr),
+            "already_open: worktree is already open"
+        );
+    }
+
+    #[test]
+    fn herdr_error_text_falls_back_to_raw_trimmed_stderr() {
+        assert_eq!(herdr_error_text("  boom: it broke  \n"), "boom: it broke");
+        assert_eq!(
+            herdr_error_text(r#"{"not":"an error shape"}"#),
+            r#"{"not":"an error shape"}"#
         );
     }
 
