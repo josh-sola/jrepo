@@ -501,13 +501,6 @@ fn write_fake_ps(bin_dir: &Path) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn write_fake_fzf(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("fzf");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-
 fn run_wt_with_path_and_tmux_pane(
     root: &Path,
     cwd: &Path,
@@ -544,6 +537,197 @@ fn run_wt_with_path_and_tmux_pane(
         command.env("TMUX_PANE", pane);
     }
     command.output().expect("spawn wt")
+}
+
+/// Like `run_wt_with_path`, but with `HERDR_ENV=1` set. `HERDR_BIN_PATH` is
+/// pinned to `bin_dir`'s fake `herdr`: this suite can itself run inside a
+/// real herdr session, which sets `HERDR_BIN_PATH` in its own environment,
+/// and that must never leak into a test that expects to talk to a fake.
+fn run_wt_with_path_and_herdr_env(
+    root: &Path,
+    cwd: &Path,
+    bin_dir: &Path,
+    args: &[&str],
+) -> Output {
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.to_path_buf()).chain(
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+    Command::new(wt_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("WT_ROOT", root)
+        .env("WT_CONFIG", config_path_for(root))
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", hermetic_git_config())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_BIN_PATH", bin_dir.join("herdr"))
+        .env_remove("PLANTER_COLOR")
+        .env_remove("PLANTER_LABEL")
+        .env_remove("PLANTER_TAB_INDEX")
+        .env_remove("PLANTER_STATE_DIR")
+        .env_remove("CLAUDE_PLANTER_DIR")
+        .output()
+        .expect("spawn wt")
+}
+
+/// A fake `herdr` CLI for placement tests. Appends the space-joined argv of
+/// every invocation to `log`, one line per call. `existing` decides whether
+/// `worktree list`/`workspace list` report a workspace already open, which
+/// pushes `wt go` onto the tab-create branch instead of
+/// worktree-open/workspace-create; `worktree list` always reports the
+/// worktree itself, since it exists on disk regardless of whether a
+/// workspace is open for it. `fail` makes every call exit 1 with a message
+/// on stderr instead.
+fn write_fake_herdr(
+    bin_dir: &Path,
+    log: &Path,
+    match_path: &str,
+    match_label: &str,
+    existing: bool,
+    fail: bool,
+) {
+    let workspace_id = if existing { Some("w9") } else { None };
+
+    let worktree_list = serde_json::json!({
+        "id": "1",
+        "result": {
+            "type": "worktree_list",
+            "source": {
+                "repo_key": "k",
+                "repo_name": "r",
+                "repo_root": "/r",
+                "source_checkout_path": "/r"
+            },
+            "worktrees": [{
+                "path": match_path,
+                "is_bare": false,
+                "is_detached": false,
+                "is_prunable": false,
+                "is_linked_worktree": true,
+                "label": match_label,
+                "open_workspace_id": workspace_id
+            }]
+        }
+    })
+    .to_string();
+
+    let workspace_list = serde_json::json!({
+        "id": "1",
+        "result": {
+            "type": "workspace_list",
+            "workspaces": if existing {
+                serde_json::json!([{
+                    "workspace_id": workspace_id,
+                    "number": 1,
+                    "label": match_label,
+                    "focused": false,
+                    "pane_count": 1,
+                    "tab_count": 1,
+                    "active_tab_id": "w9:t1",
+                    "agent_status": "idle"
+                }])
+            } else {
+                serde_json::json!([])
+            }
+        }
+    })
+    .to_string();
+
+    let worktree_opened = serde_json::json!({
+        "id": "2",
+        "result": {
+            "type": "worktree_opened",
+            "workspace": {
+                "workspace_id": "w1", "number": 1, "label": match_label, "focused": true,
+                "pane_count": 1, "tab_count": 1, "active_tab_id": "w1:t1", "agent_status": "idle"
+            },
+            "tab": {
+                "tab_id": "w1:t1", "workspace_id": "w1", "number": 1, "label": match_label,
+                "focused": true, "pane_count": 1, "agent_status": "idle"
+            },
+            "root_pane": {
+                "pane_id": "w1:p1", "terminal_id": "term1", "workspace_id": "w1",
+                "tab_id": "w1:t1", "focused": true, "agent_status": "idle", "revision": 1
+            },
+            "worktree": {
+                "path": match_path, "is_bare": false, "is_detached": false,
+                "is_prunable": false, "is_linked_worktree": true, "label": match_label
+            },
+            "already_open": false
+        }
+    })
+    .to_string();
+
+    let workspace_created = serde_json::json!({
+        "id": "2",
+        "result": {
+            "type": "workspace_created",
+            "workspace": {
+                "workspace_id": "w1", "number": 1, "label": match_label, "focused": true,
+                "pane_count": 1, "tab_count": 1, "active_tab_id": "w1:t1", "agent_status": "idle"
+            },
+            "tab": {
+                "tab_id": "w1:t1", "workspace_id": "w1", "number": 1, "label": match_label,
+                "focused": true, "pane_count": 1, "agent_status": "idle"
+            },
+            "root_pane": {
+                "pane_id": "w1:p1", "terminal_id": "term1", "workspace_id": "w1",
+                "tab_id": "w1:t1", "focused": true, "agent_status": "idle", "revision": 1
+            }
+        }
+    })
+    .to_string();
+
+    let tab_created = serde_json::json!({
+        "id": "2",
+        "result": {
+            "type": "tab_created",
+            "tab": {
+                "tab_id": "w9:t2", "workspace_id": "w9", "number": 2, "label": match_label,
+                "focused": true, "pane_count": 1, "agent_status": "idle"
+            },
+            "root_pane": {
+                "pane_id": "w9:p2", "terminal_id": "term2", "workspace_id": "w9",
+                "tab_id": "w9:t2", "focused": true, "agent_status": "idle", "revision": 1
+            }
+        }
+    })
+    .to_string();
+
+    let pane_ok =
+        serde_json::json!({"id": "3", "result": {"type": "pane_info", "pane": {"pane_id": "ignored"}}})
+            .to_string();
+
+    let fail_block = if fail {
+        "printf 'boom: herdr placement failed\\n' >&2\nexit 1\n".to_string()
+    } else {
+        String::new()
+    };
+
+    let path = bin_dir.join("herdr");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{fail_block}case \"$1 $2\" in\n  \
+             \"worktree list\") printf '%s\\n' '{worktree_list}' ;;\n  \
+             \"workspace list\") printf '%s\\n' '{workspace_list}' ;;\n  \
+             \"worktree open\") printf '%s\\n' '{worktree_opened}' ;;\n  \
+             \"workspace create\") printf '%s\\n' '{workspace_created}' ;;\n  \
+             \"tab create\") printf '%s\\n' '{tab_created}' ;;\n  \
+             \"pane rename\") printf '%s\\n' '{pane_ok}' ;;\n  \
+             \"pane run\") printf '%s\\n' '{pane_ok}' ;;\n  \
+             *) exit 2 ;;\nesac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn write_fake_bridge(bin_dir: &Path, record: &Path, readiness: &str) {
@@ -831,7 +1015,6 @@ fn recursive_help_shows_the_plain_git_hierarchy() {
         "__spare",
         "__session-context",
         "__window-index",
-        "__launch-preview",
     ] {
         assert!(
             !stdout.contains(hidden),
@@ -4089,205 +4272,30 @@ fn tree_env_overwrites_a_stale_env_file() {
 }
 
 #[test]
-fn go_with_no_tree_and_no_trees_fails_before_spawning_the_picker() {
-    let tmp = unique_dir("launch-picker-empty");
-    let root = tmp.join("wt-root");
-    let marker = tmp.join("fzf-ran");
-
-    let fzf = write_fake_fzf(&tmp, &format!("touch '{}'", marker.display()));
-
-    let out = Command::new(wt_bin())
-        .args(["go"])
-        .env("WT_ROOT", &root)
-        .env("WT_CONFIG", config_path_for(&root))
-        .env("WT_FZF", &fzf)
-        .output()
-        .expect("spawn wt");
-
-    assert!(!out.status.success(), "expected go to fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("no worktrees registered"),
-        "expected a no-worktrees message, got: {stderr}"
-    );
-    assert!(
-        !marker.exists(),
-        "the picker must not run when there is nothing to pick from"
-    );
-}
-
-#[test]
-fn go_with_no_tree_offers_the_cwd_repo_first_then_newest_first() {
-    let tmp = unique_dir("launch-picker-order");
+fn go_with_no_tree_and_non_tty_stdio_fails_without_spawning_anything() {
+    let tmp = unique_dir("launch-picker-no-tty");
     let base = fixture_repo(&tmp);
     let root = tmp.join("wt-root");
 
     init_repo(&root, "myrepo", &base);
     assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "older tree"]),
-        "new older",
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", "some tree"]),
+        "new",
     );
-    assert_success(
-        &run_wt(&root, &["tree", "wait", "older tree"]),
-        "wait older",
-    );
-    assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "newer tree"]),
-        "new newer",
-    );
-    assert_success(
-        &run_wt(&root, &["tree", "wait", "newer tree"]),
-        "wait newer",
-    );
+    assert_success(&run_wt(&root, &["tree", "wait", "some tree"]), "wait");
 
-    let ls = run_wt(&root, &["tree", "ls", "--json"]);
-    assert_success(&ls, "ls --json");
-    let entries: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
-    let entries = entries.as_array().unwrap();
-    let id_of = |name: &str| -> String {
-        entries
-            .iter()
-            .find(|e| e["name"] == name)
-            .unwrap_or_else(|| panic!("no entry named {name}"))["id"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    let older_id = id_of("older tree");
-    let newer_id = id_of("newer tree");
-
-    let capture = tmp.join("fzf-stdin.txt");
-    let script = format!(
-        "i=0\n\
-         while IFS= read -r line; do\n\
-         printf '%s\\n' \"$line\" >> '{}'\n\
-         i=$((i + 1))\n\
-         if [ \"$i\" -eq 1 ]; then first=\"$line\"; fi\n\
-         done\n\
-         printf '%s\\n' \"$first\"",
-        capture.display()
-    );
-    let fzf = write_fake_fzf(&tmp, &script);
-    let bin_dir = tmp.join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'yellow\\n'");
-    let path = std::env::join_paths([&bin_dir, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
-
-    let out = Command::new(wt_bin())
-        .args(["go"])
-        .env("WT_ROOT", &root)
-        .env("WT_CONFIG", config_path_for(&root))
-        .env("WT_FZF", &fzf)
-        .env("PATH", path)
-        .output()
-        .expect("spawn wt");
-
+    // `run_wt` already pipes stdio rather than attaching a pty, so this is
+    // the same non-tty environment `wt go` sees under any test harness.
+    let out = run_wt(&root, &["go"]);
     assert!(
         !out.status.success(),
-        "expected go past the picker to fail on the missing Pi binary"
+        "expected go to fail without a terminal"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("not on PATH"),
-        "expected the picked tree to reach the Pi exec, got: {stderr}"
+        stderr.contains("no worktree selector given and no terminal to pick one from"),
+        "expected the no-terminal message, got: {stderr}"
     );
-
-    let captured = std::fs::read_to_string(&capture).unwrap();
-    let captured_lines: Vec<&str> = captured.lines().collect();
-    assert_eq!(
-        captured_lines.len(),
-        2,
-        "expected both trees on the picker's stdin: {captured}"
-    );
-    assert!(
-        captured_lines[0].starts_with(&format!("{newer_id}\t")),
-        "expected the newer tree first, got: {captured}"
-    );
-    assert!(
-        captured_lines[1].starts_with(&format!("{older_id}\t")),
-        "expected the older tree second, got: {captured}"
-    );
-}
-
-#[test]
-fn go_with_no_tree_and_a_cancelled_picker_exits_cleanly() {
-    let tmp = unique_dir("launch-picker-cancel");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-
-    init_repo(&root, "myrepo", &base);
-    assert_success(
-        &run_wt(&root, &["tree", "new", "myrepo", "--name", "cancel target"]),
-        "new",
-    );
-    assert_success(&run_wt(&root, &["tree", "wait", "cancel target"]), "wait");
-
-    let fzf = write_fake_fzf(&tmp, "exit 130");
-
-    let out = Command::new(wt_bin())
-        .args(["go"])
-        .env("WT_ROOT", &root)
-        .env("WT_CONFIG", config_path_for(&root))
-        .env("WT_FZF", &fzf)
-        .output()
-        .expect("spawn wt");
-
-    assert!(
-        out.status.success(),
-        "expected a cancelled pick to exit cleanly: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        out.stderr.is_empty(),
-        "expected no error output, got: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn go_branch_with_no_tree_errors_about_needing_a_name() {
-    let tmp = unique_dir("launch-picker-branch");
-    let root = tmp.join("wt-root");
-
-    let out = run_wt(&root, &["go", "--branch", "foo"]);
-    assert!(!out.status.success(), "expected go to fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("--branch") && stderr.contains("tree name"),
-        "expected a message about needing a tree name, got: {stderr}"
-    );
-}
-
-#[test]
-fn launch_preview_prints_a_provisioned_trees_details() {
-    let tmp = unique_dir("launch-preview");
-    let base = fixture_repo(&tmp);
-    let root = tmp.join("wt-root");
-
-    init_repo(&root, "myrepo", &base);
-    assert_success(
-        &run_wt(
-            &root,
-            &["tree", "new", "myrepo", "--name", "preview target"],
-        ),
-        "new",
-    );
-    assert_success(&run_wt(&root, &["tree", "wait", "preview target"]), "wait");
-
-    let path_out = run_wt(&root, &["tree", "path", "preview target"]);
-    assert_success(&path_out, "path");
-    let tree_path = String::from_utf8_lossy(&path_out.stdout).trim().to_string();
-
-    let out = run_wt(&root, &["__launch-preview", "preview target"]);
-    assert_success(&out, "__launch-preview");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("preview target"), "missing name: {stdout}");
-    assert!(stdout.contains("myrepo"), "missing repo: {stdout}");
-    assert!(
-        stdout.contains("josh/preview-target"),
-        "missing branch: {stdout}"
-    );
-    assert!(stdout.contains(&tree_path), "missing path: {stdout}");
 }
 
 #[test]
@@ -5028,5 +5036,256 @@ fn fixture_template_rebuilds_after_files_are_pruned_from_it() {
         head.len(),
         40,
         "rebuilt template's work dir has no resolvable HEAD: {head:?}"
+    );
+}
+
+// --- herdr placement ---
+
+fn herdr_config() -> &'static str {
+    "version 1\n\nfeatures {\n    herdr {\n    }\n}\n"
+}
+
+/// Registers `myrepo`, creates a ready tree named `name`, and returns
+/// `(root, base, tree_path, tree_id)` for a herdr placement test.
+fn herdr_test_tree(tmp: &Path, name: &str) -> (PathBuf, PathBuf, String, String) {
+    let base = fixture_repo(tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", name]),
+        "tree new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", name]), "wait");
+
+    let rows = run_wt(&root, &["tree", "ls", "--repo", "myrepo", "--json"]);
+    assert_success(&rows, "tree ls");
+    let rows: serde_json::Value = serde_json::from_slice(&rows.stdout).unwrap();
+    let tree = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == name)
+        .expect("tree not registered")
+        .clone();
+    let tree_path = tree["path"].as_str().unwrap().to_string();
+    let tree_id = tree["id"].as_str().unwrap().to_string();
+    (root, base, tree_path, tree_id)
+}
+
+#[test]
+fn herdr_places_by_opening_a_worktree_when_no_workspace_is_open() {
+    let tmp = unique_dir("herdr-open-worktree");
+    let (root, base, tree_path, tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, false);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "go",
+            "herdr target",
+            "--repo",
+            "myrepo",
+            "--claude",
+            "--",
+            "--model",
+            "opus",
+        ],
+    );
+    assert_success(&out, "herdr placement");
+
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = log_text.lines().collect();
+    let expected_inner = format!(
+        "'{}' 'go' '{tree_id}' '--here' '--claude' '--' '--model' 'opus'",
+        wt_bin().display()
+    );
+    assert_eq!(
+        lines,
+        vec![
+            format!("worktree list --cwd {tree_path}"),
+            format!("worktree open --path {tree_path} --label herdr target --focus"),
+            "pane rename w1:p1 herdr target".to_string(),
+            format!("pane run w1:p1 {expected_inner}"),
+        ],
+        "herdr argv transcript was:\n{log_text}"
+    );
+
+    assert!(
+        !agent_record.exists(),
+        "the placing run must not exec claude itself"
+    );
+}
+
+#[test]
+fn herdr_places_by_creating_a_tab_when_a_workspace_is_already_open() {
+    let tmp = unique_dir("herdr-tab-create");
+    let (root, base, tree_path, tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", true, false);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(&out, "herdr placement");
+
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = log_text.lines().collect();
+    let expected_inner = format!(
+        "'{}' 'go' '{tree_id}' '--here' '--claude'",
+        wt_bin().display()
+    );
+    assert_eq!(
+        lines,
+        vec![
+            format!("worktree list --cwd {tree_path}"),
+            format!("tab create --workspace w9 --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w9:p2 herdr target".to_string(),
+            format!("pane run w9:p2 {expected_inner}"),
+        ],
+        "herdr argv transcript was:\n{log_text}"
+    );
+}
+
+#[test]
+fn herdr_env_without_a_config_block_launches_normally() {
+    let tmp = unique_dir("herdr-no-config-block");
+    let (root, base, _tree_path, _tree_id) = herdr_test_tree(&tmp, "no herdr block");
+    std::fs::write(config_path_for(&root), "version 1\n").unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, "/unused", "unused", false, false);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "no herdr block", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(&out, "normal launch without a herdr config block");
+
+    assert!(
+        agent_record.exists(),
+        "with no 'herdr' feature block, wt go must exec the agent directly"
+    );
+    assert!(
+        !log.exists(),
+        "herdr must never be called without a 'herdr' feature block"
+    );
+}
+
+#[test]
+fn go_here_inside_herdr_launches_normally() {
+    let tmp = unique_dir("herdr-here-flag");
+    let (root, base, _tree_path, _tree_id) = herdr_test_tree(&tmp, "here target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, "/unused", "unused", false, false);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "go",
+            "here target",
+            "--repo",
+            "myrepo",
+            "--claude",
+            "--here",
+        ],
+    );
+    assert_success(&out, "normal launch with --here");
+
+    assert!(
+        agent_record.exists(),
+        "--here must exec the agent directly even with HERDR_ENV set"
+    );
+    assert!(!log.exists(), "--here must never call herdr");
+}
+
+#[test]
+fn herdr_placement_never_resolves_a_planter_color() {
+    let tmp = unique_dir("herdr-skips-planter");
+    let (root, base, tree_path, _tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(
+        config_path_for(&root),
+        "version 1\n\nfeatures {\n    planter {\n        get-position { builtin \"tmux-window\" }\n    }\n    herdr {\n    }\n}\n",
+    )
+    .unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    let planter_record = tmp.join("resolver-record");
+    write_fake_planter(&bin_dir, &planter_record, "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, false);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(&out, "herdr placement with planter also enabled");
+
+    assert!(
+        !planter_record.exists(),
+        "the placing run must not run the planter color preflight"
+    );
+    assert!(
+        !agent_record.exists(),
+        "the placing run must not exec claude itself"
+    );
+}
+
+#[test]
+fn herdr_nonzero_exit_fails_wt_with_its_stderr() {
+    let tmp = unique_dir("herdr-nonzero-exit");
+    let (root, base, tree_path, _tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, true);
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert!(
+        !out.status.success(),
+        "wt must fail when herdr exits nonzero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("boom: herdr placement failed"),
+        "herdr's stderr must surface in wt's error: {stderr}"
     );
 }

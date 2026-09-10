@@ -138,6 +138,23 @@ else
 fi
 echo "    NOT loaded. To activate: launchctl bootstrap gui/$(id -u) ${LAUNCHAGENT_PLIST}"
 
+echo "==> Linking the wt herdr plugin"
+if command -v herdr >/dev/null 2>&1; then
+  PLUGIN_DIR="${REPO_ROOT}/herdr-plugin"
+  already_linked="$(herdr plugin list --json 2>/dev/null \
+    | jq -r --arg root "${PLUGIN_DIR}" '[.result.plugins[]? | select(.plugin_root == $root)] | length' \
+    2>/dev/null || echo 0)"
+  if [[ "${already_linked}" -gt 0 ]]; then
+    echo "    already linked, no-op"
+  elif herdr plugin link "${PLUGIN_DIR}" >/dev/null 2>&1; then
+    echo "    linked ${PLUGIN_DIR}"
+  else
+    echo "    WARNING: 'herdr plugin link' failed (already linked elsewhere, or herdr rejected it) — continuing"
+  fi
+else
+  echo "    herdr not on PATH, skipping"
+fi
+
 echo
 echo "==> Verification"
 echo "    wt on PATH: ${WT_BIN}"
