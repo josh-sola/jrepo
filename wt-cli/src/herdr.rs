@@ -14,7 +14,6 @@ use crate::agent::Agent;
 use crate::config::Config;
 
 const CODE_TAB_LABEL: &str = "code";
-const CODE_TAB_COMMAND: &[&str] = &["emacsclient", "-t"];
 
 /// `--here` also stops a placed run from placing again, since the placed
 /// command always includes it.
@@ -144,8 +143,17 @@ fn code_tab_then_agent_pane(created: &Value, cwd: &str, label: &str) -> Result<S
     let workspace_id = workspace_id_from(created)?;
     run_herdr(&tab_rename_argv(&tab_id, CODE_TAB_LABEL))?;
     run_herdr(&pane_rename_argv(&root_pane_id, CODE_TAB_LABEL))?;
-    run_herdr(&pane_run_argv(&root_pane_id, &shell_join(CODE_TAB_COMMAND)))?;
+    run_herdr(&pane_run_argv(
+        &root_pane_id,
+        &shell_join(&code_tab_command(cwd)),
+    ))?;
     pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?)
+}
+
+/// The tree path is passed as the file to visit because `emacsclient -t`
+/// otherwise opens in the daemon's own directory, not the pane's.
+fn code_tab_command(cwd: &str) -> Vec<String> {
+    vec!["emacsclient".to_string(), "-t".to_string(), cwd.to_string()]
 }
 
 fn place_scratch(cwd: &str, label: &str) -> Result<String> {
@@ -574,6 +582,14 @@ mod tests {
         assert_eq!(
             herdr_error_text(r#"{"not":"an error shape"}"#),
             r#"{"not":"an error shape"}"#
+        );
+    }
+
+    #[test]
+    fn code_tab_command_visits_the_tree() {
+        assert_eq!(
+            code_tab_command("/repos/a"),
+            vec!["emacsclient", "-t", "/repos/a"]
         );
     }
 
