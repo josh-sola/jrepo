@@ -111,8 +111,23 @@ impl State {
         self.filtered.get(self.selected).map(|&i| &self.rows[i])
     }
 
+    /// A resolved agent word takes effect immediately, same as a hotkey; a
+    /// resolved repo word only narrows this list, since committing it is
+    /// deferred to submit (a launch, or the new-tree form).
     fn recompute_filter(&mut self) {
-        self.filtered = matching_rows(&self.rows, &self.filter);
+        let parsed = parse_filter(&self.filter, &self.repos);
+        if let Some(agent) = parsed.agent {
+            self.agent = agent;
+        }
+        self.filtered = matching_rows(&self.rows, &parsed.query)
+            .into_iter()
+            .filter(|&i| {
+                parsed
+                    .repo
+                    .as_deref()
+                    .is_none_or(|r| self.rows[i].repo == r)
+            })
+            .collect();
         self.selected = 0;
     }
 
@@ -241,6 +256,64 @@ pub fn split_args(input: &str) -> Vec<String> {
     args
 }
 
+/// Shorthand pulled out of the filter text. `query` is what actually gets
+/// fuzzy-matched; a resolved `repo` or `agent` is a trailing word that
+/// unambiguously named one instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFilter {
+    pub query: String,
+    pub repo: Option<String>,
+    pub agent: Option<Agent>,
+}
+
+const AGENT_WORDS: [(&str, Agent); 3] = [
+    ("pi", Agent::Pi),
+    ("claude", Agent::Claude),
+    ("codex", Agent::Codex),
+];
+
+/// A word resolves only if it's a case-insensitive prefix of exactly one
+/// candidate; `c` for instance matches both `claude` and `codex` and so
+/// resolves neither.
+fn unique_prefix<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<usize> {
+    let word = word.to_lowercase();
+    let mut found = None;
+    for (index, name) in candidates.enumerate() {
+        if name.to_lowercase().starts_with(&word) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
+}
+
+/// The first word is always the name query. Every later word tries an agent
+/// prefix, then a repo prefix, and falls back into the query when neither
+/// resolves uniquely.
+pub fn parse_filter(filter: &str, repos: &[String]) -> ParsedFilter {
+    let mut words = filter.split_whitespace();
+    let mut query = words.next().unwrap_or("").to_string();
+    let mut repo = None;
+    let mut agent = None;
+
+    for word in words {
+        if let Some(i) = unique_prefix(word, AGENT_WORDS.iter().map(|(name, _)| *name)) {
+            agent = Some(AGENT_WORDS[i].1);
+            continue;
+        }
+        if let Some(i) = unique_prefix(word, repos.iter().map(String::as_str)) {
+            repo = Some(repos[i].clone());
+            continue;
+        }
+        query.push(' ');
+        query.push_str(word);
+    }
+
+    ParsedFilter { query, repo, agent }
+}
+
 fn join_args(args: &[String]) -> String {
     args.iter()
         .map(|a| {
@@ -268,6 +341,12 @@ pub fn reduce(state: &mut State, key: KeyEvent) -> Reaction {
     }
 }
 
+// Raw mode delivers Ctrl-C as a plain key event rather than SIGINT, so it
+// has to be handled explicitly to behave like the terminal default.
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+}
+
 fn agent_from_key(key: &KeyEvent) -> Option<Agent> {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
@@ -291,6 +370,9 @@ fn toggle_pi_claude(agent: Agent) -> Agent {
 }
 
 fn reduce_list(state: &mut State, key: KeyEvent) -> Reaction {
+    if is_ctrl_c(&key) {
+        return Reaction::Cancel;
+    }
     if let Some(agent) = agent_from_key(&key) {
         state.agent = agent;
         return Reaction::None;
@@ -349,10 +431,12 @@ fn field_mut(state: &mut State) -> &mut String {
 }
 
 fn submit_list(state: &mut State) -> Reaction {
+    let parsed = parse_filter(&state.filter, &state.repos);
+
     if is_direct_selector(&state.filter) {
         return Reaction::Submit(LaunchRequest {
-            selector: state.filter.clone(),
-            repo: state.repo.clone(),
+            selector: parsed.query,
+            repo: parsed.repo.or_else(|| state.repo.clone()),
             branch: None,
             onto: None,
             profile: state.profile_field(),
@@ -377,14 +461,15 @@ fn submit_list(state: &mut State) -> Reaction {
         return Reaction::None;
     }
 
-    let repo_idx = state
+    let repo_idx = parsed
         .repo
         .as_deref()
+        .or(state.repo.as_deref())
         .or(state.cwd_repo.as_deref())
         .and_then(|r| state.repos.iter().position(|x| x == r))
         .unwrap_or(0);
     state.mode = Mode::Form(NewTreeForm {
-        name: state.filter.clone(),
+        name: parsed.query,
         repo_idx,
         branch: state.seed_branch.clone().unwrap_or_default(),
         onto: state.seed_onto.clone().unwrap_or_default(),
@@ -394,6 +479,9 @@ fn submit_list(state: &mut State) -> Reaction {
 }
 
 fn reduce_form(state: &mut State, key: KeyEvent) -> Reaction {
+    if is_ctrl_c(&key) {
+        return Reaction::Cancel;
+    }
     if let Some(agent) = agent_from_key(&key) {
         state.agent = agent;
         return Reaction::None;
@@ -536,6 +624,15 @@ mod tests {
         )
     }
 
+    fn state_with_repos(rows: Vec<Row>, repos: Vec<&str>, cwd_repo: Option<&str>) -> State {
+        State::new(
+            rows,
+            repos.into_iter().map(String::from).collect(),
+            cwd_repo,
+            seed(),
+        )
+    }
+
     #[test]
     fn ordered_puts_cwd_repo_first_then_newest_within_each_group() {
         let home_old = tree_at("home", "home-old", "b1", 100);
@@ -598,6 +695,21 @@ mod tests {
                 state: "ready".to_string(),
                 age_secs: 0,
                 haystack: format!("mono {n} josh/{n}"),
+            })
+            .collect()
+    }
+
+    fn rows_in(repo_names: &[&str]) -> Vec<Row> {
+        repo_names
+            .iter()
+            .map(|repo| Row {
+                id: Uuid::now_v7(),
+                repo: repo.to_string(),
+                name: "feedback".to_string(),
+                branch: "pr-12/feedback".to_string(),
+                state: "ready".to_string(),
+                age_secs: 0,
+                haystack: format!("{repo} feedback pr-12/feedback"),
             })
             .collect()
     }
@@ -822,5 +934,134 @@ mod tests {
         );
         assert_eq!(split_args(""), Vec::<String>::new());
         assert_eq!(split_args("  a   b  "), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ctrl_c_cancels_from_the_list() {
+        let mut state = state_with(rows_for(&["a"]));
+        assert!(matches!(reduce(&mut state, ctrl('c')), Reaction::Cancel));
+    }
+
+    #[test]
+    fn ctrl_c_cancels_from_the_form() {
+        let mut state = state_with(rows_for(&["fix login"]));
+        for c in "brand new tree".chars() {
+            reduce(&mut state, key(KeyCode::Char(c)));
+        }
+        reduce(&mut state, key(KeyCode::Enter));
+        assert!(matches!(state.mode, Mode::Form(_)));
+        assert!(matches!(reduce(&mut state, ctrl('c')), Reaction::Cancel));
+    }
+
+    #[test]
+    fn parse_filter_single_word_is_just_the_query() {
+        let repos = vec!["monorepo".to_string()];
+        let parsed = parse_filter("fix", &repos);
+        assert_eq!(parsed.query, "fix");
+        assert_eq!(parsed.repo, None);
+        assert_eq!(parsed.agent, None);
+    }
+
+    #[test]
+    fn parse_filter_resolves_a_repo_by_unique_prefix() {
+        let repos = vec!["monorepo".to_string(), "other".to_string()];
+        let parsed = parse_filter("pr-12/feedback mono", &repos);
+        assert_eq!(parsed.query, "pr-12/feedback");
+        assert_eq!(parsed.repo.as_deref(), Some("monorepo"));
+        assert_eq!(parsed.agent, None);
+    }
+
+    #[test]
+    fn parse_filter_resolves_an_agent_by_unique_prefix() {
+        let repos = vec!["monorepo".to_string(), "other".to_string()];
+        let parsed = parse_filter("pr-12/feedback claude", &repos);
+        assert_eq!(parsed.query, "pr-12/feedback");
+        assert_eq!(parsed.repo, None);
+        assert_eq!(parsed.agent, Some(Agent::Claude));
+    }
+
+    #[test]
+    fn parse_filter_ambiguous_agent_prefix_stays_in_the_query() {
+        let repos = vec!["monorepo".to_string(), "other".to_string()];
+        let parsed = parse_filter("pr-12 c", &repos);
+        assert_eq!(parsed.query, "pr-12 c");
+        assert_eq!(parsed.agent, None);
+    }
+
+    #[test]
+    fn parse_filter_unknown_word_stays_in_the_query() {
+        let repos = vec!["monorepo".to_string(), "other".to_string()];
+        let parsed = parse_filter("pr-12 xyz", &repos);
+        assert_eq!(parsed.query, "pr-12 xyz");
+        assert_eq!(parsed.repo, None);
+        assert_eq!(parsed.agent, None);
+    }
+
+    #[test]
+    fn parse_filter_is_case_insensitive() {
+        let repos = vec!["monorepo".to_string(), "other".to_string()];
+        let parsed = parse_filter("pr-12 MONO CLAUDE", &repos);
+        assert_eq!(parsed.query, "pr-12");
+        assert_eq!(parsed.repo.as_deref(), Some("monorepo"));
+        assert_eq!(parsed.agent, Some(Agent::Claude));
+    }
+
+    #[test]
+    fn typing_a_repo_word_narrows_the_list_to_that_repo() {
+        let rows = rows_in(&["monorepo", "other"]);
+        let mut state = state_with_repos(rows, vec!["monorepo", "other"], Some("other"));
+        for c in "feedback mono".chars() {
+            reduce(&mut state, key(KeyCode::Char(c)));
+        }
+        assert_eq!(state.filtered.len(), 1);
+        assert_eq!(state.rows[state.filtered[0]].repo, "monorepo");
+    }
+
+    #[test]
+    fn filter_agent_word_sets_agent_live_until_a_hotkey_overrides_it() {
+        let mut state = state_with(rows_for(&["a"]));
+        for c in "fix claude".chars() {
+            reduce(&mut state, key(KeyCode::Char(c)));
+        }
+        assert_eq!(state.agent, Agent::Claude);
+
+        reduce(&mut state, ctrl('p'));
+        assert_eq!(state.agent, Agent::Pi);
+    }
+
+    #[test]
+    fn enter_with_no_match_opens_the_form_with_the_parsed_name_and_repo() {
+        let rows = rows_in(&["other"]);
+        let mut state = state_with_repos(rows, vec!["monorepo", "other"], Some("other"));
+        for c in "brand new tree mono".chars() {
+            reduce(&mut state, key(KeyCode::Char(c)));
+        }
+        reduce(&mut state, key(KeyCode::Enter));
+        match &state.mode {
+            Mode::Form(form) => {
+                assert_eq!(form.name, "brand new tree");
+                assert_eq!(state.repos[form.repo_idx], "monorepo");
+            }
+            Mode::List => panic!("expected the new-tree form to open"),
+        }
+    }
+
+    #[test]
+    fn at_prefix_with_a_repo_word_yields_a_launch_request_with_that_repo() {
+        let mut state = state_with_repos(
+            rows_for(&["fix login"]),
+            vec!["monorepo", "other"],
+            Some("other"),
+        );
+        for c in "@scratch mono".chars() {
+            reduce(&mut state, key(KeyCode::Char(c)));
+        }
+        match reduce(&mut state, key(KeyCode::Enter)) {
+            Reaction::Submit(req) => {
+                assert_eq!(req.selector, "@scratch");
+                assert_eq!(req.repo.as_deref(), Some("monorepo"));
+            }
+            _ => panic!("expected a submit"),
+        }
     }
 }
