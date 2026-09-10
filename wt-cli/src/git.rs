@@ -57,7 +57,16 @@ pub fn common_dir(path: &Path) -> Result<std::path::PathBuf> {
 }
 
 pub fn fetch_prune(path: &Path) -> Result<()> {
-    let out = run(&["fetch", "--prune"], path)?;
+    let out = run(
+        &[
+            "-c",
+            "submodule.recurse=false",
+            "fetch",
+            "--prune",
+            "--no-recurse-submodules",
+        ],
+        path,
+    )?;
     if !out.status.success() {
         bail!(
             "git fetch --prune failed: {}",
@@ -157,7 +166,18 @@ pub fn worktree_add_detached(base: &Path, tree_path: &Path, start_point: &str) -
 /// step lands here — so callers fall back to building a tree from cold
 /// rather than treating it as fatal.
 pub fn switch_new_branch(tree_path: &Path, branch: &str, start_point: &str) -> Result<()> {
-    let out = run(&["switch", "-c", branch, start_point], tree_path)?;
+    let out = run(
+        &[
+            "-c",
+            "submodule.recurse=false",
+            "switch",
+            "--no-recurse-submodules",
+            "-c",
+            branch,
+            start_point,
+        ],
+        tree_path,
+    )?;
     if !out.status.success() {
         bail!(
             "git switch -c {branch} {start_point} failed: {}",
@@ -168,7 +188,17 @@ pub fn switch_new_branch(tree_path: &Path, branch: &str, start_point: &str) -> R
 }
 
 pub fn checkout_detached(tree_path: &Path, rev: &str) -> Result<()> {
-    let out = run(&["checkout", "--detach", rev], tree_path)?;
+    let out = run(
+        &[
+            "-c",
+            "submodule.recurse=false",
+            "checkout",
+            "--no-recurse-submodules",
+            "--detach",
+            rev,
+        ],
+        tree_path,
+    )?;
     if !out.status.success() {
         bail!(
             "git checkout --detach {rev} failed: {}",
@@ -327,7 +357,10 @@ pub fn rev_parse(path: &Path, rev: &str) -> Result<String> {
 }
 
 pub fn merge_ff_only(path: &Path, rev: &str) -> Result<()> {
-    let out = run(&["merge", "--ff-only", rev], path)?;
+    let out = run(
+        &["-c", "submodule.recurse=false", "merge", "--ff-only", rev],
+        path,
+    )?;
     if !out.status.success() {
         bail!(
             "git merge --ff-only {rev} failed: {}",
