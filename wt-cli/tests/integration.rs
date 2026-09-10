@@ -760,7 +760,7 @@ fn write_fake_herdr(bin_dir: &Path, log: &Path, cfg: FakeHerdr) {
              \"workspace create\") printf '%s\\n' '{workspace_created}' ;;\n  \
              \"tab create\") printf '%s\\n' '{tab_created}' ;;\n  \
              \"pane rename\") printf '%s\\n' '{pane_ok}' ;;\n  \
-             \"pane run\") printf '%s\\n' '{pane_ok}' ;;\n  \
+             \"pane run\") : ;;\n  \
              *) exit 2 ;;\nesac\n",
             log.display()
         ),
