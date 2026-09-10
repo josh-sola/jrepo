@@ -1488,10 +1488,7 @@ pub(crate) fn status_state_str(t: &store::Tree) -> String {
     }
 }
 
-/// Each git-backed section degrades to `(unavailable)` on its own instead
-/// of failing the whole preview: a tree still provisioning may have no
-/// usable git dir yet.
-pub(crate) fn launch_preview_lines(config: &config::Config, t: &store::Tree) -> Vec<String> {
+pub(crate) fn preview_header_lines(t: &store::Tree) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("{}  ·  {}", t.name, t.repo));
     lines.push(t.branch.clone());
@@ -1505,7 +1502,14 @@ pub(crate) fn launch_preview_lines(config: &config::Config, t: &store::Tree) -> 
     lines.push(format!("state    {state_line}"));
     let age = (Utc::now() - t.created).num_seconds();
     lines.push(format!("created  {} ago", format_duration(age)));
+    lines
+}
 
+/// Each git-backed section degrades to `(unavailable)` on its own instead
+/// of failing the whole preview: a tree still provisioning may have no
+/// usable git dir yet.
+pub(crate) fn preview_git_lines(config: &config::Config, t: &store::Tree) -> Vec<String> {
+    let mut lines = Vec::new();
     let porcelain = git::status_porcelain(&t.path);
     match &porcelain {
         Ok(files) if files.is_empty() => lines.push("dirty    clean".to_string()),
