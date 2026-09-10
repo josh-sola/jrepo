@@ -285,9 +285,11 @@ pane), `wt go` does not exec the agent in the calling pane. Instead it finds
 or creates a herdr workspace named after the tree — a new one via `herdr
 worktree open`, or a new tab in the existing one via `herdr tab create` — and
 types `wt go <tree> --here ...` into that workspace's pane, which is the run
-that actually waits for provisioning and execs the agent. A scratch launch
-(`@label`) is placed the same way, keyed by workspace label instead of tree
-path, since it has no tree of its own.
+that actually waits for provisioning and execs the agent. A brand-new tree
+workspace opens with a first tab named `code` running `emacsclient -t`, and
+the agent gets a second, focused tab; an existing workspace just gets a new
+agent tab. A scratch launch (`@label`) is placed the same way, keyed by
+workspace label instead of tree path, since it has no tree of its own.
 
 Pass `--here` to run the agent in the current pane instead, the same as
 without the `herdr` feature block. The placed command always includes it, so
@@ -295,10 +297,10 @@ a placed run never tries to place again.
 
 If `herdr worktree open` is rejected, wt falls back to a plain `herdr
 workspace create` instead of failing outright, so a new tree still gets
-somewhere to open. If placement itself fails and errors out, and wt is
-running as a herdr plugin pane entrypoint (whose pane would otherwise close
-the instant the process exits), it waits for you to press Enter before
-returning, so you get to read the error.
+somewhere to open, complete with its `code` tab. If placement itself fails
+and errors out, and wt is running as a herdr plugin pane entrypoint (whose
+pane would otherwise close the instant the process exits), it waits for you
+to press Enter before returning, so you get to read the error.
 
 `wt-cli/herdr-plugin/` is a herdr plugin manifest that opens the picker in a
 popup. `./install.sh` links it with `herdr plugin link` when `herdr` is on

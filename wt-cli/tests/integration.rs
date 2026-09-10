@@ -737,6 +737,8 @@ fn write_fake_herdr(bin_dir: &Path, log: &Path, cfg: FakeHerdr) {
         serde_json::json!({"id": "3", "result": {"type": "pane_info", "pane": {"pane_id": "ignored"}}})
             .to_string();
 
+    let tab_renamed = serde_json::json!({"id": "3", "result": {"type": "tab_renamed"}}).to_string();
+
     let fail_block = if fail {
         "printf 'boom: herdr placement failed\\n' >&2\nexit 1\n".to_string()
     } else {
@@ -759,6 +761,7 @@ fn write_fake_herdr(bin_dir: &Path, log: &Path, cfg: FakeHerdr) {
              \"worktree open\") {worktree_open_arm} ;;\n  \
              \"workspace create\") printf '%s\\n' '{workspace_created}' ;;\n  \
              \"tab create\") printf '%s\\n' '{tab_created}' ;;\n  \
+             \"tab rename\") printf '%s\\n' '{tab_renamed}' ;;\n  \
              \"pane rename\") printf '%s\\n' '{pane_ok}' ;;\n  \
              \"pane run\") : ;;\n  \
              *) exit 2 ;;\nesac\n",
@@ -5165,8 +5168,12 @@ fn herdr_places_by_opening_a_worktree_when_no_workspace_is_open() {
             format!("worktree list --cwd {tree_path}"),
             "workspace list".to_string(),
             format!("worktree open --workspace w9 --path {tree_path} --label herdr target --focus"),
-            "pane rename w1:p1 herdr target".to_string(),
-            format!("pane run w1:p1 {expected_inner}"),
+            "tab rename w1:t1 code".to_string(),
+            "pane rename w1:p1 code".to_string(),
+            "pane run w1:p1 'emacsclient' '-t'".to_string(),
+            format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w9:p2 herdr target".to_string(),
+            format!("pane run w9:p2 {expected_inner}"),
         ],
         "herdr argv transcript was:\n{log_text}"
     );
@@ -5457,8 +5464,12 @@ fn herdr_worktree_open_failure_falls_back_to_workspace_create() {
             "workspace list".to_string(),
             format!("worktree open --workspace w9 --path {tree_path} --label herdr target --focus"),
             format!("workspace create --cwd {tree_path} --label herdr target --focus"),
-            "pane rename w1:p1 herdr target".to_string(),
-            format!("pane run w1:p1 {expected_inner}"),
+            "tab rename w1:t1 code".to_string(),
+            "pane rename w1:p1 code".to_string(),
+            "pane run w1:p1 'emacsclient' '-t'".to_string(),
+            format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w9:p2 herdr target".to_string(),
+            format!("pane run w9:p2 {expected_inner}"),
         ],
         "herdr argv transcript was:\n{log_text}"
     );
@@ -5574,8 +5585,12 @@ fn herdr_creates_the_parent_workspace_when_none_is_open() {
                 base.display()
             ),
             format!("worktree open --workspace w1 --path {tree_path} --label herdr target --focus"),
-            "pane rename w1:p1 herdr target".to_string(),
-            format!("pane run w1:p1 {expected_inner}"),
+            "tab rename w1:t1 code".to_string(),
+            "pane rename w1:p1 code".to_string(),
+            "pane run w1:p1 'emacsclient' '-t'".to_string(),
+            format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w9:p2 herdr target".to_string(),
+            format!("pane run w9:p2 {expected_inner}"),
         ],
         "herdr argv transcript was:\n{log_text}"
     );
