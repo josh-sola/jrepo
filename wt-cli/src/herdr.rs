@@ -145,15 +145,33 @@ fn code_tab_then_agent_pane(created: &Value, cwd: &str, label: &str) -> Result<S
     run_herdr(&pane_rename_argv(&root_pane_id, CODE_TAB_LABEL))?;
     run_herdr(&pane_run_argv(
         &root_pane_id,
-        &shell_join(&code_tab_command(cwd)),
+        &shell_join(&code_tab_command(cwd, label)),
     ))?;
     pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?)
 }
 
-/// The tree path is passed as the file to visit because `emacsclient -t`
-/// otherwise opens in the daemon's own directory, not the pane's.
-fn code_tab_command(cwd: &str) -> Vec<String> {
-    vec!["emacsclient".to_string(), "-t".to_string(), cwd.to_string()]
+/// `emacsclient -t` alone opens in the daemon's own directory, so the frame
+/// is set up around the tree instead. The `do-` treemacs entry point is used
+/// because the interactive one prompts on a name collision, which would hang
+/// an `--eval`; the window is reselected because treemacs steals focus.
+fn code_tab_command(cwd: &str, label: &str) -> Vec<String> {
+    let cwd = elisp_string(cwd);
+    let label = elisp_string(label);
+    vec![
+        "emacsclient".to_string(),
+        "-t".to_string(),
+        "--eval".to_string(),
+        format!(
+            "(progn (require (quote treemacs)) (let ((w (selected-window))) \
+             (with-current-buffer (window-buffer w) (cd {cwd})) \
+             (treemacs-do-add-project-to-workspace {cwd} {label}) \
+             (treemacs-select-window) (select-window w)))"
+        ),
+    ]
+}
+
+fn elisp_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn place_scratch(cwd: &str, label: &str) -> Result<String> {
@@ -586,11 +604,24 @@ mod tests {
     }
 
     #[test]
-    fn code_tab_command_visits_the_tree() {
+    fn code_tab_command_sets_up_the_frame_around_the_tree() {
         assert_eq!(
-            code_tab_command("/repos/a"),
-            vec!["emacsclient", "-t", "/repos/a"]
+            code_tab_command("/repos/a", "fix login"),
+            vec![
+                "emacsclient",
+                "-t",
+                "--eval",
+                "(progn (require (quote treemacs)) (let ((w (selected-window))) \
+                 (with-current-buffer (window-buffer w) (cd \"/repos/a\")) \
+                 (treemacs-do-add-project-to-workspace \"/repos/a\" \"fix login\") \
+                 (treemacs-select-window) (select-window w)))"
+            ]
         );
+    }
+
+    #[test]
+    fn elisp_string_escapes_quotes_and_backslashes() {
+        assert_eq!(elisp_string(r#"say "hi" \ bye"#), r#""say \"hi\" \\ bye""#);
     }
 
     #[test]
