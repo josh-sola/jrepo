@@ -576,23 +576,35 @@ fn run_wt_with_path_and_herdr_env(
         .expect("spawn wt")
 }
 
-/// A fake `herdr` CLI for placement tests. Appends the space-joined argv of
-/// every invocation to `log`, one line per call. `existing` decides whether
-/// `worktree list`/`workspace list` report a workspace already open, which
-/// pushes `wt go` onto the tab-create branch instead of
-/// worktree-open/workspace-create; `worktree list` always reports the
-/// worktree itself, since it exists on disk regardless of whether a
-/// workspace is open for it. `fail` makes every call exit 1 with a message
-/// on stderr instead.
-fn write_fake_herdr(
-    bin_dir: &Path,
-    log: &Path,
-    match_path: &str,
-    match_label: &str,
-    existing: bool,
+struct FakeHerdr<'a> {
+    tree_path: &'a str,
+    parent_path: &'a str,
+    match_label: &'a str,
+    tree_open: bool,
+    parent_open: bool,
+    /// Matched by `.worktree.checkout_path`, with a label that deliberately
+    /// does not match `match_label`, to prove the path match wins.
+    workspace_checkout_match: bool,
+    /// Every call exits 1 with a plain-text stderr message.
     fail: bool,
-) {
-    let workspace_id = if existing { Some("w9") } else { None };
+    /// Only `worktree open` exits 1, with a JSON error on stderr.
+    fail_open: bool,
+}
+
+fn write_fake_herdr(bin_dir: &Path, log: &Path, cfg: FakeHerdr) {
+    let FakeHerdr {
+        tree_path: match_path,
+        parent_path,
+        match_label,
+        tree_open,
+        parent_open,
+        workspace_checkout_match,
+        fail,
+        fail_open,
+    } = cfg;
+
+    let tree_open_workspace_id = tree_open.then_some("w9");
+    let parent_open_workspace_id = parent_open.then_some("w9");
 
     let worktree_list = serde_json::json!({
         "id": "1",
@@ -604,15 +616,26 @@ fn write_fake_herdr(
                 "repo_root": "/r",
                 "source_checkout_path": "/r"
             },
-            "worktrees": [{
-                "path": match_path,
-                "is_bare": false,
-                "is_detached": false,
-                "is_prunable": false,
-                "is_linked_worktree": true,
-                "label": match_label,
-                "open_workspace_id": workspace_id
-            }]
+            "worktrees": [
+                {
+                    "path": match_path,
+                    "is_bare": false,
+                    "is_detached": false,
+                    "is_prunable": false,
+                    "is_linked_worktree": true,
+                    "label": match_label,
+                    "open_workspace_id": tree_open_workspace_id
+                },
+                {
+                    "path": parent_path,
+                    "is_bare": false,
+                    "is_detached": false,
+                    "is_prunable": false,
+                    "is_linked_worktree": false,
+                    "label": "parent",
+                    "open_workspace_id": parent_open_workspace_id
+                }
+            ]
         }
     })
     .to_string();
@@ -621,20 +644,30 @@ fn write_fake_herdr(
         "id": "1",
         "result": {
             "type": "workspace_list",
-            "workspaces": if existing {
+            "workspaces": if workspace_checkout_match {
                 serde_json::json!([{
-                    "workspace_id": workspace_id,
+                    "workspace_id": "w9",
                     "number": 1,
-                    "label": match_label,
+                    "label": "unrelated label",
                     "focused": false,
                     "pane_count": 1,
                     "tab_count": 1,
                     "active_tab_id": "w9:t1",
-                    "agent_status": "idle"
+                    "agent_status": "idle",
+                    "worktree": { "checkout_path": match_path }
                 }])
             } else {
                 serde_json::json!([])
             }
+        }
+    })
+    .to_string();
+
+    let worktree_open_error = serde_json::json!({
+        "id": "2",
+        "error": {
+            "code": "worktree_already_open",
+            "message": "a workspace is already open for this worktree"
         }
     })
     .to_string();
@@ -710,6 +743,12 @@ fn write_fake_herdr(
         String::new()
     };
 
+    let worktree_open_arm = if fail_open {
+        format!("printf '%s\\n' '{worktree_open_error}' >&2\n    exit 1")
+    } else {
+        format!("printf '%s\\n' '{worktree_opened}'")
+    };
+
     let path = bin_dir.join("herdr");
     std::fs::write(
         &path,
@@ -717,7 +756,7 @@ fn write_fake_herdr(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{fail_block}case \"$1 $2\" in\n  \
              \"worktree list\") printf '%s\\n' '{worktree_list}' ;;\n  \
              \"workspace list\") printf '%s\\n' '{workspace_list}' ;;\n  \
-             \"worktree open\") printf '%s\\n' '{worktree_opened}' ;;\n  \
+             \"worktree open\") {worktree_open_arm} ;;\n  \
              \"workspace create\") printf '%s\\n' '{workspace_created}' ;;\n  \
              \"tab create\") printf '%s\\n' '{tab_created}' ;;\n  \
              \"pane rename\") printf '%s\\n' '{pane_ok}' ;;\n  \
@@ -5082,7 +5121,20 @@ fn herdr_places_by_opening_a_worktree_when_no_workspace_is_open() {
     let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
     write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, false);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: true,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5111,7 +5163,8 @@ fn herdr_places_by_opening_a_worktree_when_no_workspace_is_open() {
         lines,
         vec![
             format!("worktree list --cwd {tree_path}"),
-            format!("worktree open --path {tree_path} --label herdr target --focus"),
+            "workspace list".to_string(),
+            format!("worktree open --workspace w9 --path {tree_path} --label herdr target --focus"),
             "pane rename w1:p1 herdr target".to_string(),
             format!("pane run w1:p1 {expected_inner}"),
         ],
@@ -5134,7 +5187,20 @@ fn herdr_places_by_creating_a_tab_when_a_workspace_is_already_open() {
     let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
     write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", true, false);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: true,
+            parent_open: false,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5172,7 +5238,20 @@ fn herdr_env_without_a_config_block_launches_normally() {
     let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
     write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, "/unused", "unused", false, false);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: "/unused",
+            parent_path: "/unused-parent",
+            match_label: "unused",
+            tree_open: false,
+            parent_open: false,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5202,7 +5281,20 @@ fn go_here_inside_herdr_launches_normally() {
     let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
     write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, "/unused", "unused", false, false);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: "/unused",
+            parent_path: "/unused-parent",
+            match_label: "unused",
+            tree_open: false,
+            parent_open: false,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5241,7 +5333,20 @@ fn herdr_placement_never_resolves_a_planter_color() {
     let planter_record = tmp.join("resolver-record");
     write_fake_planter(&bin_dir, &planter_record, "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, false);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: true,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5271,7 +5376,20 @@ fn herdr_nonzero_exit_fails_wt_with_its_stderr() {
     let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
     write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
     let log = tmp.join("herdr.log");
-    write_fake_herdr(&bin_dir, &log, &tree_path, "herdr target", false, true);
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: false,
+            workspace_checkout_match: false,
+            fail: true,
+            fail_open: false,
+        },
+    );
 
     let out = run_wt_with_path_and_herdr_env(
         &root,
@@ -5287,5 +5405,178 @@ fn herdr_nonzero_exit_fails_wt_with_its_stderr() {
     assert!(
         stderr.contains("boom: herdr placement failed"),
         "herdr's stderr must surface in wt's error: {stderr}"
+    );
+}
+
+#[test]
+fn herdr_worktree_open_failure_falls_back_to_workspace_create() {
+    let tmp = unique_dir("herdr-open-fallback");
+    let (root, base, tree_path, tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: true,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: true,
+        },
+    );
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(
+        &out,
+        "herdr placement falling back after a rejected worktree open",
+    );
+
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = log_text.lines().collect();
+    let expected_inner = format!(
+        "'{}' 'go' '{tree_id}' '--here' '--claude'",
+        wt_bin().display()
+    );
+    assert_eq!(
+        lines,
+        vec![
+            format!("worktree list --cwd {tree_path}"),
+            "workspace list".to_string(),
+            format!("worktree open --workspace w9 --path {tree_path} --label herdr target --focus"),
+            format!("workspace create --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w1:p1 herdr target".to_string(),
+            format!("pane run w1:p1 {expected_inner}"),
+        ],
+        "herdr argv transcript was:\n{log_text}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("herdr worktree open failed (")
+            && stderr
+                .contains("worktree_already_open: a workspace is already open for this worktree")
+            && stderr.contains("); opening a plain workspace instead"),
+        "stderr must carry the one-line fallback notice with the decoded error: {stderr}"
+    );
+}
+
+#[test]
+fn herdr_finds_a_fallback_workspace_by_checkout_path() {
+    let tmp = unique_dir("herdr-checkout-path-reuse");
+    let (root, base, tree_path, tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: true,
+            workspace_checkout_match: true,
+            fail: false,
+            fail_open: false,
+        },
+    );
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(&out, "herdr placement reusing a fallback-created workspace");
+
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = log_text.lines().collect();
+    let expected_inner = format!(
+        "'{}' 'go' '{tree_id}' '--here' '--claude'",
+        wt_bin().display()
+    );
+    assert_eq!(
+        lines,
+        vec![
+            format!("worktree list --cwd {tree_path}"),
+            "workspace list".to_string(),
+            format!("tab create --workspace w9 --cwd {tree_path} --label herdr target --focus"),
+            "pane rename w9:p2 herdr target".to_string(),
+            format!("pane run w9:p2 {expected_inner}"),
+        ],
+        "herdr argv transcript was:\n{log_text}"
+    );
+}
+
+#[test]
+fn herdr_creates_the_parent_workspace_when_none_is_open() {
+    let tmp = unique_dir("herdr-parent-workspace");
+    let (root, base, tree_path, tree_id) = herdr_test_tree(&tmp, "herdr target");
+    std::fs::write(config_path_for(&root), herdr_config()).unwrap();
+
+    let agent_record = tmp.join("claude-record");
+    let bin_dir = write_fake_agent(&tmp, "claude", &agent_record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+    let log = tmp.join("herdr.log");
+    write_fake_herdr(
+        &bin_dir,
+        &log,
+        FakeHerdr {
+            tree_path: &tree_path,
+            parent_path: base.to_str().unwrap(),
+            match_label: "herdr target",
+            tree_open: false,
+            parent_open: false,
+            workspace_checkout_match: false,
+            fail: false,
+            fail_open: false,
+        },
+    );
+
+    let out = run_wt_with_path_and_herdr_env(
+        &root,
+        &base,
+        &bin_dir,
+        &["go", "herdr target", "--repo", "myrepo", "--claude"],
+    );
+    assert_success(&out, "herdr placement creating the repo's parent workspace");
+
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = log_text.lines().collect();
+    let expected_inner = format!(
+        "'{}' 'go' '{tree_id}' '--here' '--claude'",
+        wt_bin().display()
+    );
+    assert_eq!(
+        lines,
+        vec![
+            format!("worktree list --cwd {tree_path}"),
+            "workspace list".to_string(),
+            format!(
+                "workspace create --cwd {} --label myrepo --no-focus",
+                base.display()
+            ),
+            format!("worktree open --workspace w1 --path {tree_path} --label herdr target --focus"),
+            "pane rename w1:p1 herdr target".to_string(),
+            format!("pane run w1:p1 {expected_inner}"),
+        ],
+        "herdr argv transcript was:\n{log_text}"
     );
 }

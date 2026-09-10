@@ -18,6 +18,7 @@ mod tmux;
 mod tree;
 mod tui;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -542,9 +543,27 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
+            pause_for_plugin_entrypoint_close();
             ExitCode::FAILURE
         }
     }
+}
+
+/// herdr closes a plugin pane the instant its entrypoint process exits, so
+/// an error printed here would otherwise vanish unread. `HERDR_PLUGIN_ENTRYPOINT_ID`
+/// is set only for commands herdr runs as a plugin pane entrypoint.
+fn pause_for_plugin_entrypoint_close() {
+    let entrypoint_id_set = std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some();
+    if !should_pause_for_plugin_entrypoint(entrypoint_id_set, std::io::stdin().is_terminal()) {
+        return;
+    }
+    eprintln!("press Enter to close");
+    let mut discard = String::new();
+    let _ = std::io::stdin().read_line(&mut discard);
+}
+
+fn should_pause_for_plugin_entrypoint(entrypoint_id_set: bool, stdin_is_terminal: bool) -> bool {
+    entrypoint_id_set && stdin_is_terminal
 }
 
 fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
@@ -1204,7 +1223,12 @@ fn cmd_launch(
             profile_for_inner.as_deref(),
             args,
         );
-        return herdr::place(&tree_path, &label, tree_id.is_none(), &inner);
+        let base = &store
+            .repos
+            .get(&repo)
+            .with_context(|| format!("{repo} is not a registered repo"))?
+            .base;
+        return herdr::place(&tree_path, base, &repo, &label, tree_id.is_none(), &inner);
     }
 
     let (tree_path, repo, label) = match tree_id {
@@ -1825,6 +1849,14 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn should_pause_for_plugin_entrypoint_requires_both_conditions() {
+        assert!(should_pause_for_plugin_entrypoint(true, true));
+        assert!(!should_pause_for_plugin_entrypoint(true, false));
+        assert!(!should_pause_for_plugin_entrypoint(false, true));
+        assert!(!should_pause_for_plugin_entrypoint(false, false));
     }
 
     #[test]

@@ -284,6 +284,13 @@ Pass `--here` to run the agent in the current pane instead, the same as
 without the `herdr` feature block. The placed command always includes it, so
 a placed run never tries to place again.
 
+If `herdr worktree open` is rejected, wt falls back to a plain `herdr
+workspace create` instead of failing outright, so a new tree still gets
+somewhere to open. If placement itself fails and errors out, and wt is
+running as a herdr plugin pane entrypoint (whose pane would otherwise close
+the instant the process exits), it waits for you to press Enter before
+returning, so you get to read the error.
+
 `wt-cli/herdr-plugin/` is a herdr plugin manifest that opens the picker in a
 popup. `./install.sh` links it with `herdr plugin link` when `herdr` is on
 PATH. Bind the action to open it:
