@@ -1,16 +1,17 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::agent::Agent;
 
-use super::state::{Focus, FormFocus, Mode, NewTreeForm, Row, State, column_widths};
+use super::state::{
+    Focus, FormFocus, Mode, NewTreeForm, ParsedFilter, Row, State, column_widths, parse_filter,
+};
 
-const HINT: &str = "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Shift-Tab Pi/Claude  ·  Ctrl-P/L/X agent  ·  Enter launch  ·  Esc cancel";
-const FORM_HINT: &str =
-    "Tab next field  ·  Shift-Tab Pi/Claude  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list";
+const HINT: &str = "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Shift-Tab Pi/Claude  ·  Ctrl-P/L/X agent  ·  Enter launch  ·  Esc/Ctrl-C cancel";
+const FORM_HINT: &str = "Tab next field  ·  Shift-Tab Pi/Claude  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list  ·  Ctrl-C cancel";
 
 pub fn draw(frame: &mut Frame, state: &State, preview: &str) {
     let area = frame.area();
@@ -47,7 +48,49 @@ fn draw_filter(frame: &mut Frame, area: Rect, state: &State) {
         .title(title)
         .borders(Borders::ALL)
         .style(style);
-    frame.render_widget(Paragraph::new(state.filter.as_str()).block(block), area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let parsed = parse_filter(&state.filter, &state.repos);
+    let interpretation = interpretation_text(&parsed);
+    if interpretation.is_empty() {
+        frame.render_widget(Paragraph::new(state.filter.as_str()), inner);
+        return;
+    }
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(interpretation.chars().count() as u16),
+        ])
+        .split(inner);
+    frame.render_widget(Paragraph::new(state.filter.as_str()), cols[0]);
+    frame.render_widget(
+        Paragraph::new(interpretation)
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+/// Dim text at the right end of the filter row showing what a shorthand
+/// word resolved to, so the user can see it took effect before hitting Enter.
+fn interpretation_text(parsed: &ParsedFilter) -> String {
+    match (&parsed.repo, parsed.agent) {
+        (Some(repo), Some(agent)) => format!("repo {repo} · agent {}", agent_word(agent)),
+        (Some(repo), None) => format!("repo {repo}"),
+        (None, Some(agent)) => format!("agent {}", agent_word(agent)),
+        (None, None) => String::new(),
+    }
+}
+
+fn agent_word(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Pi => "pi",
+        Agent::Claude => "claude",
+        Agent::Codex => "codex",
+    }
 }
 
 fn draw_list_and_preview(frame: &mut Frame, area: Rect, state: &State, preview: &str) {

@@ -109,6 +109,14 @@ both stdin and stdout; without one, `wt go` fails instead of hanging.
 Type to fuzzy-filter the tree list by repo, name, or branch. The right pane
 previews the highlighted tree — the same detail `wt tree status` shows.
 
+The first word of the filter is the name to search for. Any later word can
+also set the repo or agent: it resolves to an agent when it's a unique prefix
+of `pi`, `claude`, or `codex`, else to a repo when it's a unique prefix of a
+registered repo name, else it stays part of the search text. For example,
+`pr-12/feedback mono claude` searches for `pr-12/feedback`, narrows the list
+to the `monorepo` repo, and switches the agent to Claude. The resolved repo
+and agent, if any, show as dim text at the right of the filter box.
+
 | Key | Effect |
 | --- | --- |
 | type | filter, or edit the focused field |
@@ -117,13 +125,14 @@ previews the highlighted tree — the same detail `wt tree status` shows.
 | Shift-Tab | toggle the agent between Pi and Claude |
 | Ctrl-P / Ctrl-L / Ctrl-X | select Pi / Claude / Codex |
 | Enter | launch the highlighted tree |
-| Esc | cancel |
+| Esc / Ctrl-C | cancel |
 
 Typing `@label` hides the list and Enter opens a scratch session, same as
 typing it as `wt go`'s argument. Typing a name that matches no tree and
 pressing Enter opens a small form — name, repo (required, defaulting to the
-current repo), branch, and onto — that creates the tree on submit. Esc from
-that form returns to the list without canceling the picker.
+resolved repo, else the current repo), branch, and onto — that creates the
+tree on submit. Esc from that form returns to the list without canceling the
+picker; Ctrl-C cancels the picker from either place.
 
 Change the current shell's directory:
 
