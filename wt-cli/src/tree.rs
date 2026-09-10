@@ -1,19 +1,13 @@
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::config;
 use crate::git;
-use crate::github;
-use crate::graphite;
-use crate::restack;
-use crate::stack::{self, Stacks};
 use crate::store::{self, Repo, Tree, TreeState};
 
 const FETCH_STALE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
@@ -22,14 +16,8 @@ pub struct NewOptions {
     pub repo: String,
     pub name: String,
     pub branch: Option<String>,
-    /// Branch the new tree from here instead of `origin/<trunk>`, joining
-    /// whatever Graphite stack this ref belongs to. Resolved by
-    /// `resolve_onto`.
     pub onto: Option<String>,
     pub profiles: Option<Vec<String>>,
-    /// `wt new` and `wt go`'s always-tracked root: with no `--onto`, treat
-    /// trunk as the Graphite parent instead of leaving the tree untracked.
-    pub track_on_trunk: bool,
 }
 
 pub fn slugify(name: &str) -> String {
@@ -56,18 +44,12 @@ pub fn slugify(name: &str) -> String {
 pub(crate) struct TreePlan {
     pub(crate) repo_name: String,
     pub(crate) repo: Repo,
-    pub(crate) repo_config: config::RepoConfig,
     pub(crate) name: String,
     pub(crate) branch: String,
     /// Resolved to a concrete commit, not a ref — this is what a claim
     /// compares a spare's HEAD against, and what the cold path branches
     /// from.
     pub(crate) start_point: String,
-    pub(crate) parent_branch: Option<String>,
-    /// `parent_branch`'s head at plan time — `start_point` already resolved
-    /// it, so this just carries that resolution through to the stored
-    /// record instead of a fresh rev-parse.
-    pub(crate) parent_revision: Option<String>,
     pub(crate) profiles: Option<Vec<String>>,
 }
 
@@ -108,15 +90,15 @@ fn plan_tree(root: &Path, config: &config::Config, opts: &NewOptions) -> Result<
     })?;
     let repo_config = config::repo(config, &opts.repo)?.clone();
 
-    let parent_branch = opts
+    let onto = opts
         .onto
         .as_deref()
         .map(|sel| resolve_onto(&store, &opts.repo, &repo.base, sel))
         .transpose()?;
 
-    // A branch resolved by `--onto` already exists locally; only the
-    // trunk-based path needs a fresh `origin/<trunk>` to branch from.
-    if parent_branch.is_none() {
+    // A ref resolved by `--onto` is used as-is; only the trunk-based path
+    // needs a fresh `origin/<trunk>` to branch from.
+    if onto.is_none() {
         let needs_fetch = match repo.last_fetch {
             None => true,
             Some(t) => Utc::now() - t > FETCH_STALE_AFTER,
@@ -153,32 +135,16 @@ fn plan_tree(root: &Path, config: &config::Config, opts: &NewOptions) -> Result<
         bail!("branch '{branch}' already exists on origin");
     }
 
-    let start_point_ref = parent_branch
-        .clone()
-        .unwrap_or_else(|| format!("origin/{}", repo_config.trunk));
+    let start_point_ref = onto.unwrap_or_else(|| format!("origin/{}", repo_config.trunk));
     let start_point = git::rev_parse(&repo.base, &start_point_ref)
         .with_context(|| format!("resolving {start_point_ref}"))?;
-
-    // `wt new` roots a stack on trunk without an explicit `--onto`, so it
-    // still needs a Graphite parent to track and record — trunk fills that
-    // role here without disturbing the fetch-staleness check above, which
-    // only applies when there was no `--onto` parent to check freshness for.
-    let parent_branch = match parent_branch {
-        Some(b) => Some(b),
-        None if opts.track_on_trunk => Some(repo_config.trunk.clone()),
-        None => None,
-    };
-    let parent_revision = parent_branch.as_ref().map(|_| start_point.clone());
 
     Ok(TreePlan {
         repo_name: opts.repo.clone(),
         repo,
-        repo_config,
         name: opts.name.clone(),
         branch,
         start_point,
-        parent_branch,
-        parent_revision,
         profiles: opts.profiles.clone(),
     })
 }
@@ -188,40 +154,22 @@ fn plan_tree(root: &Path, config: &config::Config, opts: &NewOptions) -> Result<
 /// tree first, before a background install could touch any of the same
 /// files, and so `new_tree` can start it only when `needs_steps` says so.
 fn create_cold(root: &Path, plan: &TreePlan) -> Result<(Uuid, PathBuf, PathBuf)> {
-    create_cold_with(root, plan, "gt")
-}
-
-fn create_cold_with(
-    root: &Path,
-    plan: &TreePlan,
-    gt_bin: &str,
-) -> Result<(Uuid, PathBuf, PathBuf)> {
     let id = Uuid::now_v7();
     let repo_dir = root.join(&plan.repo_name);
     let tree_path = repo_dir.join("trees").join(id.to_string());
     git::worktree_add(&plan.repo.base, &tree_path, &plan.branch, &plan.start_point)?;
     let tree_path = finish_worktree_checkout(&tree_path)?;
-    if let Some(parent) = &plan.parent_branch {
-        let store = store::load(root)?;
-        let ctx = RepoCtx {
-            name: &plan.repo_name,
-            repo: &plan.repo,
-            config: &plan.repo_config,
-        };
-        track_with_graphite(&store, &ctx, &plan.name, &tree_path, parent, gt_bin);
-    }
-
     let log_path = register_and_wire(
         root,
-        &repo_dir,
-        &plan.repo.base,
         id,
-        &plan.repo_name,
-        &plan.name,
-        &plan.branch,
-        &tree_path,
-        plan.parent_branch.clone(),
-        plan.parent_revision.clone(),
+        Registration {
+            repo_dir: &repo_dir,
+            base: &plan.repo.base,
+            repo_name: &plan.repo_name,
+            name: &plan.name,
+            branch: &plan.branch,
+            tree_path: &tree_path,
+        },
     )?;
     Ok((id, tree_path, log_path))
 }
@@ -236,26 +184,25 @@ fn finish_worktree_checkout(tree_path: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(tree_path)?)
 }
 
-/// Registers a freshly checked-out worktree and wires its shared symlinks
-/// and env copies — the common tail of every tree-creation path, whether
-/// the branch is new (`create_cold_with`) or already existed
-/// (`adopt_branch`).
-///
-/// Registered while still `Provisioning` so a failure in wiring lands as a
-/// `Failed` entry, not an orphan invisible to `wt tree ls`/`wt tree rm`.
-#[allow(clippy::too_many_arguments)]
-fn register_and_wire(
-    root: &Path,
-    repo_dir: &Path,
-    base: &Path,
-    id: Uuid,
-    repo_name: &str,
-    name: &str,
-    branch: &str,
-    tree_path: &Path,
-    parent_branch: Option<String>,
-    parent_revision: Option<String>,
-) -> Result<PathBuf> {
+struct Registration<'a> {
+    repo_dir: &'a Path,
+    base: &'a Path,
+    repo_name: &'a str,
+    name: &'a str,
+    branch: &'a str,
+    tree_path: &'a Path,
+}
+
+/// Registers before wiring so a failure remains visible to inspection and cleanup.
+fn register_and_wire(root: &Path, id: Uuid, registration: Registration<'_>) -> Result<PathBuf> {
+    let Registration {
+        repo_dir,
+        base,
+        repo_name,
+        name,
+        branch,
+        tree_path,
+    } = registration;
     let log_path = tree_path.join(crate::repo::PROVISION_LOG_NAME);
     let now = Utc::now();
     store::with_store_lock(root, |s| {
@@ -272,10 +219,6 @@ fn register_and_wire(
             step_total: None,
             log_path: Some(log_path.clone()),
             provision_pid: None,
-            parent_branch,
-            parent_revision,
-            pending_restack: false,
-            pr_number: None,
             spare: false,
         });
         Ok(())
@@ -295,83 +238,14 @@ fn register_and_wire(
     Ok(log_path)
 }
 
-/// Test seam for exercising `plan_tree` and `create_cold_with` together
-/// against a stubbed `gt` binary.
-#[cfg(test)]
-fn create_tree_with(
-    root: &Path,
-    config_path: &Path,
-    opts: &NewOptions,
-    gt_bin: &str,
-) -> Result<(Uuid, PathBuf, PathBuf)> {
-    let config = config::load(config_path)?;
-    let plan = plan_tree(root, &config, opts)?;
-    create_cold_with(root, &plan, gt_bin)
-}
-
-/// Parses a `#<PR_NUMBER>` selector: `wt go`'s worktree argument, and the
-/// `--onto` selectors on `wt go` and `wt pr new`. `None` when `sel` doesn't
-/// start with `#`, so callers can fall through to their own resolution
-/// tiers instead of treating every non-numeric selector as an error.
-pub(crate) fn parse_pr_selector(sel: &str) -> Option<Result<u64>> {
-    let rest = sel.strip_prefix('#')?;
-    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(Err(anyhow!(
-            "a PR selector needs a number after '#', e.g. '#1234'"
-        )));
-    }
-    Some(
-        rest.parse()
-            .with_context(|| format!("PR number '{rest}' is too large")),
-    )
-}
-
-/// PR-number lookup shared by `wt go '#<N>'`, `wt go --onto '#<N>'`, and `wt
-/// pr new --onto '#<N>'`: Graphite's local sidecar first — no network round
-/// trip — then `gh` for a PR it hasn't recorded yet. Callers decide their
-/// own policy on PR state (open vs. merged/closed).
-pub(crate) fn pr_head_branch(base: &Path, number: u64) -> Result<(String, String)> {
-    let common_dir = git::common_dir(base)?;
-    Ok(match graphite::pr_branch_by_number(&common_dir, number) {
-        Some(pr) => (pr.head_ref_name, pr.state),
-        None => {
-            let head = github::pr_head(base, number)?;
-            (head.branch, head.state)
-        }
-    })
-}
-
-/// Resolves a `#<PR_NUMBER>` `--onto` selector into its head branch,
-/// fetching it locally when needed. Shared by `resolve_onto` and
-/// `resolve_pr_parent`, which each already know their repo's base.
-fn resolve_onto_pr(base: &Path, number: u64) -> Result<String> {
-    let (branch, state) = pr_head_branch(base, number)?;
-    if state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed") {
-        bail!(
-            "PR #{number}'s branch '{branch}' is {}; stack onto trunk instead of a {} PR",
-            state.to_lowercase(),
-            state.to_lowercase()
-        );
-    }
-    if !git::branch_exists_local(base, &branch)? {
-        git::fetch_branch(base, &branch)?;
-    }
-    Ok(branch)
-}
-
 /// Resolves `--onto`'s selector into the branch `wt tree new` should create its
 /// worktree from, checked in the same tiered, ambiguity-errors order as
-/// `store::resolve_index`: a `#<PR_NUMBER>` selector, then a `wt` tree in
-/// this repo — by the branch it actually has checked out right now, never
-/// `Tree.branch`, which only records what a tree started on — then a local
-/// branch name, then any other commit-ish. A `#…` selector can't be a tree
-/// name (`wt` tree names come from `--name` summaries), so it's checked
-/// first, unambiguously, ahead of every other tier. Ambiguity inside a tier
-/// is an error, not a fallthrough to the next tier.
+/// `store::resolve_index`: a `wt` tree in this repo — by the branch it
+/// actually has checked out right now, never `Tree.branch`, which only
+/// records what a tree started on — then a local branch name, then any
+/// other commit-ish. Ambiguity inside a tier is an error, not a fallthrough
+/// to the next tier.
 fn resolve_onto(store: &store::Store, repo_name: &str, base: &Path, sel: &str) -> Result<String> {
-    if let Some(result) = parse_pr_selector(sel) {
-        return resolve_onto_pr(base, result?);
-    }
     let trees: Vec<&Tree> = store.trees.iter().filter(|t| t.repo == repo_name).collect();
     if let Some(branch) = resolve_onto_tree(&trees, sel)? {
         return Ok(branch);
@@ -421,89 +295,9 @@ fn resolve_onto_tree(trees: &[&Tree], sel: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Resolves `wt pr new --onto`'s selector, or falls back to the branch of
-/// the tree containing `cwd` when there is none. Unlike `resolve_onto`, a
-/// commit-ish that is neither a tree nor a local branch is an error — a PR
-/// stacks on a branch, never a bare commit, so there's always a real branch
-/// left to reparent onto later.
-pub(crate) fn resolve_pr_parent(
-    store: &store::Store,
-    onto: Option<&str>,
-    cwd: Option<&Path>,
-) -> Result<(String, String)> {
-    if let Some(sel) = onto {
-        if let Some(result) = parse_pr_selector(sel) {
-            let number = result?;
-            let repo_name = cwd
-                .and_then(|c| store::repo_for_cwd(store, c))
-                .with_context(|| {
-                    format!(
-                        "--onto '{sel}' is a PR selector, which needs a repo to look it up in; \
-                         the current directory isn't inside a registered repo, so run `wt pr \
-                         new` from inside a tree or repo"
-                    )
-                })?
-                .to_string();
-            let base = store.repos[&repo_name].base.clone();
-            let branch = resolve_onto_pr(&base, number)?;
-            return Ok((repo_name, branch));
-        }
-
-        if let Some(t) = store::resolve_optional(&store.trees, sel)? {
-            let branch = store::live_branch(t).unwrap_or_else(|| t.branch.clone());
-            return Ok((t.repo.clone(), branch));
-        }
-
-        let repo_name = cwd
-            .and_then(|c| store::repo_for_cwd(store, c))
-            .with_context(|| {
-                format!(
-                    "--onto '{sel}' doesn't match a tree, and the current directory isn't \
-                     inside a registered repo; run `wt pr new` from inside a tree or repo, or \
-                     pass a tree selector to --onto"
-                )
-            })?
-            .to_string();
-        let repo = &store.repos[&repo_name];
-        if git::branch_exists_local(&repo.base, sel)? {
-            return Ok((repo_name, sel.to_string()));
-        }
-        bail!(
-            "--onto '{sel}' isn't a tree or a local branch in '{repo_name}'; wt pr new stacks \
-             on a branch, not an arbitrary commit"
-        );
-    }
-
-    let cwd = cwd.with_context(|| {
-        "wt pr new needs --onto, or a tree to inherit its branch from; pass --onto \
-         <TREE_OR_BRANCH>, or run this from inside a tree"
-            .to_string()
-    })?;
-    let tree = store
-        .trees
-        .iter()
-        .filter(|t| !t.spare && cwd.starts_with(&t.path))
-        .max_by_key(|t| t.path.components().count())
-        .with_context(|| {
-            "the current directory isn't inside a tree; pass --onto <TREE_OR_BRANCH>, or run \
-             this from inside one"
-                .to_string()
-        })?;
-    let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
-    Ok((tree.repo.clone(), branch))
-}
-
-/// `gt`'s wording when `--parent` names a branch it doesn't track itself —
-/// the common case the first time anything stacks onto a plain `wt tree new`
-/// tree, since that tree was never tracked. Matched loosely, like
-/// `restack.rs`'s misrouted-worktree marker: a reworded message only costs
-/// this specific remedy, never turns the generic warning into no warning.
-const UNTRACKED_PARENT_MARKER: &str = "Cannot perform this operation on untracked branch";
-
 /// Where `branch` is checked out right now, if anywhere, paired with that
-/// directory — independent of Graphite, since the branch in question is by
-/// definition one it doesn't track. `None` when no worktree has it, so a
-/// caller can't be handed a `cd` command with nowhere to point it.
+/// directory. `None` when no worktree has it, so a caller cannot be handed
+/// a `cd` command with nowhere to point it.
 fn holder_of_branch(
     store: &store::Store,
     repo_name: &str,
@@ -529,83 +323,6 @@ fn holder_of_branch(
         format!("an unregistered worktree at {}", path.display()),
         path.clone(),
     ))
-}
-
-/// A repo's identity, state, and config together — grouped so the
-/// functions that need all three carry one reference instead of three.
-pub(crate) struct RepoCtx<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) repo: &'a Repo,
-    pub(crate) config: &'a config::RepoConfig,
-}
-
-/// Tracks the new tree's branch with Graphite, recording `parent` as its
-/// parent. A failure here only warns: the tree already exists and is fully
-/// usable, just outside Graphite's stack until `gt track` is run by hand —
-/// far better than discarding a freshly created tree over a `gt` hiccup.
-pub(crate) fn track_with_graphite(
-    store: &store::Store,
-    ctx: &RepoCtx,
-    new_tree_name: &str,
-    tree_path: &Path,
-    parent: &str,
-    gt_bin: &str,
-) {
-    let out = match Command::new(gt_bin)
-        .args(["track", "--parent", parent, "--no-interactive"])
-        .current_dir(tree_path)
-        .output()
-    {
-        Ok(out) if out.status.success() => return,
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!(
-                "warning: could not run `gt track --parent {parent}` in {}: {e:#}",
-                tree_path.display()
-            );
-            return;
-        }
-    };
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    eprintln!(
-        "{}",
-        track_failure_message(store, ctx, new_tree_name, tree_path, parent, &stderr)
-    );
-}
-
-/// The warning `track_with_graphite` prints on a failed `gt track`. Pulled
-/// out as a pure function so the untracked-parent remedy is testable
-/// without capturing stderr — the same reason `restack.rs`'s
-/// misrouted-worktree check gets its own pure `misrouted_worktree` function.
-fn track_failure_message(
-    store: &store::Store,
-    ctx: &RepoCtx,
-    new_tree_name: &str,
-    tree_path: &Path,
-    parent: &str,
-    stderr: &str,
-) -> String {
-    if stderr.contains(UNTRACKED_PARENT_MARKER)
-        && let Some((holder, holder_dir)) = holder_of_branch(store, ctx.name, ctx.repo, parent)
-    {
-        return format!(
-            "warning: `gt track --parent {parent}` failed because '{parent}' isn't tracked by \
-             Graphite yet — track it first, in {holder}:\n  cd {} && gt track --parent {} \
-             --no-interactive\nthen finish this tree, in \"{new_tree_name}\":\n  cd {} && gt \
-             track --parent {parent} --no-interactive\n{}",
-            holder_dir.display(),
-            ctx.config.trunk,
-            tree_path.display(),
-            stderr.trim()
-        );
-    }
-
-    format!(
-        "warning: `gt track --parent {parent}` failed; the tree exists but Graphite doesn't \
-         know its parent yet — fix it by hand with `gt track --parent {parent}` in {}:\n{}",
-        tree_path.display(),
-        stderr.trim()
-    )
 }
 
 fn start_provisioning(
@@ -662,7 +379,6 @@ pub fn adopt(root: &Path, config_path: &Path, opts: AdoptOptions) -> Result<Path
         branch: opts.branch.clone(),
         onto: None,
         profiles: opts.profiles.clone(),
-        track_on_trunk: false,
     };
     let config = config::load(config_path)?;
     let plan = plan_tree(root, &config, &new_opts).map_err(|e| {
@@ -730,12 +446,8 @@ pub struct AdoptBranchOptions {
     pub profiles: Option<Vec<String>>,
 }
 
-/// Materializes a tree for a branch that already exists — the remedy `wt
-/// doctor` names for a "homeless branch": one Graphite tracks (or one made
-/// some other way entirely) that no tree holds. Unlike `wt new`/`wt pr
-/// new`, this never creates a branch or runs `gt track`; it only reads
-/// Graphite's db for the branch's current parent, since the branch's own
-/// history and parentage are already whatever they are.
+/// Materializes a tree for a branch that already exists. It never creates
+/// a branch; it checks out the existing Git branch in a new worktree.
 pub fn adopt_branch(root: &Path, config_path: &Path, opts: AdoptBranchOptions) -> Result<PathBuf> {
     let store = store::load(root)?;
     let (repo_name, repo) = resolve_branch_repo(&store, opts.repo.as_deref())?;
@@ -779,23 +491,17 @@ pub fn adopt_branch(root: &Path, config_path: &Path, opts: AdoptBranchOptions) -
     git::worktree_add_existing(&repo.base, &tree_path, &opts.branch)?;
     let tree_path = finish_worktree_checkout(&tree_path)?;
 
-    let common_dir = git::common_dir(&repo.base)?;
-    let parent_branch = graphite::available(&common_dir)
-        .then(|| graphite::graph_light(&common_dir).ok())
-        .flatten()
-        .and_then(|g| g.get(&opts.branch).and_then(|n| n.parent.clone()));
-
     register_and_wire(
         root,
-        &repo_dir,
-        &repo.base,
         id,
-        &repo_name,
-        &name,
-        &opts.branch,
-        &tree_path,
-        parent_branch,
-        None,
+        Registration {
+            repo_dir: &repo_dir,
+            base: &repo.base,
+            repo_name: &repo_name,
+            name: &name,
+            branch: &opts.branch,
+            tree_path: &tree_path,
+        },
     )?;
 
     start_provisioning(root, config_path, id, &opts.profiles)?;
@@ -979,34 +685,11 @@ pub fn rm_tree(
     selector: &str,
     force: bool,
     delete_branch: bool,
-    reparent_children: bool,
-) -> Result<()> {
-    rm_tree_with(
-        root,
-        config_path,
-        selector,
-        force,
-        delete_branch,
-        reparent_children,
-        "gt",
-    )
-}
-
-fn rm_tree_with(
-    root: &Path,
-    config_path: &Path,
-    selector: &str,
-    force: bool,
-    delete_branch: bool,
-    reparent_children: bool,
-    gt_bin: &str,
 ) -> Result<()> {
     let store = store::load(root)?;
     let tree = store::resolve(&store.trees, selector)?;
     let id = tree.id;
     let name = tree.name.clone();
-    // The live branch, not `tree.branch`: `gt create` moves a tree without
-    // updating the registry, so the recorded branch can drift and go stale.
     let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
     let tree_path = tree.path.clone();
     let state = tree.state;
@@ -1026,24 +709,8 @@ fn rm_tree_with(
         );
     }
 
-    if delete_branch && !force {
-        guard_stacked_children(
-            root,
-            &store,
-            &tree.repo,
-            &repo,
-            &repo_config,
-            &branch,
-            reparent_children,
-            gt_bin,
-        )?;
-    }
-
     let unsaved = branch_has_unsaved_commits(&repo.base, &branch, &repo_config.trunk)?;
 
-    // A path that's already gone is drift, not a removal to perform: there
-    // is nothing left to protect by refusing, so it skips the dirty/unpushed
-    // guard entirely and goes straight to unregistering below.
     if tree_path.exists() {
         if !force {
             if git::is_dirty(&tree_path)? {
@@ -1058,9 +725,6 @@ fn rm_tree_with(
             }
         }
 
-        // Only reachable with `force` when still provisioning (the guard
-        // above already refused otherwise), so it's always correct to stop
-        // the child here before the directory disappears under it.
         if state == TreeState::Provisioning {
             crate::proc::stop_provisioning_child(provision_pid, id);
         }
@@ -1117,196 +781,6 @@ fn rm_tree_with(
     Ok(())
 }
 
-/// `branch`'s children, each paired with where it lives — the same holder
-/// resolution `wt restack` uses, so a message or a `gt track` call names
-/// an actual tree rather than a raw worktree path.
-///
-/// Unions two sources rather than trusting the wt graph alone: a branch `gt`
-/// tracked before wt recorded parent edges, or one `gt create` made out of
-/// band, has no `wt` tree of its own and so exists only in Graphite's db.
-/// Missing that would weaken this guard for exactly the branches it exists
-/// to protect — a delete guard may only ever gain children from a wider
-/// check, never lose them from a narrower one.
-///
-/// `Ok(None)` when neither source knows `branch` at all: there is nothing to
-/// check a delete against, so callers treat that the same as "no children."
-///
-/// Takes `stacks` already loaded rather than loading it itself, so a
-/// caller walking every tree in a repo pays that cost once, not per tree.
-fn stacked_children(
-    stacks: Option<&Stacks>,
-    store: &store::Store,
-    repo_name: &str,
-    repo: &Repo,
-    branch: &str,
-) -> Result<Option<(Option<String>, Vec<restack::Step>)>> {
-    let wt_node = stacks.and_then(|s| s.graph.get(branch));
-    let parent = wt_node.and_then(|n| n.parent.clone());
-    let mut child_names: Vec<String> = wt_node.map(|n| n.children.clone()).unwrap_or_default();
-
-    let common_dir = git::common_dir(&repo.base)?;
-    let mut known_elsewhere = wt_node.is_some();
-    if graphite::available(&common_dir) {
-        let db_graph = graphite::graph_light(&common_dir)?;
-        if let Some(node) = db_graph.get(branch) {
-            known_elsewhere = true;
-            for child in &node.children {
-                if !child_names.contains(child) {
-                    child_names.push(child.clone());
-                }
-            }
-        }
-    }
-    if !known_elsewhere {
-        return Ok(None);
-    }
-
-    let worktrees = git::worktree_branches(&repo.base)?;
-    let base = std::fs::canonicalize(&repo.base).unwrap_or_else(|_| repo.base.clone());
-    let children = child_names
-        .into_iter()
-        .map(|name| {
-            let entry = stacks
-                .and_then(|s| s.get(&name))
-                .cloned()
-                .unwrap_or_else(|| synthetic_entry(repo_name, store, &worktrees, &base, &name));
-            restack::step_for(&entry, store, repo)
-        })
-        .collect();
-    Ok(Some((parent, children)))
-}
-
-/// A minimal `stack::Entry` for a branch the wt graph never learned about —
-/// only its holder is known, not its own parent or PR state, but that's all
-/// `restack::step_for` needs to place it in a delete guard's message.
-fn synthetic_entry(
-    repo_name: &str,
-    store: &store::Store,
-    worktrees: &[(std::path::PathBuf, Option<String>)],
-    base: &Path,
-    branch: &str,
-) -> stack::Entry {
-    let holder = worktrees
-        .iter()
-        .find(|(_, b)| b.as_deref() == Some(branch))
-        .map(|(path, _)| stack::holder_for(repo_name, store, base, path))
-        .unwrap_or(stack::Holder::None);
-    stack::Entry {
-        branch: branch.to_string(),
-        parent: None,
-        needs_restack: None,
-        pending_restack: false,
-        pr_number: None,
-        pr_state: None,
-        pr_review_decision: None,
-        pr_draft: None,
-        holder,
-    }
-}
-
-/// Refuses to delete a branch that still has children stacked on it —
-/// deleting it would orphan them — unless `reparent_children` re-parents
-/// each one onto the deleted branch's own parent (trunk, if it has none)
-/// with `gt track` first. Silently allows the delete when neither wt nor
-/// Graphite knows the branch at all: there is nothing to check against, and
-/// a schema change or a missing database must never block `wt tree rm`.
-#[allow(clippy::too_many_arguments)]
-fn guard_stacked_children(
-    root: &Path,
-    store: &store::Store,
-    repo_name: &str,
-    repo: &Repo,
-    repo_config: &config::RepoConfig,
-    branch: &str,
-    reparent_children: bool,
-    gt_bin: &str,
-) -> Result<()> {
-    let stacks = stack::load(repo_name, repo, store)?;
-    let Some((parent, children)) =
-        stacked_children(stacks.as_ref(), store, repo_name, repo, branch)?
-    else {
-        return Ok(());
-    };
-    if children.is_empty() {
-        return Ok(());
-    }
-    let new_parent = parent.unwrap_or_else(|| repo_config.trunk.clone());
-
-    if !reparent_children {
-        let s = if children.len() == 1 { "" } else { "es" };
-        let mut msg = format!(
-            "refusing to delete branch '{branch}': {} branch{s} stacked on top of it would be \
-             orphaned:\n",
-            children.len(),
-        );
-        for step in &children {
-            msg.push_str(&format!(
-                "  '{}' in {}\n",
-                step.branch,
-                step.location.label()
-            ));
-        }
-        msg.push_str(&format!(
-            "re-parent {} onto '{new_parent}' first, then delete '{branch}' — by hand with `gt \
-             track --parent {new_parent}` in each tree above, or pass --reparent-children to let \
-             `wt tree rm` do it for you",
-            if children.len() == 1 { "it" } else { "them" }
-        ));
-        bail!(msg);
-    }
-
-    for step in &children {
-        let out = Command::new(gt_bin)
-            .args([
-                "track",
-                &step.branch,
-                "--parent",
-                &new_parent,
-                "--no-interactive",
-            ])
-            .current_dir(&step.dir)
-            .output()
-            .with_context(|| {
-                format!(
-                    "running `gt track {} --parent {new_parent}` in {}",
-                    step.branch,
-                    step.dir.display()
-                )
-            })?;
-        if !out.status.success() {
-            bail!(
-                "re-parenting '{}' onto '{new_parent}' failed in {} ({}): {}\nbranch '{branch}' \
-                 was not deleted; fix this by hand, then retry",
-                step.branch,
-                step.location.label(),
-                step.dir.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        // `gt track` just moved this child in Graphite; wt's own record of
-        // its parent has to move with it, or the next stack read still
-        // shows the branch that's about to be deleted.
-        let new_parent_for_child = new_parent.clone();
-        store::with_store_lock(root, |s| {
-            if let Some(t) = s
-                .trees
-                .iter_mut()
-                .find(|t| t.repo == repo_name && t.branch == step.branch)
-            {
-                t.parent_branch = Some(new_parent_for_child);
-                t.pending_restack = true;
-            }
-            Ok(())
-        })?;
-        println!(
-            "re-parented '{}' onto '{new_parent}' ({})",
-            step.branch,
-            step.location.label()
-        );
-    }
-    Ok(())
-}
-
 /// Deletes the tree's directory directly instead of calling `git worktree
 /// remove`. wt's own dirty/unpushed guards already ran by this point, so
 /// git's refusal buys nothing — and for a tree with submodules, routing
@@ -1357,86 +831,48 @@ pub struct GcOptions {
 }
 
 pub fn gc(root: &Path, config_path: &Path, opts: GcOptions) -> Result<()> {
-    gc_with(root, config_path, opts, "gt")
-}
-
-fn gc_with(root: &Path, config_path: &Path, opts: GcOptions, gt_bin: &str) -> Result<()> {
     let store = store::load(root)?;
     let config = config::load(config_path)?;
     let mut candidates = 0;
-    // `stack::load` re-walks live heads and re-reads the PR sidecar for
-    // every branch in a repo, so loading it fresh per tree here would make
-    // a repo-wide gc pay that cost once per candidate instead of once.
-    let mut stacks_by_repo: HashMap<String, Option<Stacks>> = HashMap::new();
 
-    for t in &store.trees {
-        if let Some(ref r) = opts.repo
-            && &t.repo != r
-        {
+    for tree in &store.trees {
+        if opts.repo.as_deref().is_some_and(|repo| repo != tree.repo) {
             continue;
         }
-        let Some(repo) = store.repos.get(&t.repo) else {
-            eprintln!("skipping '{}': repo '{}' is not registered", t.name, t.repo);
+        let Some(repo) = store.repos.get(&tree.repo) else {
+            eprintln!(
+                "skipping '{}': repo '{}' is not registered",
+                tree.name, tree.repo
+            );
             continue;
         };
-        let repo_config = match config::repo(&config, &t.repo) {
-            Ok(c) => c,
+        let repo_config = match config::repo(&config, &tree.repo) {
+            Ok(config) => config,
             Err(e) => {
-                eprintln!("skipping '{}': {e:#}", t.name);
+                eprintln!("skipping '{}': {e:#}", tree.name);
                 continue;
             }
         };
-        if !stacks_by_repo.contains_key(&t.repo) {
-            let loaded = match stack::load(&t.repo, repo, &store) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("skipping '{}': {e:#}", t.name);
-                    continue;
-                }
-            };
-            stacks_by_repo.insert(t.repo.clone(), loaded);
-        }
-        let stacks = stacks_by_repo.get(&t.repo).and_then(|s| s.as_ref());
-        let delete_branch = match gc_verdict(stacks, &store, repo, repo_config, t) {
-            Ok(GcVerdict::Skip(reason)) => {
-                eprintln!("skipping '{}': {reason}", t.name);
+        match gc_verdict(repo, repo_config, tree) {
+            Ok(Some(reason)) => {
+                eprintln!("skipping '{}': {reason}", tree.name);
                 continue;
             }
             Err(e) => {
-                eprintln!("skipping '{}': {e:#}", t.name);
+                eprintln!("skipping '{}': {e:#}", tree.name);
                 continue;
             }
-            Ok(GcVerdict::Reap { delete_branch }) => delete_branch,
-        };
+            Ok(None) => {}
+        }
 
         candidates += 1;
-        let keeping = if delete_branch {
-            String::new()
-        } else {
-            format!(
-                " — keeping branch '{}': other branches are stacked on it",
-                store::live_branch(t).unwrap_or_else(|| t.branch.clone())
-            )
-        };
         if opts.dry_run {
-            println!("would reap '{}' ({}){keeping}", t.name, t.path.display());
+            println!("would reap '{}' ({})", tree.name, tree.path.display());
             continue;
         }
-        println!("reaping '{}' ({}){keeping}", t.name, t.path.display());
-        // The ordinary path only reaches `delete_branch: true` when there
-        // are no children to reparent, so reusing that flag here costs it
-        // nothing and lets a merged branch's children move without a
-        // person's help.
-        if let Err(e) = rm_tree_with(
-            root,
-            config_path,
-            &t.id.to_string(),
-            false,
-            delete_branch,
-            delete_branch,
-            gt_bin,
-        ) {
-            eprintln!("failed to reap '{}': {e:#}", t.name);
+        println!("reaping '{}' ({})", tree.name, tree.path.display());
+        if let Err(e) = rm_tree(root, config_path, &tree.id.to_string(), false, true) {
+            eprintln!("failed to reap '{}': {e:#}", tree.name);
         }
     }
 
@@ -1446,77 +882,28 @@ fn gc_with(root: &Path, config_path: &Path, opts: GcOptions, gt_bin: &str) -> Re
     Ok(())
 }
 
-enum GcVerdict {
-    Skip(String),
-    /// `delete_branch` is false when other branches are stacked on this
-    /// one and its pull request isn't merged or closed: the worktree is
-    /// still free to go, but the branch has to stay or its children lose
-    /// their parent. A merged or closed branch is reaped with its children
-    /// reparented instead, so this is always `true` in that case.
-    Reap {
-        delete_branch: bool,
-    },
-}
-
-/// gc reaps the worktree, not necessarily the branch. The landed check here
-/// has to stay in step with `rm_tree`'s `branch_has_unsaved_commits`: gc
-/// hands every tree it picks to `rm_tree`, so a guard that is stricter than
-/// this one refuses each one in turn and gc reaps nothing at all.
-///
-/// `stacks` is loaded once per repo by the caller, not here — a repo-wide
-/// gc calling this per tree can't afford to re-walk live heads and re-read
-/// the PR sidecar for every candidate.
+/// `None` means a tree is safe to reap. The landed check stays in step with
+/// `rm_tree`: gc hands each selected tree to that same safeguard.
 fn gc_verdict(
-    stacks: Option<&Stacks>,
-    store: &store::Store,
     repo: &Repo,
     repo_config: &config::RepoConfig,
     tree: &Tree,
-) -> Result<GcVerdict> {
+) -> Result<Option<String>> {
     if tree.spare {
-        return Ok(GcVerdict::Skip("hot spare".to_string()));
+        return Ok(Some("hot spare".to_string()));
     }
     if tree.state == TreeState::Provisioning {
-        return Ok(GcVerdict::Skip("still provisioning".to_string()));
+        return Ok(Some("still provisioning".to_string()));
     }
-    // A failed tree is clean and sits at trunk, so every check below would
-    // wave it through and take its provisioning log with it.
     if tree.state == TreeState::Failed {
-        return Ok(GcVerdict::Skip(
+        return Ok(Some(
             "provisioning failed; read its log, then remove it with `wt tree rm`".to_string(),
         ));
     }
     if tree.path.exists() && git::is_dirty(&tree.path)? {
-        return Ok(GcVerdict::Skip("uncommitted changes".to_string()));
+        return Ok(Some("uncommitted changes".to_string()));
     }
-    // `gt create` can move a tree onto a new branch without updating the
-    // registry; checking `tree.branch` instead of what's actually checked
-    // out could pronounce a tree clean by looking at a branch it abandoned.
     let branch = store::live_branch(tree).unwrap_or_else(|| tree.branch.clone());
-
-    // A closed PR's commits were never going to land on trunk, so the
-    // patch-id check below would refuse it forever; a merged or closed PR
-    // (the sidecar is the only source for this) skips straight to reaping
-    // instead. The unpushed-commits guard still runs first: losing commits
-    // nobody pushed anywhere is just as unsafe for a merged branch.
-    let merged_or_closed = stacks
-        .and_then(|s| s.get(&branch))
-        .is_some_and(|e| e.is_merged_or_closed());
-    if merged_or_closed {
-        if branch_has_unsaved_commits(&repo.base, &branch, &repo_config.trunk)? {
-            return Ok(GcVerdict::Skip(
-                "pull request is merged or closed but has commits that are neither pushed nor \
-                 landed"
-                    .to_string(),
-            ));
-        }
-        return Ok(GcVerdict::Reap {
-            delete_branch: true,
-        });
-    }
-
-    // Most trees sit exactly at trunk, so gate the patch-id walk behind the
-    // cheap count.
     if git::commits_ahead(
         &repo.base,
         &format!("origin/{}..{branch}", repo_config.trunk),
@@ -1528,34 +915,22 @@ fn gc_verdict(
         )?;
         if !unlanded.is_empty() {
             let n = unlanded.len();
-            return Ok(GcVerdict::Skip(format!(
+            return Ok(Some(format!(
                 "{n} commit{} not yet in origin/{}",
                 if n == 1 { "" } else { "s" },
                 repo_config.trunk
             )));
         }
     }
-    // Children only block deleting the branch, not reclaiming the worktree —
-    // gc's actual job — so the tree goes and the branch stays as their parent.
-    if let Some((_, children)) = stacked_children(stacks, store, &tree.repo, repo, &branch)?
-        && !children.is_empty()
-    {
-        return Ok(GcVerdict::Reap {
-            delete_branch: false,
-        });
-    }
-    Ok(GcVerdict::Reap {
-        delete_branch: true,
-    })
+    Ok(None)
 }
 
 pub struct DoctorOptions {
     pub fix: bool,
 }
 
-pub fn doctor(root: &Path, config_path: &Path, opts: DoctorOptions) -> Result<()> {
+pub fn doctor(root: &Path, opts: DoctorOptions) -> Result<()> {
     let store = store::load(root)?;
-    let config = config::load(config_path)?;
 
     for (repo_name, repo) in &store.repos {
         println!("== {repo_name} ==");
@@ -1563,117 +938,72 @@ pub fn doctor(root: &Path, config_path: &Path, opts: DoctorOptions) -> Result<()
         let registered: Vec<&Tree> = store
             .trees
             .iter()
-            .filter(|t| &t.repo == repo_name)
+            .filter(|tree| &tree.repo == repo_name)
             .collect();
         let mut stale_ids = Vec::new();
 
-        for t in &registered {
-            if !t.path.exists() {
+        for tree in &registered {
+            if !tree.path.exists() {
                 println!(
                     "  stale registry entry: '{}' — {} no longer exists",
-                    t.name,
-                    t.path.display()
+                    tree.name,
+                    tree.path.display()
                 );
-                stale_ids.push(t.id);
+                stale_ids.push(tree.id);
             }
         }
 
-        for w in &worktrees {
-            if w.path == repo.base {
+        for worktree in &worktrees {
+            if worktree.path == repo.base {
                 continue;
             }
-            if !registered.iter().any(|t| t.path == w.path) {
-                let branch = w.branch.as_deref().unwrap_or("(detached)");
+            if !registered.iter().any(|tree| tree.path == worktree.path) {
+                let branch = worktree.branch.as_deref().unwrap_or("(detached)");
                 println!(
                     "  unregistered worktree: {} (branch {branch}) — not tracked by wt; leave it \
                      alone or register it by hand if you want wt to manage it",
-                    w.path.display()
+                    worktree.path.display()
                 );
             }
         }
 
-        // Graphite's db is the only source for the next three findings; a
-        // missing or schema-mismatched db just skips them, same as every
-        // other reader of it in this codebase.
-        let common_dir = git::common_dir(&repo.base)?;
-        let db_graph = graphite::available(&common_dir)
-            .then(|| graphite::graph_light(&common_dir).ok())
-            .flatten();
-
-        for t in &registered {
-            if !t.path.exists() {
+        for tree in &registered {
+            if !tree.path.exists() {
                 continue;
             }
-            match worktrees.iter().find(|w| w.path == t.path) {
-                // A spare is detached by design; comparing it against a
-                // recorded branch it was never meant to have would flag
-                // every single one.
-                Some(w) if !t.spare && w.branch.as_deref() != Some(t.branch.as_str()) => {
-                    let actual = w.branch.as_deref().unwrap_or("(detached)");
+            match worktrees.iter().find(|worktree| worktree.path == tree.path) {
+                Some(worktree)
+                    if !tree.spare && worktree.branch.as_deref() != Some(tree.branch.as_str()) =>
+                {
+                    let actual = worktree.branch.as_deref().unwrap_or("(detached)");
                     println!(
                         "  branch mismatch: '{}' registered as '{}' but checked out as {actual}",
-                        t.name, t.branch
+                        tree.name, tree.branch
                     );
                     if opts.fix
-                        && let Some(actual_branch) = &w.branch
+                        && let Some(actual_branch) = &worktree.branch
                     {
-                        fix_branch_mismatch(root, t.id, actual_branch, db_graph.as_ref())?;
+                        fix_branch_mismatch(root, tree.id, actual_branch)?;
                         println!(
                             "    fixed: '{}' now registered as '{actual_branch}'",
-                            t.name
+                            tree.name
                         );
                     }
                 }
                 Some(_) => {}
                 None => println!(
                     "  drifted: '{}' exists on disk at {} but git no longer lists it as a worktree",
-                    t.name,
-                    t.path.display()
+                    tree.name,
+                    tree.path.display()
                 ),
-            }
-        }
-
-        if let Some(db_graph) = &db_graph {
-            let pr_infos = graphite::read_pr_info(&common_dir);
-            if let Ok(repo_config) = config::repo(&config, repo_name) {
-                let held = held_branches(&registered, &worktrees);
-                for branch in
-                    homeless_branches(db_graph, pr_infos.as_ref(), &repo_config.trunk, &held)
-                {
-                    println!(
-                        "  homeless branch: '{branch}' is tracked by Graphite but no wt tree \
-                         holds it; adopt it with `wt adopt-branch {branch}`"
-                    );
-                }
-            }
-
-            for t in &registered {
-                if t.spare {
-                    continue;
-                }
-                if let Some(new_parent) = parent_drift(db_graph, t) {
-                    println!(
-                        "  parent drift: '{}' recorded parent is {} but Graphite has {}",
-                        t.name,
-                        describe_parent(t.parent_branch.as_deref()),
-                        describe_parent(new_parent.as_deref())
-                    );
-                    if opts.fix {
-                        fix_parent_drift(root, t.id, new_parent.clone())?;
-                        println!(
-                            "    fixed: parent set to {}",
-                            describe_parent(new_parent.as_deref())
-                        );
-                    }
-                }
             }
         }
 
         if opts.fix {
             if !stale_ids.is_empty() {
                 let n = stale_ids.len();
-                store::with_store_lock(root, |s| {
-                    s.trees.retain(|t| !stale_ids.contains(&t.id));
+                store::with_store_lock(root, |store| {
+                    store.trees.retain(|tree| !stale_ids.contains(&tree.id));
                     Ok(())
                 })?;
                 println!(
@@ -1688,102 +1018,10 @@ pub fn doctor(root: &Path, config_path: &Path, opts: DoctorOptions) -> Result<()
     Ok(())
 }
 
-/// Every branch a wt tree holds right now: its recorded branch, plus
-/// whatever it's actually checked out as if that's drifted — a tree
-/// mid-drift still holds its live branch, just under the wrong name in the
-/// registry, and that's not what the homeless-branch finding is for.
-fn held_branches(registered: &[&Tree], worktrees: &[git::WorktreeEntry]) -> HashSet<String> {
-    let mut held: HashSet<String> = registered
-        .iter()
-        .filter(|t| !t.spare)
-        .map(|t| t.branch.clone())
-        .collect();
-    for w in worktrees {
-        if let Some(b) = &w.branch
-            && registered.iter().any(|t| !t.spare && t.path == w.path)
-        {
-            held.insert(b.clone());
-        }
-    }
-    held
-}
-
-/// Branches Graphite tracks that no wt tree holds — from `gt track` run by
-/// hand, `gt split`, or any Graphite use outside `wt new`/`wt pr new`.
-/// Trunk is never homeless (it was never a tree of its own), and neither is
-/// a branch whose pull request already merged or closed: there's nothing
-/// left to adopt it into.
-fn homeless_branches(
-    db_graph: &graphite::Graph,
-    pr_infos: Option<&std::collections::HashMap<String, graphite::PrInfo>>,
-    trunk: &str,
-    held: &HashSet<String>,
-) -> Vec<String> {
-    db_graph
-        .branch_names()
-        .filter(|b| *b != trunk)
-        .filter(|b| !held.contains(*b))
-        .filter(|b| {
-            !pr_infos
-                .and_then(|m| m.get(*b))
-                .is_some_and(|pr| matches!(pr.state.as_str(), "MERGED" | "CLOSED"))
-        })
-        .map(str::to_string)
-        .collect()
-}
-
-/// `Some(db's parent)` when Graphite's parent for `tree`'s own recorded
-/// branch disagrees with what wt has — `None` either when Graphite doesn't
-/// track that branch at all, or when the two already agree.
-fn parent_drift(db_graph: &graphite::Graph, tree: &Tree) -> Option<Option<String>> {
-    let node = db_graph.get(&tree.branch)?;
-    (node.parent != tree.parent_branch).then(|| node.parent.clone())
-}
-
-fn describe_parent(p: Option<&str>) -> String {
-    match p {
-        Some(p) => format!("'{p}'"),
-        None => "no parent".to_string(),
-    }
-}
-
-/// `wt doctor --fix`'s repair for a drifted branch: the registry catches up
-/// to what's actually checked out, and its parent is re-derived from
-/// Graphite's db when the db knows the new branch at all — otherwise the
-/// old parent is left alone rather than guessed at. Either way
-/// `parent_revision` is cleared: it described the branch that just left.
-fn fix_branch_mismatch(
-    root: &Path,
-    tree_id: Uuid,
-    live_branch: &str,
-    db_graph: Option<&graphite::Graph>,
-) -> Result<()> {
-    let new_parent = db_graph
-        .and_then(|g| g.get(live_branch))
-        .map(|n| n.parent.clone());
-    store::with_store_lock(root, |s| {
-        if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
-            t.branch = live_branch.to_string();
-            if let Some(parent) = new_parent.clone() {
-                t.parent_branch = parent;
-            }
-            t.parent_revision = None;
-        }
-        Ok(())
-    })
-}
-
-/// `wt doctor --fix`'s repair for parent drift: Graphite's db reflects
-/// whatever `gt` actually did out of band, so it wins outright. The branch
-/// itself just moved onto a new base, so its restack is due — the same
-/// signal `wt sync`'s own reparenting sets — and `parent_revision` is
-/// cleared since it described the old base.
-fn fix_parent_drift(root: &Path, tree_id: Uuid, new_parent: Option<String>) -> Result<()> {
-    store::with_store_lock(root, |s| {
-        if let Some(t) = s.trees.iter_mut().find(|t| t.id == tree_id) {
-            t.parent_branch = new_parent.clone();
-            t.parent_revision = None;
-            t.pending_restack = true;
+fn fix_branch_mismatch(root: &Path, tree_id: Uuid, live_branch: &str) -> Result<()> {
+    store::with_store_lock(root, |store| {
+        if let Some(tree) = store.trees.iter_mut().find(|tree| tree.id == tree_id) {
+            tree.branch = live_branch.to_string();
         }
         Ok(())
     })
@@ -1793,2665 +1031,61 @@ fn fix_parent_drift(root: &Path, tree_id: Uuid, new_parent: Option<String>) -> R
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::time::Instant;
 
-    #[test]
-    fn parse_pr_selector_is_none_for_a_selector_without_a_leading_hash() {
-        assert!(parse_pr_selector("stacked").is_none());
-        assert!(parse_pr_selector("some-tree").is_none());
-    }
-
-    #[test]
-    fn parse_pr_selector_parses_a_valid_number() {
-        assert_eq!(parse_pr_selector("#18736").unwrap().unwrap(), 18736);
-    }
-
-    #[test]
-    fn parse_pr_selector_errors_on_a_bare_hash() {
-        let err = parse_pr_selector("#").unwrap().unwrap_err();
-        assert!(err.to_string().contains("needs a number after '#'"));
-    }
-
-    #[test]
-    fn parse_pr_selector_errors_on_non_digit_characters() {
-        let err = parse_pr_selector("#12x3").unwrap().unwrap_err();
-        assert!(err.to_string().contains("needs a number after '#'"));
-    }
-
-    #[test]
-    fn gc_skips_a_failed_tree() {
-        let repo = Repo {
-            base: PathBuf::from("/nonexistent-base"),
-            last_fetch: None,
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "myrepo".into(),
-            name: "half provisioned".into(),
-            branch: "josh/half-provisioned".into(),
-            path: PathBuf::from("/nonexistent-tree"),
-            created: Utc::now(),
-            state: TreeState::Failed,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-
-        match gc_verdict(None, &store::Store::default(), &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Skip(reason) => assert!(
-                reason.contains("provisioning failed"),
-                "unexpected reason: {reason}"
-            ),
-            GcVerdict::Reap { .. } => panic!("a failed tree must not be reaped"),
-        }
-    }
-
-    #[test]
-    fn gc_skips_a_spare_even_though_it_is_clean_with_no_commits() {
-        let repo = Repo {
-            base: PathBuf::from("/nonexistent-base"),
-            last_fetch: None,
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        // A spare with no branch and nothing dirty is exactly the state
-        // that gets an ordinary tree reaped; only `tree.spare` tells gc
-        // to leave it alone.
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "myrepo".into(),
-            name: store::SPARE_NAME.into(),
-            branch: String::new(),
-            path: PathBuf::from("/nonexistent-tree"),
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: true,
-        };
-
-        match gc_verdict(None, &store::Store::default(), &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Skip(reason) => assert_eq!(reason, "hot spare"),
-            GcVerdict::Reap { .. } => panic!("a hot spare must never be reaped"),
-        }
-    }
-
-    #[test]
-    fn gc_reaps_a_tree_with_graphite_children_but_keeps_the_branch() {
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-children-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-        git_cmd(&["branch", "a"], &base);
-        git_cmd(&["branch", "b"], &base);
-        let tree_path = dir.join("tree-a");
-        git_cmd(
-            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
-            &base,
-        );
-        let tree_path = fs::canonicalize(&tree_path).unwrap();
-
-        let db = base.join(".git").join(".graphite_metadata.db");
-        let sqlite = |sql: &str| {
-            let out = Command::new("/usr/bin/sqlite3")
-                .arg(&db)
-                .arg(sql)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "sqlite3 {sql} failed");
-        };
-        sqlite(
-            "CREATE TABLE branch_metadata (\
-             branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
-             parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
-             children TEXT, branch_revision TEXT, validation_result TEXT, \
-             parent_head_revision TEXT);",
-        );
-        sqlite(
-            "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
-             ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL);",
-        );
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_path,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Reap { delete_branch } => assert!(
-                !delete_branch,
-                "a branch with Graphite children stacked on it must survive gc"
-            ),
-            GcVerdict::Skip(reason) => {
-                panic!("a tree with Graphite children must still be reaped: {reason}")
-            }
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn gc_reaps_a_tree_whose_commits_already_landed() {
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-landed-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        let head_sha = |cwd: &Path| {
-            String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(cwd)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string()
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let init_sha = head_sha(&base);
-        git_cmd(
-            &["update-ref", "refs/remotes/origin/master", &init_sha],
-            &base,
-        );
-        git_cmd(&["branch", "a"], &base);
-        let tree_path = dir.join("tree-a");
-        git_cmd(
-            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
-            &base,
-        );
-        let tree_path = fs::canonicalize(&tree_path).unwrap();
-
-        // Same patch, different SHA — what a squash merge looks like from
-        // the tree's side.
-        fs::write(tree_path.join("f.txt"), "1\n").unwrap();
-        git_cmd(&["add", "-A"], &tree_path);
-        git_cmd(&["commit", "-qm", "change"], &tree_path);
-
-        fs::write(base.join("f.txt"), "1\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "same change, landed on master"], &base);
-        let landed_sha = head_sha(&base);
-        git_cmd(
-            &["update-ref", "refs/remotes/origin/master", &landed_sha],
-            &base,
-        );
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_path,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Reap { delete_branch } => {
-                assert!(delete_branch, "no Graphite children here to keep it for")
-            }
-            GcVerdict::Skip(reason) => panic!("unexpected skip: {reason}"),
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn gc_skips_a_tree_with_an_unlanded_commit() {
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-unlanded-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let init_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        git_cmd(
-            &["update-ref", "refs/remotes/origin/master", &init_sha],
-            &base,
-        );
-        git_cmd(&["branch", "a"], &base);
-        let tree_path = dir.join("tree-a");
-        git_cmd(
-            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
-            &base,
-        );
-        let tree_path = fs::canonicalize(&tree_path).unwrap();
-
-        fs::write(tree_path.join("f.txt"), "unlanded\n").unwrap();
-        git_cmd(&["add", "-A"], &tree_path);
-        git_cmd(&["commit", "-qm", "still open"], &tree_path);
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_path,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Skip(reason) => assert!(
-                reason.contains("not yet in origin/master"),
-                "unexpected reason: {reason}"
-            ),
-            GcVerdict::Reap { .. } => panic!("an unlanded commit must not be reaped"),
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    fn write_pr_info(common_dir: &Path, branch: &str, state: &str) {
-        fs::write(
-            common_dir.join(".graphite_pr_info"),
-            format!(
-                r#"{{"prInfos": [{{"headRefName": "{branch}", "prNumber": 1,
-                 "state": "{state}", "reviewDecision": null, "isDraft": false}}]}}"#
-            ),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn gc_verdict_reaps_a_merged_pr_tree_despite_unlanded_commits() {
-        let dir =
-            std::env::temp_dir().join(format!("wt-tree-gc-merged-unlanded-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let init_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        git_cmd(
-            &["update-ref", "refs/remotes/origin/master", &init_sha],
-            &base,
-        );
-        git_cmd(&["branch", "a"], &base);
-        let tree_path = dir.join("tree-a");
-        git_cmd(
-            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
-            &base,
-        );
-        let tree_path = fs::canonicalize(&tree_path).unwrap();
-
-        // Never landed on trunk by patch-id — a closed PR's commits were
-        // never going to be — but pushed to its own remote branch, the way
-        // `gt submit` leaves it. That's what the ordinary ahead-of-trunk
-        // check can't see, and what a closed PR is supposed to override.
-        fs::write(tree_path.join("f.txt"), "abandoned\n").unwrap();
-        git_cmd(&["add", "-A"], &tree_path);
-        git_cmd(&["commit", "-qm", "abandoned work"], &tree_path);
-        let branch_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&tree_path)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        // `--set-upstream-to` (and git's own resolution of `a@{upstream}`)
-        // both insist the remote actually exists, even though nothing here
-        // ever fetches from it.
-        git_cmd(&["remote", "add", "origin", "/nonexistent"], &base);
-        git_cmd(&["update-ref", "refs/remotes/origin/a", &branch_sha], &base);
-        git_cmd(&["branch", "--set-upstream-to=origin/a", "a"], &base);
-
-        write_pr_info(&base.join(".git"), "a", "CLOSED");
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_path,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: Some("master".into()),
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Reap { delete_branch } => {
-                assert!(
-                    delete_branch,
-                    "a closed PR's branch has nothing left to keep it for"
-                )
-            }
-            GcVerdict::Skip(reason) => panic!("a closed PR must be reaped anyway: {reason}"),
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn gc_verdict_skips_a_merged_pr_tree_that_is_dirty() {
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-merged-dirty-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        git_cmd(&["branch", "a"], &base);
-        let tree_path = dir.join("tree-a");
-        git_cmd(
-            &["worktree", "add", tree_path.to_str().unwrap(), "a"],
-            &base,
-        );
-        let tree_path = fs::canonicalize(&tree_path).unwrap();
-        fs::write(tree_path.join("f.txt"), "dirty\n").unwrap();
-
-        write_pr_info(&base.join(".git"), "a", "MERGED");
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_path,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: Some("master".into()),
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Skip(reason) => assert!(
-                reason.contains("uncommitted"),
-                "a merged PR must not force teardown of a dirty tree: {reason}"
-            ),
-            GcVerdict::Reap { .. } => panic!("a dirty tree must never be reaped"),
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn gc_reaps_a_merged_pr_tree_and_reparents_its_child() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-merged-child-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        let branch_exists = |branch: &str| {
-            Command::new("git")
-                .args([
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{branch}"),
-                ])
-                .current_dir(&base)
-                .status()
-                .unwrap()
-                .success()
-        };
-
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let init_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        git_cmd(
-            &["update-ref", "refs/remotes/origin/master", &init_sha],
-            &base,
-        );
-        git_cmd(&["branch", "a"], &base);
-        git_cmd(&["branch", "b"], &base);
-
-        let tree_a = dir.join("tree-a");
-        git_cmd(&["worktree", "add", tree_a.to_str().unwrap(), "a"], &base);
-        let tree_a = fs::canonicalize(&tree_a).unwrap();
-        let tree_b = dir.join("tree-b");
-        git_cmd(&["worktree", "add", tree_b.to_str().unwrap(), "b"], &base);
-        let tree_b = fs::canonicalize(&tree_b).unwrap();
-
-        // An unlanded commit of its own keeps gc's own pass over tree-b
-        // from reaping it too — this test is about `a` being reaped and
-        // `b` being reparented, not about `b`'s own fate.
-        fs::write(tree_b.join("f.txt"), "still working\n").unwrap();
-        git_cmd(&["add", "-A"], &tree_b);
-        git_cmd(&["commit", "-qm", "still working"], &tree_b);
-
-        write_pr_info(&base.join(".git"), "a", "MERGED");
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree_a_row = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: tree_a,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: Some("master".into()),
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let tree_b_row = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-b".into(),
-            branch: "b".into(),
-            path: tree_b,
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: Some("a".into()),
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-
-        let root = dir.join("wtroot");
-        store::with_store_lock(&root, |s| {
-            s.repos.insert("r".to_string(), repo.clone());
-            s.trees = vec![tree_a_row.clone(), tree_b_row.clone()];
-            Ok(())
-        })
-        .unwrap();
-        let config_path = dir.join("config.kdl");
-        config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-        let log = dir.join("gt-log.txt");
-        let gt_script = dir.join("gt");
-        fs::write(
-            &gt_script,
-            format!(
-                "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\nexit 0\n",
-                log.display()
-            ),
-        )
-        .unwrap();
-        let mut perms = fs::metadata(&gt_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&gt_script, perms).unwrap();
-
-        gc_with(
-            &root,
-            &config_path,
-            GcOptions {
-                repo: Some("r".to_string()),
-                dry_run: false,
-            },
-            gt_script.to_str().unwrap(),
-        )
-        .unwrap();
-
-        assert!(!branch_exists("a"), "a merged branch must be deleted");
-
-        let store = store::load(&root).unwrap();
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
         assert!(
-            store.trees.iter().all(|t| t.name != "tree-a"),
-            "the reaped tree must be gone from the registry"
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        let b = store
-            .trees
-            .iter()
-            .find(|t| t.name == "tree-b")
-            .expect("tree-b must survive");
-        assert_eq!(
-            b.parent_branch.as_deref(),
-            Some("master"),
-            "tree-b must be reparented onto a's own parent"
-        );
-        assert!(
-            b.pending_restack,
-            "tree-b's base just changed out from under it"
-        );
+    }
 
-        let log_contents = fs::read_to_string(&log).unwrap();
-        assert!(
-            log_contents.contains("track b --parent master --no-interactive"),
-            "expected b re-parented via gt track; log was: {log_contents}"
-        );
-
-        fs::remove_dir_all(&dir).ok();
+    fn repo() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("wt-tree-test-{}", Uuid::now_v7()));
+        fs::create_dir_all(&path).unwrap();
+        git(&path, &["init", "-q", "-b", "main"]);
+        git(&path, &["config", "user.email", "test@example.com"]);
+        git(&path, &["config", "user.name", "Test"]);
+        fs::write(path.join("file"), "initial\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-qm", "initial"]);
+        path
     }
 
     #[test]
-    fn gc_reaps_a_tree_whose_path_no_longer_exists() {
-        let dir = std::env::temp_dir().join(format!("wt-tree-gc-gone-{}", Uuid::now_v7()));
-        let base = dir.join("base");
-        fs::create_dir_all(&base).unwrap();
-        let git_cmd = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-        };
-        git_cmd(&["init", "-q", "-b", "master"], &base);
-        git_cmd(&["config", "user.email", "t@t"], &base);
-        git_cmd(&["config", "user.name", "t"], &base);
-        fs::write(base.join("f.txt"), "0\n").unwrap();
-        git_cmd(&["add", "-A"], &base);
-        git_cmd(&["commit", "-qm", "init"], &base);
-        let sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-        git_cmd(&["branch", "a"], &base);
-
-        let repo = Repo {
-            base: base.clone(),
-            last_fetch: Some(Utc::now()),
-        };
-        let repo_config = config::RepoConfig {
-            trunk: "master".into(),
-            branch_prefix: "josh/".into(),
-            spares: 1,
-            env: Default::default(),
-            steps: Vec::new(),
-        };
-        let tree = Tree {
-            id: Uuid::now_v7(),
-            repo: "r".into(),
-            name: "tree-a".into(),
-            branch: "a".into(),
-            path: dir.join("tree-a-never-created"),
-            created: Utc::now(),
-            state: TreeState::Ready,
-            step_label: None,
-            step_index: None,
-            step_total: None,
-            log_path: None,
-            provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
-            spare: false,
-        };
-        let mut store = store::Store::default();
-        store.repos.insert("r".to_string(), repo.clone());
-        store.trees = vec![tree.clone()];
-
-        let stacks = stack::load("r", &repo, &store).unwrap();
-        match gc_verdict(stacks.as_ref(), &store, &repo, &repo_config, &tree).unwrap() {
-            GcVerdict::Reap { delete_branch } => {
-                assert!(delete_branch, "no Graphite children here to keep it for")
-            }
-            GcVerdict::Skip(reason) => panic!("unexpected skip: {reason}"),
-        }
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    mod unsaved_commits {
-        use super::*;
-
-        fn git_cmd(args: &[&str], cwd: &Path) {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn head_sha(cwd: &Path) -> String {
-            String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(cwd)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string()
-        }
-
-        fn fixture(label: &str) -> PathBuf {
-            let base =
-                std::env::temp_dir().join(format!("wt-tree-unsaved-{label}-{}", Uuid::now_v7()));
-            fs::create_dir_all(&base).unwrap();
-            git_cmd(&["init", "-q", "-b", "master"], &base);
-            git_cmd(&["config", "user.email", "t@t"], &base);
-            git_cmd(&["config", "user.name", "t"], &base);
-            fs::write(base.join("f.txt"), "0\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "init"], &base);
-            let sha = head_sha(&base);
-            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-            base
-        }
-
-        /// A squash merge lands `feature`'s work on `origin/master` under a
-        /// brand new SHA, leaving the branch ahead of trunk by SHA but not by
-        /// patch — so nothing here is at risk of being lost.
-        #[test]
-        fn false_when_the_same_patch_already_landed_on_trunk_under_a_different_sha() {
-            let base = fixture("landed");
-            git_cmd(&["checkout", "-qb", "feature"], &base);
-            fs::write(base.join("f.txt"), "1\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "change"], &base);
-
-            git_cmd(&["checkout", "-q", "master"], &base);
-            fs::write(base.join("f.txt"), "1\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "same change, landed on master"], &base);
-            let landed_sha = head_sha(&base);
-            git_cmd(
-                &["update-ref", "refs/remotes/origin/master", &landed_sha],
-                &base,
-            );
-
-            assert!(
-                !branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
-                "a commit already landed under another SHA is not at risk"
-            );
-
-            fs::remove_dir_all(&base).ok();
-        }
-
-        #[test]
-        fn true_when_unlanded_and_unpushed() {
-            let base = fixture("unpushed");
-            git_cmd(&["checkout", "-qb", "feature"], &base);
-            fs::write(base.join("f.txt"), "unlanded\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "still open"], &base);
-
-            assert!(
-                branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
-                "unlanded work with no upstream to fall back on is at risk"
-            );
-
-            fs::remove_dir_all(&base).ok();
-        }
-
-        #[test]
-        fn false_when_unlanded_on_trunk_but_pushed_to_its_own_upstream() {
-            let base = fixture("pushed");
-            // `@{upstream}` only resolves once "origin" is a configured
-            // remote — the ref under refs/remotes/ is not enough on its own.
-            git_cmd(&["remote", "add", "origin", "/nonexistent"], &base);
-            git_cmd(&["checkout", "-qb", "feature"], &base);
-            fs::write(base.join("f.txt"), "unlanded\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "still open"], &base);
-            let feature_sha = head_sha(&base);
-            git_cmd(
-                &["update-ref", "refs/remotes/origin/feature", &feature_sha],
-                &base,
-            );
-            git_cmd(&["config", "branch.feature.remote", "origin"], &base);
-            git_cmd(
-                &["config", "branch.feature.merge", "refs/heads/feature"],
-                &base,
-            );
-
-            assert!(
-                !branch_has_unsaved_commits(&base, "feature", "master").unwrap(),
-                "work pushed to the branch's own upstream is not at risk, even if trunk \
-                 hasn't merged it yet"
-            );
-
-            fs::remove_dir_all(&base).ok();
-        }
-    }
-
-    mod delete_branch_guard {
-        use super::*;
-        use std::os::unix::fs::PermissionsExt;
-
-        fn git_cmd(args: &[&str], cwd: &Path) {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn sqlite(db: &Path, sql: &str) {
-            let out = Command::new("/usr/bin/sqlite3")
-                .arg(db)
-                .arg(sql)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "sqlite3 {sql} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn branch_exists(base: &Path, branch: &str) -> bool {
-            Command::new("git")
-                .args([
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{branch}"),
-                ])
-                .current_dir(base)
-                .status()
-                .unwrap()
-                .success()
-        }
-
-        fn fake_gt(dir: &Path, log: &Path) -> PathBuf {
-            let script = dir.join("gt");
-            fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\nexit 0\n",
-                    log.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).unwrap();
-            script
-        }
-
-        fn fake_gt_failing(dir: &Path, log: &Path) -> PathBuf {
-            let script = dir.join("gt");
-            fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\necho 'gt: boom' >&2\nexit 1\n",
-                    log.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).unwrap();
-            script
-        }
-
-        /// `master -> a -> {b, c}`: `a` is the tree being removed, `b` is
-        /// held by a registered tree, and `c` is tracked by Graphite but
-        /// checked out nowhere — the two holder kinds `stacked_children`
-        /// must name distinctly in a refusal.
-        fn fixture() -> (PathBuf, Repo, config::RepoConfig, PathBuf, PathBuf) {
-            let dir = std::env::temp_dir().join(format!("wt-tree-rmguard-{}", Uuid::now_v7()));
-            let base = dir.join("base");
-            fs::create_dir_all(&base).unwrap();
-            git_cmd(&["init", "-q", "-b", "master"], &base);
-            git_cmd(&["config", "user.email", "t@t"], &base);
-            git_cmd(&["config", "user.name", "t"], &base);
-            fs::write(base.join("f.txt"), "0\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "init"], &base);
-            let sha = String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(&base)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string();
-            // `branch_has_unsaved_commits` diffs against `origin/<trunk>`
-            // first; a fake ref stands in for a real remote so that check
-            // has something to diff against.
-            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-            git_cmd(&["branch", "a"], &base);
-            git_cmd(&["branch", "b"], &base);
-            git_cmd(&["branch", "c"], &base);
-
-            let tree_a = dir.join("tree-a");
-            git_cmd(&["worktree", "add", tree_a.to_str().unwrap(), "a"], &base);
-            let tree_a = fs::canonicalize(&tree_a).unwrap();
-            let tree_b = dir.join("tree-b");
-            git_cmd(&["worktree", "add", tree_b.to_str().unwrap(), "b"], &base);
-            let tree_b = fs::canonicalize(&tree_b).unwrap();
-
-            let common_dir = base.join(".git");
-            let db = common_dir.join(".graphite_metadata.db");
-            sqlite(
-                &db,
-                "CREATE TABLE branch_metadata (\
-                 branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
-                 parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
-                 children TEXT, branch_revision TEXT, validation_result TEXT, \
-                 parent_head_revision TEXT);",
-            );
-            sqlite(
-                &db,
-                "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
-                 ('master', NULL, 'TRUNK'), ('a', 'master', NULL), ('b', 'a', NULL), \
-                 ('c', 'a', NULL);",
-            );
-
-            let repo = Repo {
-                base: base.clone(),
-                last_fetch: Some(Utc::now()),
-            };
-            let repo_config = config::RepoConfig {
-                trunk: "master".into(),
-                branch_prefix: "josh/".into(),
-                spares: 1,
-                env: Default::default(),
-                steps: Vec::new(),
-            };
-            (dir, repo, repo_config, tree_a, tree_b)
-        }
-
-        fn sample_tree(name: &str, branch: &str, path: PathBuf) -> Tree {
-            Tree {
-                id: Uuid::now_v7(),
-                repo: "r".into(),
-                name: name.into(),
-                branch: branch.into(),
-                path,
-                created: Utc::now(),
-                state: TreeState::Ready,
-                step_label: None,
-                step_index: None,
-                step_total: None,
-                log_path: None,
-                provision_pid: None,
-                parent_branch: None,
-                parent_revision: None,
-                pending_restack: false,
-                pr_number: None,
-                spare: false,
-            }
-        }
-
-        fn root_with(
-            dir: &Path,
-            repo: &Repo,
-            repo_config: &config::RepoConfig,
-            trees: Vec<Tree>,
-        ) -> (PathBuf, PathBuf) {
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                s.trees = trees;
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", repo_config).unwrap();
-            (root, config_path)
-        }
-
-        #[test]
-        fn refuses_and_never_invokes_gt_when_the_branch_has_children() {
-            let (dir, repo, repo_config, tree_a, tree_b) = fixture();
-            let tree_a_id = Uuid::now_v7();
-            let mut a = sample_tree("tree-a", "a", tree_a.clone());
-            a.id = tree_a_id;
-            let (root, config_path) = root_with(
-                &dir,
-                &repo,
-                &repo_config,
-                vec![a, sample_tree("tree-b", "b", tree_b)],
-            );
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let err = rm_tree_with(
-                &root,
-                &config_path,
-                "tree-a",
-                false,
-                true,
-                false,
-                gt.to_str().unwrap(),
-            )
-            .unwrap_err();
-            let msg = err.to_string();
-
-            assert!(
-                msg.contains("'b'") && msg.contains("tree-b"),
-                "message: {msg}"
-            );
-            assert!(msg.contains("'c'"), "message: {msg}");
-            assert!(msg.contains("--reparent-children"), "message: {msg}");
-            assert!(!log.exists(), "gt must never run on a plain refusal");
-            assert!(
-                branch_exists(&repo.base, "a"),
-                "branch 'a' must survive a refusal"
-            );
-            assert!(tree_a.exists(), "tree must survive a refusal");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn force_bypasses_the_children_check_entirely() {
-            let (dir, repo, repo_config, tree_a, tree_b) = fixture();
-            let mut a = sample_tree("tree-a", "a", tree_a.clone());
-            a.id = Uuid::now_v7();
-            let (root, config_path) = root_with(
-                &dir,
-                &repo,
-                &repo_config,
-                vec![a, sample_tree("tree-b", "b", tree_b)],
-            );
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            rm_tree_with(
-                &root,
-                &config_path,
-                "tree-a",
-                true,
-                true,
-                false,
-                gt.to_str().unwrap(),
-            )
-            .unwrap();
-
-            assert!(!log.exists(), "--force must skip the check, not reparent");
-            assert!(
-                !branch_exists(&repo.base, "a"),
-                "--force must still delete the branch"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn reparent_children_flag_retracks_each_child_then_deletes_the_branch() {
-            let (dir, repo, repo_config, tree_a, tree_b) = fixture();
-            let mut a = sample_tree("tree-a", "a", tree_a.clone());
-            a.id = Uuid::now_v7();
-            let (root, config_path) = root_with(
-                &dir,
-                &repo,
-                &repo_config,
-                vec![a, sample_tree("tree-b", "b", tree_b.clone())],
-            );
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            rm_tree_with(
-                &root,
-                &config_path,
-                "tree-a",
-                false,
-                true,
-                true,
-                gt.to_str().unwrap(),
-            )
-            .unwrap();
-
-            let log_contents = fs::read_to_string(&log).unwrap();
-            assert!(
-                log_contents.contains(&format!(
-                    "track b --parent master --no-interactive | {}",
-                    tree_b.display()
-                )),
-                "expected b re-parented from tree-b; log was: {log_contents}"
-            );
-            let base = fs::canonicalize(&repo.base).unwrap();
-            assert!(
-                log_contents.contains(&format!(
-                    "track c --parent master --no-interactive | {}",
-                    base.display()
-                )),
-                "expected c (held nowhere) re-parented from base; log was: {log_contents}"
-            );
-            assert!(
-                !branch_exists(&repo.base, "a"),
-                "branch 'a' must be deleted once its children are re-parented"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn a_failed_reparent_leaves_the_branch_undeleted() {
-            let (dir, repo, repo_config, tree_a, tree_b) = fixture();
-            let mut a = sample_tree("tree-a", "a", tree_a.clone());
-            a.id = Uuid::now_v7();
-            let (root, config_path) = root_with(
-                &dir,
-                &repo,
-                &repo_config,
-                vec![a, sample_tree("tree-b", "b", tree_b)],
-            );
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt_failing(&dir, &log);
-            let err = rm_tree_with(
-                &root,
-                &config_path,
-                "tree-a",
-                false,
-                true,
-                true,
-                gt.to_str().unwrap(),
-            )
-            .unwrap_err();
-
-            assert!(err.to_string().contains("not deleted"), "error: {err}");
-            assert!(
-                branch_exists(&repo.base, "a"),
-                "a failed re-parent must not fall through to deleting the branch"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-    }
-
-    mod branch_drift {
-        use super::*;
-
-        fn git_cmd(args: &[&str], cwd: &Path) {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn branch_exists(base: &Path, branch: &str) -> bool {
-            Command::new("git")
-                .args([
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{branch}"),
-                ])
-                .current_dir(base)
-                .status()
-                .unwrap()
-                .success()
-        }
-
-        /// A tree registered as branch `josh/started-here`, but `gt create`
-        /// (simulated with a plain `checkout -b`) has since moved it onto
-        /// `josh/moved-on` without the registry ever finding out — the kind
-        /// of drift `Tree.branch` accumulates once Graphite moves a tree
-        /// along its stack.
-        #[test]
-        fn delete_branch_deletes_the_live_branch_not_the_stale_recorded_one() {
-            let dir = std::env::temp_dir().join(format!("wt-tree-drift-{}", Uuid::now_v7()));
-            let base = dir.join("base");
-            fs::create_dir_all(&base).unwrap();
-            git_cmd(&["init", "-q", "-b", "master"], &base);
-            git_cmd(&["config", "user.email", "t@t"], &base);
-            git_cmd(&["config", "user.name", "t"], &base);
-            fs::write(base.join("f.txt"), "0\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "init"], &base);
-            let sha = String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(&base)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string();
-            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-
-            let tree_path = dir.join("tree");
-            git_cmd(
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    "josh/started-here",
-                    tree_path.to_str().unwrap(),
-                ],
-                &base,
-            );
-            let tree_path = fs::canonicalize(&tree_path).unwrap();
-            git_cmd(&["checkout", "-qb", "josh/moved-on"], &tree_path);
-
-            let repo = Repo {
-                base: base.clone(),
-                last_fetch: Some(Utc::now()),
-            };
-            let repo_config = config::RepoConfig {
-                trunk: "master".into(),
-                branch_prefix: "josh/".into(),
-                spares: 1,
-                env: Default::default(),
-                steps: Vec::new(),
-            };
-            let tree = Tree {
-                id: Uuid::now_v7(),
-                repo: "r".into(),
-                name: "drifted".into(),
-                branch: "josh/started-here".into(),
-                path: tree_path.clone(),
-                created: Utc::now(),
-                state: TreeState::Ready,
-                step_label: None,
-                step_index: None,
-                step_total: None,
-                log_path: None,
-                provision_pid: None,
-                parent_branch: None,
-                parent_revision: None,
-                pending_restack: false,
-                pr_number: None,
-                spare: false,
-            };
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                s.trees = vec![tree];
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            rm_tree(&root, &config_path, "drifted", false, true, false).unwrap();
-
-            assert!(
-                !branch_exists(&base, "josh/moved-on"),
-                "the live branch must be deleted"
-            );
-            assert!(
-                branch_exists(&base, "josh/started-here"),
-                "the stale recorded branch must survive — it was never the one in use"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
+    fn slugify_makes_branch_suffixes() {
+        assert_eq!(slugify("Fix the Login!"), "fix-the-login");
+        assert_eq!(slugify("***"), "");
     }
 
     #[test]
-    fn slugify_lowercases_and_collapses_non_alnum() {
-        assert_eq!(slugify("wt cli bootstrap"), "wt-cli-bootstrap");
-        assert_eq!(slugify("Fix: the thing!!"), "fix-the-thing");
-        assert_eq!(slugify("  leading and trailing  "), "leading-and-trailing");
-        assert_eq!(slugify("a---b"), "a-b");
-    }
-
-    #[test]
-    fn slugify_of_symbols_only_is_empty() {
-        // `new_tree` treats this as the signal to require an explicit
-        // `--branch` instead of building `<prefix>` with nothing after it.
-        assert_eq!(slugify("???"), "");
-        assert_eq!(slugify("!!!  ---"), "");
-    }
-
-    #[test]
-    fn glob_matches_env_files_recursively() {
-        assert!(matches_glob("**/.env*", ".env"));
-        assert!(matches_glob("**/.env*", ".env.local"));
-        assert!(!matches_glob("**/.env*", "env.ts"));
-        assert!(matches_glob("README.md", "README.md"));
-        assert!(!matches_glob("README.md", "readme.md"));
-    }
-
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("wt-tree-test-{label}-{}", Uuid::now_v7()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn init_git_repo(dir: &Path) {
-        let status = Command::new("git")
-            .args(["init", "-q", "."])
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-
-    #[test]
-    fn copy_globs_queries_git_instead_of_walking_ignored_directories() {
-        let base = temp_dir("copy-base");
-        init_git_repo(&base);
-        fs::write(base.join(".env"), "SECRET=1").unwrap();
-
-        // A directory large enough that a full filesystem walk would be
-        // the dominant cost if `copy_globs` ever regressed to one.
-        let big = base.join("big_ignored");
-        fs::create_dir_all(&big).unwrap();
-        for i in 0..2000 {
-            fs::write(big.join(format!("f{i}.txt")), "x").unwrap();
-        }
-        fs::write(base.join(".gitignore"), ".env\nbig_ignored/\n").unwrap();
-
-        let tree_path = temp_dir("copy-dst");
-        let start = Instant::now();
-        copy_globs(&base, &tree_path, &["**/.env*".to_string()], &[]).unwrap();
-        let elapsed = start.elapsed();
+    fn resolve_onto_accepts_a_local_branch_and_commit() {
+        let base = repo();
+        git(&base, &["branch", "feature"]);
+        let store = store::Store::default();
 
         assert_eq!(
-            fs::read_to_string(tree_path.join(".env")).unwrap(),
-            "SECRET=1"
+            resolve_onto(&store, "repo", &base, "feature").unwrap(),
+            "feature"
         );
-        assert!(!tree_path.join("big_ignored").exists());
-        assert!(
-            elapsed.as_secs() < 5,
-            "copy_globs took {elapsed:?}, expected a git query, not a walk"
-        );
+        assert_eq!(resolve_onto(&store, "repo", &base, "HEAD").unwrap(), "HEAD");
+
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]
-    fn copy_globs_skips_shared_relpaths() {
-        let base = temp_dir("copy-shared-base");
-        init_git_repo(&base);
-        fs::create_dir_all(base.join("plans")).unwrap();
-        fs::write(base.join("plans").join(".env"), "SHARED=1").unwrap();
-        fs::write(base.join(".env"), "ROOT=1").unwrap();
-        fs::write(base.join(".gitignore"), ".env\nplans/.env\n").unwrap();
-
-        let tree_path = temp_dir("copy-shared-dst");
-        copy_globs(
-            &base,
-            &tree_path,
-            &["**/.env*".to_string()],
-            &["plans".to_string()],
-        )
-        .unwrap();
-
-        assert!(tree_path.join(".env").exists());
-        assert!(!tree_path.join("plans").exists());
-    }
-
-    mod onto {
-        use super::*;
-        use std::os::unix::fs::PermissionsExt;
-
-        fn git_cmd(args: &[&str], cwd: &Path) {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn head(path: &Path) -> String {
-            String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(path)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string()
-        }
-
-        fn head_of(base: &Path, rev: &str) -> String {
-            String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", rev])
-                    .current_dir(base)
-                    .output()
-                    .unwrap()
-                    .stdout,
-            )
-            .unwrap()
-            .trim()
-            .to_string()
-        }
-
-        /// `master`, with a fake `origin/master` pointing at the same
-        /// commit — enough for `git worktree add ... origin/master` to
-        /// resolve without a real remote, since these tests only exercise
-        /// `--onto` paths where `create_tree_with` never fetches.
-        fn fixture() -> (PathBuf, Repo) {
-            let dir = std::env::temp_dir().join(format!("wt-tree-onto-test-{}", Uuid::now_v7()));
-            let base = dir.join("base");
-            fs::create_dir_all(&base).unwrap();
-            git_cmd(&["init", "-q", "-b", "master"], &base);
-            git_cmd(&["config", "user.email", "t@t"], &base);
-            git_cmd(&["config", "user.name", "t"], &base);
-            fs::write(base.join("f.txt"), "0\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "init"], &base);
-            let sha = head(&base);
-            git_cmd(&["update-ref", "refs/remotes/origin/master", &sha], &base);
-            git_cmd(&["branch", "stacked"], &base);
-
-            let repo = Repo {
-                base,
-                last_fetch: Some(Utc::now()),
-            };
-            (dir, repo)
-        }
-
-        fn sample_repo_config() -> config::RepoConfig {
-            config::RepoConfig {
-                trunk: "master".into(),
-                branch_prefix: "josh/".into(),
-                spares: 1,
-                env: Default::default(),
-                steps: Vec::new(),
-            }
-        }
-
-        fn fake_gt(dir: &Path, log: &Path) -> PathBuf {
-            let script = dir.join("gt");
-            fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\nexit 0\n",
-                    log.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).unwrap();
-            script
-        }
-
-        fn fake_gt_failing(dir: &Path, log: &Path) -> PathBuf {
-            let script = dir.join("gt");
-            fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\necho 'gt: not authenticated' >&2\nexit 1\n",
-                    log.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).unwrap();
-            script
-        }
-
-        fn fake_gt_untracked_parent(dir: &Path, log: &Path, parent: &str) -> PathBuf {
-            let script = dir.join("gt");
-            fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\necho \"$* | $(pwd)\" >> \"{}\"\necho 'ERROR: Cannot perform this \
-                     operation on untracked branch {parent}.' >&2\nexit 1\n",
-                    log.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).unwrap();
-            script
-        }
-
-        fn sample_tree(id: Uuid, repo: &str, name: &str, branch: &str, path: PathBuf) -> Tree {
-            Tree {
-                id,
-                repo: repo.into(),
-                name: name.into(),
-                branch: branch.into(),
-                path,
-                created: Utc::now(),
-                state: TreeState::Ready,
-                step_label: None,
-                step_index: None,
-                step_total: None,
-                log_path: None,
-                provision_pid: None,
-                parent_branch: None,
-                parent_revision: None,
-                pending_restack: false,
-                pr_number: None,
-                spare: false,
-            }
-        }
-
-        #[test]
-        fn create_tree_with_onto_a_branch_name_sets_parent_and_tracks_with_graphite() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "next pr".into(),
-                branch: None,
-                onto: Some("stacked".into()),
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (id, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap()).unwrap();
-
-            assert_eq!(head(&tree_path), head_of(&repo.base, "stacked"));
-
-            let log_contents = fs::read_to_string(&log).unwrap();
-            assert!(
-                log_contents.contains("track --parent stacked --no-interactive"),
-                "log was: {log_contents}"
-            );
-            assert!(
-                log_contents.contains(&tree_path.display().to_string()),
-                "gt must run with cwd in the new tree; log was: {log_contents}"
-            );
-
-            let store = store::load(&root).unwrap();
-            let t = store.trees.iter().find(|t| t.id == id).unwrap();
-            assert_eq!(t.parent_branch.as_deref(), Some("stacked"));
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn create_tree_with_onto_a_tree_selector_uses_its_live_branch_not_the_recorded_one() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-
-            // A tree registered under a branch it no longer has checked
-            // out — the drift `Tree.branch` is known to accumulate once
-            // `gt` moves a tree along its stack.
-            git_cmd(&["branch", "live-branch"], &repo.base);
-            let other_path = dir.join("other-tree");
-            git_cmd(
-                &[
-                    "worktree",
-                    "add",
-                    other_path.to_str().unwrap(),
-                    "live-branch",
-                ],
-                &repo.base,
-            );
-            let other_path = fs::canonicalize(&other_path).unwrap();
-            let other_id = Uuid::now_v7();
-
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                s.trees.push(sample_tree(
-                    other_id,
-                    "r",
-                    "other",
-                    "recorded-branch",
-                    other_path,
-                ));
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "on top of other".into(),
-                branch: None,
-                onto: Some("other".into()),
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (_, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap()).unwrap();
-
-            assert_eq!(head(&tree_path), head_of(&repo.base, "live-branch"));
-            let log_contents = fs::read_to_string(&log).unwrap();
-            assert!(
-                log_contents.contains("--parent live-branch"),
-                "log was: {log_contents}"
-            );
-            assert!(
-                !log_contents.contains("recorded-branch"),
-                "must use the live branch, not the recorded one; log was: {log_contents}"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn create_tree_with_onto_and_branch_both_apply() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "ignored when branch is set".into(),
-                branch: Some("josh/explicit-branch".into()),
-                onto: Some("stacked".into()),
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (id, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap()).unwrap();
-
-            assert_eq!(head(&tree_path), head_of(&repo.base, "stacked"));
-            let store = store::load(&root).unwrap();
-            let t = store.trees.iter().find(|t| t.id == id).unwrap();
-            assert_eq!(t.branch, "josh/explicit-branch");
-            assert_eq!(t.parent_branch.as_deref(), Some("stacked"));
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn create_tree_with_keeps_the_tree_and_warns_when_gt_track_fails() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt_failing(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "flaky".into(),
-                branch: None,
-                onto: Some("stacked".into()),
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (id, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap())
-                    .expect("a failed `gt track` must not fail tree creation");
-
-            assert!(tree_path.exists());
-            assert!(
-                fs::read_to_string(&log).unwrap().contains("track"),
-                "gt track must still have been attempted"
-            );
-
-            let store = store::load(&root).unwrap();
-            let t = store.trees.iter().find(|t| t.id == id).unwrap();
-            assert_eq!(
-                t.parent_branch.as_deref(),
-                Some("stacked"),
-                "the parent is recorded even when gt couldn't track it"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn create_tree_with_onto_keeps_the_tree_when_the_parent_is_untracked() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt_untracked_parent(&dir, &log, "stacked");
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "on top of untracked".into(),
-                branch: None,
-                onto: Some("stacked".into()),
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (_, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap())
-                    .expect("an untracked-parent failure must not fail tree creation");
-
-            assert!(tree_path.exists());
-            assert!(
-                fs::read_to_string(&log)
-                    .unwrap()
-                    .contains("track --parent stacked"),
-                "gt track must still have been attempted"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn track_failure_message_gives_the_two_step_remedy_for_an_untracked_parent() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let holder_path = dir.join("holder-tree");
-            git_cmd(
-                &["worktree", "add", holder_path.to_str().unwrap(), "stacked"],
-                &repo.base,
-            );
-            let holder_path = fs::canonicalize(&holder_path).unwrap();
-            let mut store = store::Store::default();
-            store.repos.insert("r".to_string(), repo.clone());
-            store.trees.push(sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "holder",
-                "recorded-branch",
-                holder_path.clone(),
-            ));
-            let new_tree_path = dir.join("new-tree");
-            fs::create_dir_all(&new_tree_path).unwrap();
-
-            let stderr = "ERROR: Cannot perform this operation on untracked branch stacked.\n";
-            let ctx = RepoCtx {
-                name: "r",
-                repo: &repo,
-                config: &repo_config,
-            };
-            let msg =
-                track_failure_message(&store, &ctx, "next pr", &new_tree_path, "stacked", stderr);
-
-            assert!(msg.contains("tree \"holder\""), "message: {msg}");
-            assert!(msg.contains("\"next pr\""), "message: {msg}");
-            assert!(
-                msg.contains(&format!(
-                    "cd {} && gt track --parent master --no-interactive",
-                    holder_path.display()
-                )),
-                "must name the fix-the-parent command in the tree that holds it: {msg}"
-            );
-            assert!(
-                msg.contains(&format!(
-                    "cd {} && gt track --parent stacked --no-interactive",
-                    new_tree_path.display()
-                )),
-                "must name the retry command in the new tree: {msg}"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn track_failure_message_falls_back_to_the_generic_warning_for_any_other_failure() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let store = store::Store::default();
-            let tree_path = dir.join("tree");
-            fs::create_dir_all(&tree_path).unwrap();
-
-            let ctx = RepoCtx {
-                name: "r",
-                repo: &repo,
-                config: &repo_config,
-            };
-            let msg = track_failure_message(
-                &store,
-                &ctx,
-                "next pr",
-                &tree_path,
-                "stacked",
-                "gt: not authenticated\n",
-            );
-            assert!(msg.contains("fix it by hand"), "message: {msg}");
-            assert!(!msg.contains("track it first"), "message: {msg}");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn track_failure_message_falls_back_when_the_untracked_parent_has_no_holder() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let store = store::Store::default();
-            let tree_path = dir.join("tree");
-            fs::create_dir_all(&tree_path).unwrap();
-            // `stacked` exists as a branch in `fixture()` but nothing has
-            // it checked out — there is no directory to hand back a `cd`
-            // command for, so this must degrade to the generic warning
-            // rather than print one pointing nowhere.
-            let ctx = RepoCtx {
-                name: "r",
-                repo: &repo,
-                config: &repo_config,
-            };
-            let msg = track_failure_message(
-                &store,
-                &ctx,
-                "next pr",
-                &tree_path,
-                "stacked",
-                "ERROR: Cannot perform this operation on untracked branch stacked.\n",
-            );
-            assert!(msg.contains("fix it by hand"), "message: {msg}");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn create_tree_with_no_onto_never_calls_gt() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "plain".into(),
-                branch: None,
-                onto: None,
-                profiles: None,
-                track_on_trunk: false,
-            };
-            let (id, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap()).unwrap();
-
-            assert!(!log.exists(), "gt must never run without --onto");
-            assert_eq!(head(&tree_path), head(&repo.base));
-
-            let store = store::load(&root).unwrap();
-            let t = store.trees.iter().find(|t| t.id == id).unwrap();
-            assert!(t.parent_branch.is_none());
-            assert!(t.parent_revision.is_none());
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn track_on_trunk_tracks_and_records_trunk_as_parent_even_with_no_onto() {
-            let (dir, repo) = fixture();
-            let repo_config = sample_repo_config();
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            let log = dir.join("gt-log.txt");
-            let gt = fake_gt(&dir, &log);
-            let opts = NewOptions {
-                repo: "r".into(),
-                name: "new stack".into(),
-                branch: None,
-                onto: None,
-                profiles: None,
-                track_on_trunk: true,
-            };
-            let (id, tree_path, _) =
-                create_tree_with(&root, &config_path, &opts, gt.to_str().unwrap()).unwrap();
-
-            assert_eq!(head(&tree_path), head_of(&repo.base, "master"));
-            let log_contents = fs::read_to_string(&log).unwrap();
-            assert!(
-                log_contents.contains("track --parent master --no-interactive"),
-                "log was: {log_contents}"
-            );
-
-            let store = store::load(&root).unwrap();
-            let t = store.trees.iter().find(|t| t.id == id).unwrap();
-            assert_eq!(t.parent_branch.as_deref(), Some("master"));
-            assert_eq!(
-                t.parent_revision.as_deref(),
-                Some(head_of(&repo.base, "master").as_str())
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_prefers_a_tree_selector_over_a_branch_of_the_same_name() {
-            let (dir, repo) = fixture();
-            git_cmd(&["branch", "shared-name"], &repo.base);
-            git_cmd(&["branch", "actual-branch"], &repo.base);
-            let other_path = dir.join("other-tree");
-            git_cmd(
-                &[
-                    "worktree",
-                    "add",
-                    other_path.to_str().unwrap(),
-                    "actual-branch",
-                ],
-                &repo.base,
-            );
-            let other_path = fs::canonicalize(&other_path).unwrap();
-            let tree = sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "shared-name",
-                "shared-name",
-                other_path,
-            );
-
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees = vec![tree];
-
-            let resolved = resolve_onto(&store, "r", &repo.base, "shared-name").unwrap();
-            assert_eq!(resolved, "actual-branch");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_ambiguous_tree_name_lists_candidates() {
-            let (dir, repo) = fixture();
-            let tree_a = sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "foo bar",
-                "b1",
-                PathBuf::from("/nonexistent-a"),
-            );
-            let tree_b = sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "foo baz",
-                "b2",
-                PathBuf::from("/nonexistent-b"),
-            );
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees = vec![tree_a, tree_b];
-
-            let err = resolve_onto(&store, "r", &repo.base, "foo").unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains("ambiguous"), "message was: {msg}");
-            assert!(msg.contains("foo bar"));
-            assert!(msg.contains("foo baz"));
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_falls_back_to_a_branch_name_when_no_tree_matches() {
-            let (dir, repo) = fixture();
-            let store = store::Store::default();
-
-            let resolved = resolve_onto(&store, "r", &repo.base, "stacked").unwrap();
-            assert_eq!(resolved, "stacked");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_falls_back_to_a_commit_ish_when_nothing_named_it_matches() {
-            let (dir, repo) = fixture();
-            let sha = head(&repo.base);
-            let store = store::Store::default();
-
-            let resolved = resolve_onto(&store, "r", &repo.base, &sha).unwrap();
-            assert_eq!(resolved, sha);
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_errors_when_nothing_matches() {
-            let (dir, repo) = fixture();
-            let store = store::Store::default();
-
-            let err = resolve_onto(&store, "r", &repo.base, "does-not-exist-anywhere").unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("matches no tree, branch, or commit")
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_only_considers_trees_in_the_same_repo() {
-            let (dir, repo) = fixture();
-            // A tree of the same name lives in a different repo; it must
-            // not satisfy `--onto` here, since its branch may not even
-            // exist in this repo's history.
-            let tree = sample_tree(
-                Uuid::now_v7(),
-                "other-repo",
-                "stacked",
-                "stacked",
-                PathBuf::from("/nonexistent"),
-            );
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees = vec![tree];
-
-            // Falls through the (empty, in-repo) tree tier straight to the
-            // branch-name tier, resolving the local branch `stacked`
-            // instead of erroring or reading the other repo's tree.
-            let resolved = resolve_onto(&store, "r", &repo.base, "stacked").unwrap();
-            assert_eq!(resolved, "stacked");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        fn write_pr_info(common_dir: &Path, branch: &str, number: u64, state: &str) {
-            fs::write(
-                common_dir.join(".graphite_pr_info"),
-                format!(
-                    r#"{{"prInfos": [{{"headRefName": "{branch}", "prNumber": {number}, "state": "{state}", "reviewDecision": null, "isDraft": false}}]}}"#
-                ),
-            )
-            .unwrap();
-        }
-
-        #[test]
-        fn resolve_onto_pr_selector_resolves_via_the_graphite_sidecar() {
-            let (dir, repo) = fixture();
-            git_cmd(&["branch", "pr-branch"], &repo.base);
-            let common_dir = git::common_dir(&repo.base).unwrap();
-            write_pr_info(&common_dir, "pr-branch", 18736, "OPEN");
-            let store = store::Store::default();
-
-            let resolved = resolve_onto(&store, "r", &repo.base, "#18736").unwrap();
-            assert_eq!(resolved, "pr-branch");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_onto_with_a_merged_pr_selector_bails() {
-            let (dir, repo) = fixture();
-            git_cmd(&["branch", "pr-branch"], &repo.base);
-            let common_dir = git::common_dir(&repo.base).unwrap();
-            write_pr_info(&common_dir, "pr-branch", 18736, "MERGED");
-            let store = store::Store::default();
-
-            let err = resolve_onto(&store, "r", &repo.base, "#18736").unwrap_err();
-            assert!(err.to_string().contains("merged"), "message was: {err}");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_onto_tree_uses_its_live_branch() {
-            let (dir, repo) = fixture();
-            let other_path = dir.join("other-tree");
-            git_cmd(
-                &["worktree", "add", other_path.to_str().unwrap(), "stacked"],
-                &repo.base,
-            );
-            let other_path = fs::canonicalize(&other_path).unwrap();
-
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees.push(sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "other",
-                "stacked",
-                other_path,
-            ));
-
-            let (repo_name, branch) = resolve_pr_parent(&store, Some("other"), None).unwrap();
-            assert_eq!(repo_name, "r");
-            assert_eq!(branch, "stacked");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_onto_branch_name_falls_back_to_the_cwd_repo() {
-            let (dir, repo) = fixture();
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-
-            let (repo_name, branch) =
-                resolve_pr_parent(&store, Some("stacked"), Some(&repo.base)).unwrap();
-            assert_eq!(repo_name, "r");
-            assert_eq!(branch, "stacked");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_no_onto_uses_the_cwd_tree_s_branch() {
-            let (dir, repo) = fixture();
-            let tree_path = dir.join("some-tree");
-            fs::create_dir_all(&tree_path).unwrap();
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees.push(sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "some tree",
-                "the-branch",
-                tree_path.clone(),
-            ));
-
-            let (repo_name, branch) = resolve_pr_parent(&store, None, Some(&tree_path)).unwrap();
-            assert_eq!(repo_name, "r");
-            assert_eq!(branch, "the-branch");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_no_onto_outside_a_tree_errors() {
-            let (dir, repo) = fixture();
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            store.trees.push(sample_tree(
-                Uuid::now_v7(),
-                "r",
-                "unrelated",
-                "unrelated-branch",
-                dir.join("unrelated-tree"),
-            ));
-
-            let err = resolve_pr_parent(&store, None, Some(&dir.join("elsewhere"))).unwrap_err();
-            assert!(
-                err.to_string().contains("isn't inside a tree"),
-                "message was: {err}"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_onto_a_raw_commit_errors() {
-            let (dir, repo) = fixture();
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-            let sha = head(&repo.base);
-
-            let err = resolve_pr_parent(&store, Some(&sha), Some(&repo.base)).unwrap_err();
-            assert!(
-                err.to_string().contains("not an arbitrary commit"),
-                "message was: {err}"
-            );
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_pr_selector_resolves_via_the_graphite_sidecar() {
-            let (dir, repo) = fixture();
-            git_cmd(&["branch", "pr-branch"], &repo.base);
-            let common_dir = git::common_dir(&repo.base).unwrap();
-            write_pr_info(&common_dir, "pr-branch", 18736, "OPEN");
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-
-            let (repo_name, branch) =
-                resolve_pr_parent(&store, Some("#18736"), Some(&repo.base)).unwrap();
-            assert_eq!(repo_name, "r");
-            assert_eq!(branch, "pr-branch");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-
-        #[test]
-        fn resolve_pr_parent_with_a_merged_pr_selector_bails() {
-            let (dir, repo) = fixture();
-            git_cmd(&["branch", "pr-branch"], &repo.base);
-            let common_dir = git::common_dir(&repo.base).unwrap();
-            write_pr_info(&common_dir, "pr-branch", 18736, "MERGED");
-            let mut store = store::Store::default();
-            store.repos.insert("r".into(), repo.clone());
-
-            let err = resolve_pr_parent(&store, Some("#18736"), Some(&repo.base)).unwrap_err();
-            assert!(err.to_string().contains("merged"), "message was: {err}");
-
-            fs::remove_dir_all(&dir).ok();
-        }
-    }
-
-    mod doctor_drift {
-        use super::*;
-
-        fn graph_of(edges: &[(&str, Option<&str>)]) -> graphite::Graph {
-            graphite::Graph::from_edges(
-                edges
-                    .iter()
-                    .map(|(name, parent)| ((*name).to_string(), parent.map(str::to_string))),
-            )
-        }
-
-        fn sample_tree_with_parent(branch: &str, parent_branch: Option<&str>) -> Tree {
-            Tree {
-                id: Uuid::now_v7(),
-                repo: "r".into(),
-                name: branch.into(),
-                branch: branch.into(),
-                path: PathBuf::from("/nonexistent"),
-                created: Utc::now(),
-                state: TreeState::Ready,
-                step_label: None,
-                step_index: None,
-                step_total: None,
-                log_path: None,
-                provision_pid: None,
-                parent_branch: parent_branch.map(str::to_string),
-                parent_revision: Some("stale-sha".into()),
-                pending_restack: false,
-                pr_number: None,
-                spare: false,
-            }
-        }
-
-        #[test]
-        fn homeless_branches_excludes_trunk_held_and_merged_or_closed() {
-            let db_graph = graph_of(&[
-                ("master", None),
-                ("held", Some("master")),
-                ("closed", Some("master")),
-                ("homeless", Some("master")),
-            ]);
-            let mut pr_infos = std::collections::HashMap::new();
-            pr_infos.insert("closed".to_string(), graphite_pr_info("closed", "CLOSED"));
-            let held: HashSet<String> = ["held".to_string()].into_iter().collect();
-
-            let found = homeless_branches(&db_graph, Some(&pr_infos), "master", &held);
-            assert_eq!(found, vec!["homeless".to_string()]);
-        }
-
-        fn graphite_pr_info(branch: &str, state: &str) -> graphite::PrInfo {
-            let json = format!(
-                r#"{{"headRefName": "{branch}", "prNumber": 1, "state": "{state}", "reviewDecision": null, "isDraft": false}}"#
-            );
-            serde_json::from_str(&json).unwrap()
-        }
-
-        #[test]
-        fn parent_drift_is_none_when_graphite_does_not_track_the_branch() {
-            let db_graph = graph_of(&[("master", None)]);
-            let tree = sample_tree_with_parent("untracked", Some("master"));
-            assert_eq!(parent_drift(&db_graph, &tree), None);
-        }
-
-        #[test]
-        fn parent_drift_is_none_when_the_db_agrees() {
-            let db_graph = graph_of(&[("master", None), ("a", Some("master"))]);
-            let tree = sample_tree_with_parent("a", Some("master"));
-            assert_eq!(parent_drift(&db_graph, &tree), None);
-        }
-
-        #[test]
-        fn parent_drift_reports_the_db_s_parent_when_it_disagrees() {
-            let db_graph = graph_of(&[
-                ("master", None),
-                ("new-parent", Some("master")),
-                ("a", Some("new-parent")),
-            ]);
-            let tree = sample_tree_with_parent("a", Some("old-parent"));
-            assert_eq!(
-                parent_drift(&db_graph, &tree),
-                Some(Some("new-parent".to_string()))
-            );
-        }
-
-        fn git_cmd(args: &[&str], cwd: &Path) {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn sqlite(db: &Path, sql: &str) {
-            let out = Command::new("/usr/bin/sqlite3")
-                .arg(db)
-                .arg(sql)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "sqlite3 {sql} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        /// A branch mismatch (`old-a` drifted onto `new-a` out of band) and a
-        /// parent drift (`b` recorded as parented on `old-parent`, while
-        /// Graphite's db now says `new-parent`) in the same repo — the two
-        /// findings `wt doctor --fix` is supposed to repair.
-        #[test]
-        fn doctor_fix_repairs_branch_mismatch_and_parent_drift() {
-            let dir = std::env::temp_dir().join(format!("wt-tree-doctor-drift-{}", Uuid::now_v7()));
-            let base = dir.join("base");
-            fs::create_dir_all(&base).unwrap();
-            git_cmd(&["init", "-q", "-b", "master"], &base);
-            git_cmd(&["config", "user.email", "t@t"], &base);
-            git_cmd(&["config", "user.name", "t"], &base);
-            fs::write(base.join("f.txt"), "0\n").unwrap();
-            git_cmd(&["add", "-A"], &base);
-            git_cmd(&["commit", "-qm", "init"], &base);
-            git_cmd(&["branch", "old-a"], &base);
-            git_cmd(&["branch", "b"], &base);
-            git_cmd(&["branch", "new-parent"], &base);
-
-            let tree_a_path = dir.join("tree-a");
-            git_cmd(
-                &["worktree", "add", tree_a_path.to_str().unwrap(), "old-a"],
-                &base,
-            );
-            let tree_a_path = fs::canonicalize(&tree_a_path).unwrap();
-            // Out-of-band `gt create`: the worktree moves to a new branch
-            // without wt ever finding out.
-            git_cmd(&["checkout", "-qb", "new-a"], &tree_a_path);
-
-            let tree_b_path = dir.join("tree-b");
-            git_cmd(
-                &["worktree", "add", tree_b_path.to_str().unwrap(), "b"],
-                &base,
-            );
-            let tree_b_path = fs::canonicalize(&tree_b_path).unwrap();
-
-            let db = base.join(".git").join(".graphite_metadata.db");
-            sqlite(
-                &db,
-                "CREATE TABLE branch_metadata (\
-                 branch_name TEXT PRIMARY KEY, parent_branch_name TEXT, \
-                 parent_branch_revision TEXT, last_submitted_version TEXT, state TEXT, \
-                 children TEXT, branch_revision TEXT, validation_result TEXT, \
-                 parent_head_revision TEXT);",
-            );
-            sqlite(
-                &db,
-                "INSERT INTO branch_metadata (branch_name, parent_branch_name, state) VALUES \
-                 ('master', NULL, 'TRUNK'), ('new-a', 'master', NULL), \
-                 ('new-parent', 'master', NULL), ('b', 'new-parent', NULL);",
-            );
-
-            let repo = Repo {
-                base: base.clone(),
-                last_fetch: Some(Utc::now()),
-            };
-            let repo_config = config::RepoConfig {
-                trunk: "master".into(),
-                branch_prefix: "josh/".into(),
-                spares: 1,
-                env: Default::default(),
-                steps: Vec::new(),
-            };
-            let mut tree_a_row = sample_tree_with_parent("old-a", Some("master"));
-            tree_a_row.name = "tree-a".into();
-            tree_a_row.path = tree_a_path;
-            let mut tree_b_row = sample_tree_with_parent("b", Some("old-parent"));
-            tree_b_row.name = "tree-b".into();
-            tree_b_row.path = tree_b_path;
-            let tree_a_id = tree_a_row.id;
-            let tree_b_id = tree_b_row.id;
-
-            let root = dir.join("wtroot");
-            store::with_store_lock(&root, |s| {
-                s.repos.insert("r".to_string(), repo.clone());
-                s.trees = vec![tree_a_row.clone(), tree_b_row.clone()];
-                Ok(())
-            })
-            .unwrap();
-            let config_path = dir.join("config.kdl");
-            config::append_repo(&config_path, "r", &repo_config).unwrap();
-
-            // Report-only: nothing changes without --fix.
-            doctor(&root, &config_path, DoctorOptions { fix: false }).unwrap();
-            let unfixed = store::load(&root).unwrap();
-            let a = unfixed.trees.iter().find(|t| t.id == tree_a_id).unwrap();
-            assert_eq!(a.branch, "old-a");
-            let b = unfixed.trees.iter().find(|t| t.id == tree_b_id).unwrap();
-            assert_eq!(b.parent_branch.as_deref(), Some("old-parent"));
-
-            doctor(&root, &config_path, DoctorOptions { fix: true }).unwrap();
-            let fixed = store::load(&root).unwrap();
-            let a = fixed.trees.iter().find(|t| t.id == tree_a_id).unwrap();
-            assert_eq!(a.branch, "new-a", "branch mismatch must be repaired");
-            assert_eq!(
-                a.parent_branch.as_deref(),
-                Some("master"),
-                "parent must be re-derived from Graphite's db for the new branch"
-            );
-            assert_eq!(a.parent_revision, None);
-
-            let b = fixed.trees.iter().find(|t| t.id == tree_b_id).unwrap();
-            assert_eq!(
-                b.parent_branch.as_deref(),
-                Some("new-parent"),
-                "parent drift must adopt the db's parent"
-            );
-            assert_eq!(b.parent_revision, None);
-            assert!(b.pending_restack, "b's base just changed out from under it");
-
-            fs::remove_dir_all(&dir).ok();
-        }
+    fn resolve_onto_rejects_an_unknown_ref() {
+        let base = repo();
+        let err = resolve_onto(&store::Store::default(), "repo", &base, "missing").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("matches no tree, branch, or commit")
+        );
+        fs::remove_dir_all(base).ok();
     }
 }

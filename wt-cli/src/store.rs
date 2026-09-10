@@ -72,37 +72,6 @@ pub struct Tree {
         skip_serializing_if = "Option::is_none"
     )]
     pub provision_pid: Option<u32>,
-    /// This tree's parent branch in its Graphite stack, kept apart from
-    /// Graphite's own record of parentage so a teardown check still knows a
-    /// tree's stack position when Graphite's database is missing or stale.
-    /// Maintained for the tree's life, not just written at creation.
-    #[serde(
-        rename = "parentBranch",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub parent_branch: Option<String>,
-    /// `parent_branch`'s head commit at the moment this tree was created,
-    /// used to detect a needed restack without querying Graphite's db.
-    #[serde(
-        rename = "parentRevision",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub parent_revision: Option<String>,
-    /// A restack of this tree's branch is known-needed but hasn't run yet.
-    /// The session hook reads this instead of deriving `needs_restack`,
-    /// which needs a live-head and merge-base check too expensive to pay on
-    /// every prompt; the restack walk and `wt sync` are what set and clear
-    /// it.
-    #[serde(rename = "pendingRestack", default, skip_serializing_if = "is_false")]
-    pub pending_restack: bool,
-    /// This branch's pull request number, recorded once `wt submit`
-    /// succeeds. A PR's state is read fresh from the `.graphite_pr_info`
-    /// sidecar instead — recording a snapshot of it here would just go
-    /// stale.
-    #[serde(rename = "prNumber", default, skip_serializing_if = "Option::is_none")]
-    pub pr_number: Option<u64>,
     /// An unclaimed hot spare: provisioned ahead of time, sitting on a
     /// detached HEAD, hidden from listings and never reaped. Claiming one
     /// clears this, and the row becomes an ordinary tree.
@@ -237,10 +206,8 @@ fn resolve_index_optional(trees: &[Tree], selector: &str) -> Result<Option<usize
         |t, s, _| t.name == s,
         |t, _, needle| t.name.to_lowercase().contains(needle),
         |t, s, _| t.branch == s,
-        // `gt create` moves a tree onto a new branch without updating the
-        // registry, so the branch it started on and the branch it's
-        // actually on can differ; this tier is what lets a selector still
-        // find the tree once that's happened.
+        // A branch can move after tree creation without updating the registry,
+        // so also resolve against the branch currently checked out in the tree.
         |t, s, _| live_branch(t).as_deref() == Some(s),
     ];
     for tier in tiers {
@@ -322,10 +289,6 @@ mod tests {
             step_total: None,
             log_path: None,
             provision_pid: None,
-            parent_branch: None,
-            parent_revision: None,
-            pending_restack: false,
-            pr_number: None,
             spare: false,
         }
     }
@@ -343,31 +306,6 @@ mod tests {
         let loaded = load(&root).unwrap();
         assert_eq!(loaded.trees.len(), 1);
         assert_eq!(loaded.trees[0].name, "scratch test");
-    }
-
-    #[test]
-    fn pending_restack_round_trips_and_stays_out_of_json_when_false() {
-        let root = temp_root();
-        let mut store = Store::default();
-        let mut tree = sample_tree("needs one", "josh/needs-one");
-        tree.pending_restack = true;
-        store.trees.push(tree);
-        save(&root, &store).unwrap();
-
-        let on_disk = fs::read_to_string(state_path(&root)).unwrap();
-        assert!(on_disk.contains("\"pendingRestack\": true"), "{on_disk}");
-
-        let loaded = load(&root).unwrap();
-        assert!(loaded.trees[0].pending_restack);
-
-        // A tree with no pending restack writes nothing for it at all —
-        // the field is opt-in noise, not a default every row carries.
-        let mut store = Store::default();
-        store.trees.push(sample_tree("clean", "josh/clean"));
-        save(&root, &store).unwrap();
-        let on_disk = fs::read_to_string(state_path(&root)).unwrap();
-        assert!(!on_disk.contains("pendingRestack"), "{on_disk}");
-        assert!(!load(&root).unwrap().trees[0].pending_restack);
     }
 
     #[test]
@@ -400,8 +338,6 @@ mod tests {
         let loaded = load(&root).unwrap();
         assert_eq!(loaded.version, STORE_VERSION);
         assert_eq!(loaded.trees.len(), 1);
-        assert_eq!(loaded.trees[0].parent_revision, None);
-
         // `load` runs without the store lock, so it must never write —
         // doing so could race and clobber a concurrent locked writer.
         let on_disk: serde_json::Value =

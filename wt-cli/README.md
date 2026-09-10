@@ -21,8 +21,8 @@ parent shell's directory. It forwards `wt cd --help` to the binary and uses
 
 ## Commands
 
-Use `wt help -r` for the complete public command tree, or `wt help <command>
-...` for detailed help at any level.
+Use `wt help -r` for the complete public command tree and `wt help <command>
+...` for detailed help.
 
 ```text
 wt
@@ -33,15 +33,8 @@ wt
 │   └── spare
 │       ├── refresh
 │       └── drop
-├── new
-├── pr
-│   └── new
-├── sync
-├── submit
-├── ls
-├── stack
-├── restack
 ├── tree
+│   ├── new
 │   ├── ls
 │   ├── path
 │   ├── name
@@ -62,76 +55,9 @@ wt
 └── help
 ```
 
-`wt init` and `wt launch` remain accepted as hidden compatibility routes for
-existing scripts. New commands, documentation, and automation should use the
-paths shown above.
-
-## Stacks
-
-A repository adopted by `wt` must be a Graphite repo. Every worktree holds
-exactly one branch, and every branch is one pull request, for the tree's
-whole life. A stack is the chain of trees you get by following parent
-branches down to trunk — not something `wt` stores separately.
-
-Start a stack. The command prints the tree's path immediately; provisioning
-continues in the background.
-
-```sh
-wt new monorepo --name "fix login" --codex -- --model gpt-5
-wt tree wait "fix login"
-```
-
-Stack another pull request on top of the branch in the current tree (or name
-one explicitly with `--onto <tree-or-branch>`):
-
-```sh
-wt pr new --name "fix login, part 2"
-```
-
-Pass `--pi`, `--claude`, or `--codex` to `wt new`, `wt pr new`, or
-`wt repo lift` to open that agent after provisioning. With no agent flag,
-these commands only create the tree. Arguments after `--` require one of the
-three flags.
-
-See where a tree sits in its stack, or every stack in a repo:
-
-```sh
-wt stack
-wt stack --all
-wt ls
-```
-
-A downstream restack is debt, not a blocker: when a branch moves, everything
-stacked on top of it is marked pending instead of being forced through right
-away. `wt restack` walks a whole stack bottom-up, restacking whatever tree is
-clean and idle and leaving the rest marked; `wt sync` drains one tree's own
-pending restack on demand. `wt ls` and `wt stack` both show which branches
-are still pending.
-
-```sh
-wt restack "fix login" --dry-run
-wt sync "fix login"
-```
-
-Push a branch and its downstack ancestors as pull requests; `--stack` also
-pushes what's stacked on top. Every branch in scope must already be
-restacked, or this refuses rather than push a stale base.
-
-```sh
-wt submit "fix login" --stack
-```
-
-`wt upkeep doctor` can find a branch Graphite tracks that no tree holds — a
-"homeless" branch, left behind by `gt track` run by hand or by `gt split`.
-`wt adopt-branch` materializes a tree for it:
-
-```sh
-wt adopt-branch josh/some-branch --repo monorepo
-```
-
-`wt upkeep gc` also reaps a tree whose pull request has merged or closed,
-even if it wouldn't otherwise look safe to remove, and re-parents any
-branches stacked on top of it onto its own parent.
+`wt init` and `wt launch` remain hidden compatibility routes for existing
+scripts. New commands, documentation, and automation should use the paths
+shown above.
 
 ## Common workflows
 
@@ -141,6 +67,25 @@ Adopt an existing clone as a base:
 wt repo adopt monorepo ~/repos/monorepo
 ```
 
+Create a worktree from the repository trunk. The command prints its path
+immediately; provisioning continues in the background.
+
+```sh
+wt tree new monorepo --name "fix login" --codex -- --model gpt-5
+wt tree wait "fix login"
+```
+
+Use `--onto` to create from a tree branch, local branch, or commit instead of
+trunk:
+
+```sh
+wt tree new monorepo --name "follow-up" --onto "fix login"
+```
+
+Pass `--pi`, `--claude`, or `--codex` to `wt tree new` or `wt repo lift` to
+open an agent after provisioning. Without an agent flag, the command only
+creates the tree. Arguments after `--` require an agent flag.
+
 Open an existing tree in Pi, or choose one from the picker:
 
 ```sh
@@ -149,9 +94,9 @@ wt go
 ```
 
 Pi is the default. Pass `--pi`, `--claude`, or `--codex` to select an agent
-explicitly. Use `wt go <tree> --repo <repo>` to create a named tree when it
-does not already exist. A name beginning with `@` opens a scratch agent
-session in a base checkout without creating a tree.
+explicitly. `wt go <name> --repo <repo>` creates a named tree when no existing
+tree matches. `--onto` works here too. A name beginning with `@` opens a
+scratch agent session in a base checkout without creating a tree.
 
 Change the current shell's directory:
 
@@ -170,7 +115,7 @@ Inspect and maintain repositories:
 ```sh
 wt tree ls --repo monorepo
 wt repo spare
-wt repo sync monorepo --stack
+wt repo sync monorepo
 wt upkeep gc --dry-run
 wt upkeep doctor --fix
 ```
@@ -188,9 +133,9 @@ through unchanged. `wt go` adds `-n <label>` before Pi arguments so the
 session has the tree or scratch label; a later `-n` from the caller takes
 precedence.
 
-`<TREE>` consistently accepts a tree name, unique name substring, UUID or
-UUID prefix, or branch name. `<TREE_OR_BRANCH>` accepts either a tree or a
-branch. Ambiguous references fail with the candidates instead of guessing.
+`<TREE>` consistently accepts a tree name, unique name substring, UUID or UUID
+prefix, or branch name. Ambiguous references fail with the candidates instead
+of guessing.
 
 ## Layout and configuration
 
@@ -211,8 +156,8 @@ Configuration lives at `~/.config/wt/config.kdl` (or `$WT_CONFIG`).
 `wt repo adopt` adds a repo block without rewriting a block you have edited.
 Use `--redetect` to replace only detected provisioning steps.
 
-The base stays on trunk and is not a work area. Use `wt new` or `wt pr new`
-for work. Shared, gitignored directories such as `plans/`, `local/`, and
+The base stays on trunk and is not a work area. Use `wt tree new` for work.
+Shared, gitignored directories such as `plans/`, `local/`, and
 `user-memories/` are linked into the base and every tree. They are not copied,
 so changes survive tree removal and remain visible across the repository.
 The base paths moved aside during the first adoption stay in `backup/`; wt
@@ -227,12 +172,11 @@ effect on the next tree.
 
 Provisioning a large tree can require a checkout, submodule setup, dependency
 installs, and builds. A hot spare has already completed those steps on a
-detached `origin/<trunk>` checkout. `wt new` and `wt pr new` claim a ready
-spare when one is available. It returns immediately when the spare is at the
-requested start point; otherwise it reuses the warm tree and reprovisions it.
+detached `origin/<trunk>` checkout. `wt tree new` claims a ready spare when
+one is available. It returns immediately when the spare is at the requested
+start point; otherwise it reuses the warm tree and reprovisions it.
 
-Hot spares have no branch, so they stay out of Graphite's graph. `wt repo
-sync` refreshes them against trunk and replaces a missing spare in the
+`wt repo sync` refreshes spares against trunk and replaces missing ones in the
 background. They use one extra checkout and installed dependency set per repo,
 and a background install can run when trunk changes. Set `spares 0` in
 `config.kdl`, or run `wt repo spare drop`, to disable them.
@@ -268,13 +212,13 @@ features {
   session: unrelated windows are skipped and splits share one position. Outside
   tmux, or when tmux cannot be queried, `PLANTER_TAB_INDEX` is left unset and
   Planter falls back to its normal ordering. Codex uses `planter-codex-bridge`
-  when available. A missing or
-  failed bridge falls back to direct Codex. Explicit `--remote` endpoints,
-  administrative Codex commands, and direct `wt llm codex` remain direct.
-  Eligible sessions receive `PLANTER_COLOR` — the result of the required color
-  preflight, which lets Planter bind the real session to the color wt already
-  used — and `PLANTER_LABEL`, plus `PLANTER_TAB_INDEX` when the position hook
-  succeeds. The bridge preserves `PLANTER_STATE_DIR` or `CLAUDE_PLANTER_DIR`.
+  when available. A missing or failed bridge falls back to direct Codex.
+  Explicit `--remote` endpoints, administrative Codex commands, and direct
+  `wt llm codex` remain direct. Eligible sessions receive `PLANTER_COLOR` —
+  the result of the required color preflight, which lets Planter bind the real
+  session to the color wt already used — and `PLANTER_LABEL`, plus
+  `PLANTER_TAB_INDEX` when the position hook succeeds. The bridge preserves
+  `PLANTER_STATE_DIR` or `CLAUDE_PLANTER_DIR`.
 - `terminal` sets a session's terminal background to its tint color: an
   OSC 11 escape sequence outside tmux, and tmux's window-scoped
   `window-style` option inside it, so tmux itself keeps each window's tint
@@ -287,13 +231,13 @@ features {
 
 Each tree's color is whatever `planter --resolve-color` returns, one of the
 12-color palette in `/palette.json` at the repo root. Each hook is either a wt
-`builtin` or a `cmd`. Commands
-receive `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`, `WT_COLOR_HEX` (the near-black
-tint used as the terminal background), `WT_COLOR_PRIMARY_HEX` (the color's
-identity hex), and `WT_COLOR_TEXT_HEX` (a lighter hex for labels on a dark
-ground), and wt stops them after two seconds. A hook error, timeout, or
-invalid result is treated as absent; it never prevents the agent session from
-starting. The builtins are `tmux-window`, `planter-state`, and `osc11`.
+`builtin` or a `cmd`. Commands receive `WT_TREE_PATH`, `WT_REPO`, `WT_LABEL`,
+`WT_COLOR_HEX` (the near-black tint used as the terminal background),
+`WT_COLOR_PRIMARY_HEX` (the color's identity hex), and `WT_COLOR_TEXT_HEX` (a
+lighter hex for labels on a dark ground), and wt stops them after two seconds.
+A hook error, timeout, or invalid result is treated as absent; it never prevents
+the agent session from starting. The builtins are `tmux-window`,
+`planter-state`, and `osc11`.
 
 ## Integrations
 
@@ -301,18 +245,16 @@ starting. The builtins are `tmux-window`, `planter-state`, and `osc11`.
   fall back to the directory basename when it prints nothing.
 - **Session hook.** `hooks/session-context.sh` backs Claude Code's
   `SessionStart` and `CwdChanged` hooks. In a tree it reports the name,
-  branch, shared `plans/` path, stack position, and pending restack debt,
-  plus a reminder to run `wt pr new` rather than `gt create` for a new pull
-  request. In a base it explains that `wt new` is the place to start work.
-  `CwdChanged` delivers the same text as a system message because Claude
-  Code does not expose `additionalContext` for that hook.
+  branch, and shared `plans/` path. In a base it explains that `wt tree new`
+  is the place to start work. `CwdChanged` delivers the same text as a system
+  message because Claude Code does not expose `additionalContext` for that
+  hook.
 - **Skill.** `plugin/` is a Claude Code skill installed at
   `~/.claude/skills/wt`.
 - **Base commit block.** `wt repo adopt` sets a worktree-scoped
   `core.hooksPath` on the base. Its generated hooks point accidental commits
-  toward `wt new`. It does not overwrite an existing worktree-scoped hook
-  path. New trees clear the copied base hook path after `git worktree add`,
-  so their repository hooks keep working.
-- The LaunchAgent is written but not loaded. It runs `wt repo sync` every
-  five minutes and logs to `~/repos/wt/wt-sync.log` and
-  `~/repos/wt/wt-sync.err.log`.
+  toward `wt tree new`. It does not overwrite an existing worktree-scoped hook
+  path. New trees clear the copied base hook path after `git worktree add`, so
+  their repository hooks keep working.
+- The LaunchAgent is written but not loaded. It runs `wt repo sync` every five
+  minutes and logs to `~/repos/wt/wt-sync.log` and `~/repos/wt/wt-sync.err.log`.
