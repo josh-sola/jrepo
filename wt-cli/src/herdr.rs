@@ -150,10 +150,13 @@ fn code_tab_then_agent_pane(created: &Value, cwd: &str, label: &str) -> Result<S
     pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?)
 }
 
-/// `emacsclient -t` alone opens in the daemon's own directory, so the frame
-/// is set up around the tree instead. The `do-` treemacs entry point is used
-/// because the interactive one prompts on a name collision, which would hang
-/// an `--eval`; the window is reselected because treemacs steals focus.
+/// Doom scopes treemacs by perspective, so the frame is first switched to a
+/// Doom workspace named after the tree; that gives it a treemacs workspace of
+/// its own instead of adding the tree to whichever one the daemon has
+/// selected. `treemacs-persp--ensure-workspace-exists` is called directly
+/// because treemacs-persp otherwise creates it on a timer after the switch,
+/// and the add would race it. The `do-` add is used because the interactive
+/// one prompts on a name collision, which would hang an `--eval`.
 fn code_tab_command(cwd: &str, label: &str) -> Vec<String> {
     let cwd = elisp_string(cwd);
     let label = elisp_string(label);
@@ -162,10 +165,13 @@ fn code_tab_command(cwd: &str, label: &str) -> Vec<String> {
         "-t".to_string(),
         "--eval".to_string(),
         format!(
-            "(progn (require (quote treemacs)) (let ((w (selected-window))) \
+            "(progn (require (quote treemacs)) (require (quote treemacs-persp) nil t) \
+             (let ((w (selected-window))) (with-selected-window w \
+             (+workspace-switch {label} t) \
              (with-current-buffer (window-buffer w) (cd {cwd})) \
+             (treemacs-persp--ensure-workspace-exists) \
              (treemacs-do-add-project-to-workspace {cwd} {label}) \
-             (treemacs-select-window) (select-window w)))"
+             (treemacs-select-window)) (select-window w)))"
         ),
     ]
 }
@@ -611,10 +617,13 @@ mod tests {
                 "emacsclient",
                 "-t",
                 "--eval",
-                "(progn (require (quote treemacs)) (let ((w (selected-window))) \
+                "(progn (require (quote treemacs)) (require (quote treemacs-persp) nil t) \
+                 (let ((w (selected-window))) (with-selected-window w \
+                 (+workspace-switch \"fix login\" t) \
                  (with-current-buffer (window-buffer w) (cd \"/repos/a\")) \
+                 (treemacs-persp--ensure-workspace-exists) \
                  (treemacs-do-add-project-to-workspace \"/repos/a\" \"fix login\") \
-                 (treemacs-select-window) (select-window w)))"
+                 (treemacs-select-window)) (select-window w)))"
             ]
         );
     }
