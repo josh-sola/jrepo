@@ -5172,9 +5172,12 @@ fn herdr_places_by_opening_a_worktree_when_no_workspace_is_open() {
             "pane rename w1:p1 code".to_string(),
             format!(
                 "pane run w1:p1 'emacsclient' '-t' '--eval' '(progn (require (quote treemacs)) \
-                 (let ((w (selected-window))) (with-current-buffer (window-buffer w) \
-                 (cd \"{tree_path}\")) (treemacs-do-add-project-to-workspace \"{tree_path}\" \
-                 \"herdr target\") (treemacs-select-window) (select-window w)))'"
+                 (require (quote treemacs-persp) nil t) (let ((w (selected-window))) \
+                 (with-selected-window w (+workspace-switch \"herdr target\" t) \
+                 (with-current-buffer (window-buffer w) (cd \"{tree_path}\")) \
+                 (treemacs-persp--ensure-workspace-exists) \
+                 (treemacs-do-add-project-to-workspace \"{tree_path}\" \"herdr target\") \
+                 (treemacs-select-window)) (select-window w)))'"
             ),
             format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
             "pane rename w9:p2 herdr target".to_string(),
@@ -5473,9 +5476,12 @@ fn herdr_worktree_open_failure_falls_back_to_workspace_create() {
             "pane rename w1:p1 code".to_string(),
             format!(
                 "pane run w1:p1 'emacsclient' '-t' '--eval' '(progn (require (quote treemacs)) \
-                 (let ((w (selected-window))) (with-current-buffer (window-buffer w) \
-                 (cd \"{tree_path}\")) (treemacs-do-add-project-to-workspace \"{tree_path}\" \
-                 \"herdr target\") (treemacs-select-window) (select-window w)))'"
+                 (require (quote treemacs-persp) nil t) (let ((w (selected-window))) \
+                 (with-selected-window w (+workspace-switch \"herdr target\" t) \
+                 (with-current-buffer (window-buffer w) (cd \"{tree_path}\")) \
+                 (treemacs-persp--ensure-workspace-exists) \
+                 (treemacs-do-add-project-to-workspace \"{tree_path}\" \"herdr target\") \
+                 (treemacs-select-window)) (select-window w)))'"
             ),
             format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
             "pane rename w9:p2 herdr target".to_string(),
@@ -5599,9 +5605,12 @@ fn herdr_creates_the_parent_workspace_when_none_is_open() {
             "pane rename w1:p1 code".to_string(),
             format!(
                 "pane run w1:p1 'emacsclient' '-t' '--eval' '(progn (require (quote treemacs)) \
-                 (let ((w (selected-window))) (with-current-buffer (window-buffer w) \
-                 (cd \"{tree_path}\")) (treemacs-do-add-project-to-workspace \"{tree_path}\" \
-                 \"herdr target\") (treemacs-select-window) (select-window w)))'"
+                 (require (quote treemacs-persp) nil t) (let ((w (selected-window))) \
+                 (with-selected-window w (+workspace-switch \"herdr target\" t) \
+                 (with-current-buffer (window-buffer w) (cd \"{tree_path}\")) \
+                 (treemacs-persp--ensure-workspace-exists) \
+                 (treemacs-do-add-project-to-workspace \"{tree_path}\" \"herdr target\") \
+                 (treemacs-select-window)) (select-window w)))'"
             ),
             format!("tab create --workspace w1 --cwd {tree_path} --label herdr target --focus"),
             "pane rename w9:p2 herdr target".to_string(),
