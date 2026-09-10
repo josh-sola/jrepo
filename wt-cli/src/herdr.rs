@@ -13,6 +13,9 @@ use serde_json::Value;
 use crate::agent::Agent;
 use crate::config::Config;
 
+const CODE_TAB_LABEL: &str = "code";
+const CODE_TAB_COMMAND: &[&str] = &["emacsclient", "-t"];
+
 /// `--here` also stops a placed run from placing again, since the placed
 /// command always includes it.
 pub fn active(config: &Config, here: bool) -> bool {
@@ -124,12 +127,25 @@ fn place_tree(cwd: &str, base: &str, repo: &str, label: &str) -> Result<String> 
     };
 
     match run_herdr(&worktree_open_argv(&parent_workspace_id, cwd, label)) {
-        Ok(result) => pane_id_from(&result),
+        Ok(result) => code_tab_then_agent_pane(&result, cwd, label),
         Err(e) => {
             eprintln!("herdr worktree open failed ({e}); opening a plain workspace instead");
-            pane_id_from(&run_herdr(&workspace_create_argv(cwd, label))?)
+            let created = run_herdr(&workspace_create_argv(cwd, label))?;
+            code_tab_then_agent_pane(&created, cwd, label)
         }
     }
+}
+
+/// A newly created tree workspace opens focused on the agent, so its root
+/// pane becomes the editor tab and the agent gets the next tab.
+fn code_tab_then_agent_pane(created: &Value, cwd: &str, label: &str) -> Result<String> {
+    let tab_id = tab_id_from(created)?;
+    let root_pane_id = pane_id_from(created)?;
+    let workspace_id = workspace_id_from(created)?;
+    run_herdr(&tab_rename_argv(&tab_id, CODE_TAB_LABEL))?;
+    run_herdr(&pane_rename_argv(&root_pane_id, CODE_TAB_LABEL))?;
+    run_herdr(&pane_run_argv(&root_pane_id, &shell_join(CODE_TAB_COMMAND)))?;
+    pane_id_from(&run_herdr(&tab_create_argv(&workspace_id, cwd, label))?)
 }
 
 fn place_scratch(cwd: &str, label: &str) -> Result<String> {
@@ -167,6 +183,15 @@ fn workspace_id_from(result: &Value) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("herdr response missing .workspace.workspace_id: {result}"))
+}
+
+fn tab_id_from(result: &Value) -> Result<String> {
+    result
+        .get("tab")
+        .and_then(|t| t.get("tab_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("herdr response missing .tab.tab_id: {result}"))
 }
 
 /// The parent checkout is the entry with `is_linked_worktree: false`; a
@@ -317,6 +342,15 @@ fn pane_rename_argv(pane_id: &str, label: &str) -> Vec<String> {
     ]
 }
 
+fn tab_rename_argv(tab_id: &str, label: &str) -> Vec<String> {
+    vec![
+        "tab".to_string(),
+        "rename".to_string(),
+        tab_id.to_string(),
+        label.to_string(),
+    ]
+}
+
 fn pane_run_argv(pane_id: &str, command: &str) -> Vec<String> {
     vec![
         "pane".to_string(),
@@ -364,9 +398,9 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-fn shell_join(argv: &[String]) -> String {
+fn shell_join<S: AsRef<str>>(argv: &[S]) -> String {
     argv.iter()
-        .map(|a| shell_single_quote(a))
+        .map(|a| shell_single_quote(a.as_ref()))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -541,6 +575,26 @@ mod tests {
             herdr_error_text(r#"{"not":"an error shape"}"#),
             r#"{"not":"an error shape"}"#
         );
+    }
+
+    #[test]
+    fn tab_rename_argv_matches_the_cli() {
+        assert_eq!(
+            tab_rename_argv("w1:t1", "code"),
+            vec!["tab", "rename", "w1:t1", "code"]
+        );
+    }
+
+    #[test]
+    fn tab_id_from_reads_the_nested_field() {
+        let result = json!({"tab": {"tab_id": "w1:t1"}});
+        assert_eq!(tab_id_from(&result).unwrap(), "w1:t1");
+    }
+
+    #[test]
+    fn tab_id_from_errors_when_missing() {
+        let result = json!({"tab": {}});
+        assert!(tab_id_from(&result).is_err());
     }
 
     #[test]
