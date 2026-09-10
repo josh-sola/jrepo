@@ -286,8 +286,8 @@ or creates a herdr workspace named after the tree — a new one via `herdr
 worktree open`, or a new tab in the existing one via `herdr tab create` — and
 types `wt go <tree> --here ...` into that workspace's pane, which is the run
 that actually waits for provisioning and execs the agent. A brand-new tree
-workspace opens with a first tab named `code` running `emacsclient -t`, and
-the agent gets a second, focused tab; an existing workspace just gets a new
+workspace opens with a first tab named `code` running `emacsclient -t <tree>`,
+and the agent gets a second, focused tab; an existing workspace just gets a new
 agent tab. A scratch launch (`@label`) is placed the same way, keyed by
 workspace label instead of tree path, since it has no tree of its own.
 
