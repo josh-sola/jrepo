@@ -113,7 +113,8 @@ previews the highlighted tree — the same detail `wt tree status` shows.
 | --- | --- |
 | type | filter, or edit the focused field |
 | ↑ / ↓ | move the tree selection |
-| Tab / Shift-Tab | cycle focus: filter → profile → args |
+| Tab | cycle focus forward: filter → profile → args |
+| Shift-Tab | toggle the agent between Pi and Claude |
 | Ctrl-P / Ctrl-L / Ctrl-X | select Pi / Claude / Codex |
 | Enter | launch the highlighted tree |
 | Esc | cancel |

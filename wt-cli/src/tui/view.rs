@@ -8,9 +8,9 @@ use crate::agent::Agent;
 
 use super::state::{Focus, FormFocus, Mode, NewTreeForm, Row, State, column_widths};
 
-const HINT: &str =
-    "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Ctrl-P/L/X agent  ·  Enter launch  ·  Esc cancel";
-const FORM_HINT: &str = "Tab next field  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list";
+const HINT: &str = "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Shift-Tab Pi/Claude  ·  Ctrl-P/L/X agent  ·  Enter launch  ·  Esc cancel";
+const FORM_HINT: &str =
+    "Tab next field  ·  Shift-Tab Pi/Claude  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list";
 
 pub fn draw(frame: &mut Frame, state: &State, preview: &str) {
     let area = frame.area();
