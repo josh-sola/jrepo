@@ -1,0 +1,32 @@
+{
+  "entries": [
+    {
+      "number": 1,
+      "title": "types: add wire schemas",
+      "state": "merged",
+      "draft": false,
+      "headRef": "demo/types",
+      "baseRef": "master",
+      "isCurrent": false
+    },
+    {
+      "number": 2,
+      "title": "api: add endpoint contract",
+      "state": "open",
+      "draft": false,
+      "headRef": "demo/endpoint",
+      "baseRef": "demo/types",
+      "isCurrent": true
+    },
+    {
+      "number": 3,
+      "title": "worker: resolve values",
+      "state": "open",
+      "draft": true,
+      "headRef": "demo/read",
+      "baseRef": "demo/endpoint",
+      "isCurrent": false
+    }
+  ],
+  "truncatedBelow": false
+}

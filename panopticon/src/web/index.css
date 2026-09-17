@@ -79,3 +79,111 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Read-only rendering for PR descriptions, comments, and review bodies
+   (Markdown.tsx). Plain CSS rather than a Tailwind typography plugin, which
+   this package doesn't carry. */
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+}
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.5em;
+}
+.markdown-body ul {
+  list-style: disc;
+}
+.markdown-body ol {
+  list-style: decimal;
+}
+.markdown-body a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body code {
+  background-color: var(--muted);
+  border-radius: 0.25rem;
+  padding: 0.1em 0.3em;
+  font-size: 0.85em;
+}
+.markdown-body pre {
+  background-color: var(--muted);
+  border-radius: 0.375rem;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+}
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+}
+.markdown-body blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 1em;
+  color: var(--muted-foreground);
+}
+.markdown-body table {
+  border-collapse: collapse;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border);
+  padding: 0.35em 0.6em;
+}
+.markdown-body hr {
+  border-color: var(--border);
+}
+
+/* Shiki emits both palettes as custom properties per token (see
+   shiki.ts's `defaultColor: false`), so switching appearance is a variable
+   swap with no re-tokenizing and no DOM replacement — which matters here
+   because the diff view's change-span Ranges (below) anchor to these same
+   text nodes. */
+.shiki,
+.shiki span {
+  color: var(--shiki-light);
+  background-color: var(--shiki-light-bg);
+}
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark);
+  background-color: var(--shiki-dark-bg);
+}
+
+/* Difftastic token-level change spans within a diff "mod" row, painted via
+   the CSS Custom Highlight API (see changeSpans.ts's rangesForSpans). Fixed
+   semantic red/green rather than a theme var, which would tint them
+   per-theme; dark needs more alpha because the same alpha reads weaker on a
+   dark background. */
+html.dark::highlight(panopticon-diff-del) {
+  background-color: rgb(248 81 73 / 45%);
+}
+html.dark::highlight(panopticon-diff-add) {
+  background-color: rgb(63 185 80 / 40%);
+}
+::highlight(panopticon-diff-del) {
+  background-color: rgb(255 89 82 / 35%);
+}
+::highlight(panopticon-diff-add) {
+  background-color: rgb(53 199 118 / 30%);
+}

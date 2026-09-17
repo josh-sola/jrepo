@@ -18,13 +18,14 @@ export interface PrSummary {
   number: number;
   title: string;
   body: string;
-  // 'merged' whenever mergeCommitSha is set, because Graphite's merge queue
-  // leaves GitHub's own merged flag false.
+  // Graphite's merge queue closes PRs instead of merging them, so a closed PR
+  // counts as merged once its squash commit is found on trunk.
   state: PrState;
   draft: boolean;
   author: PrUser;
   base: PrRef;
   head: PrRef;
+  // The commit that landed on trunk; null while open or closed without landing.
   mergeCommitSha: string | null;
   additions: number;
   deletions: number;

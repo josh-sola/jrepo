@@ -1,0 +1,123 @@
+[
+  {
+    "id": 5706993610,
+    "user": {
+      "login": "vercel[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/8329?v=4"
+    },
+    "body": "[vc]: #6rHgK5/YKVGAu+IUgJxNxYrUp8P+Kg1CNnBSKMTVzK4=:eyJpc01vbm9yZXBvIjp0cnVlLCJ0eXBlIjoiZ2l0aHViIiwicHJvamVjdHMiOlt7Im5h",
+    "created_at": "2026-09-17T01:24:31Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5706993610"
+  },
+  {
+    "id": 5706994181,
+    "user": {
+      "login": "linear-code[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/1658531?v=4"
+    },
+    "body": "<!-- linear-linkback -->\n<details>\n<summary><a href=\"https://linear.app/sola-ai/issue/FE-1003/editor-stream-committed-dr",
+    "created_at": "2026-09-17T01:24:35Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5706994181"
+  },
+  {
+    "id": 5706994508,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "* **#20862** <a href=\"https://app.graphite.com/github/pr/Sola-Solutions/monorepo/20862?utm_source=stack-comment-icon\" ta",
+    "created_at": "2026-09-17T01:24:38Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5706994508"
+  },
+  {
+    "id": 5706997119,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "@greptile-apps review",
+    "created_at": "2026-09-17T01:24:59Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5706997119"
+  },
+  {
+    "id": 5707021820,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "## Independent review (agent)\n\nRead against `workflow-editor-streaming-plan.md`, `services/dashboard-api/src/workflow-dr",
+    "created_at": "2026-09-17T01:28:03Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5707021820"
+  },
+  {
+    "id": 5707037443,
+    "user": {
+      "login": "greptile-apps[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/867647?v=4"
+    },
+    "body": "<!-- greptile_summary -->\n\n<h2><a href=\"https://app.greptile.com/api/retrigger?id=65308630\"><picture><source media=\"(pre",
+    "created_at": "2026-09-17T01:30:04Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5707037443"
+  },
+  {
+    "id": 5718975198,
+    "user": {
+      "login": "graphite-app[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/158384?v=4"
+    },
+    "body": "PR is ready to merge.",
+    "created_at": "2026-09-17T18:01:17Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5718975198"
+  },
+  {
+    "id": 5719450295,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "Resolved independent review item 4: sequence-gap and transaction-mismatch diagnostics now include the workflow ID alongs",
+    "created_at": "2026-09-17T18:40:26Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5719450295"
+  },
+  {
+    "id": 5719565037,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "Resolved independent review item 7c: WorkflowEngineProvider.test.tsx now mocks only the draft-events socket module inste",
+    "created_at": "2026-09-17T18:49:50Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5719565037"
+  },
+  {
+    "id": 5719604131,
+    "user": {
+      "login": "jordan-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+    },
+    "body": "Resolved independent review item 7d: the optimistic-apply test now asserts only the local transaction fields owned by ap",
+    "created_at": "2026-09-17T18:52:56Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5719604131"
+  },
+  {
+    "id": 5719817357,
+    "user": {
+      "login": "graphite-app[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/158384?v=4"
+    },
+    "body": "### Merge activity\n\n* **Sep 17, 7:10 PM UTC**: `jordan-sola` added this pull request to the [Graphite merge queue](https",
+    "created_at": "2026-09-17T19:10:51Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731#issuecomment-5719817357"
+  }
+]

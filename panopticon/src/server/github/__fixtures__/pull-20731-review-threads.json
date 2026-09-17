@@ -1,0 +1,256 @@
+{
+  "pageInfo": {
+    "hasNextPage": false,
+    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0xN1QwMTozMDoxMFrOoyxxZw=="
+  },
+  "nodes": [
+    {
+      "id": "PRRT_kwDOKs9ddM6jLHFa",
+      "isResolved": true,
+      "isOutdated": false,
+      "diffSide": "RIGHT",
+      "startDiffSide": "RIGHT",
+      "line": 96,
+      "originalLine": 91,
+      "startLine": 91,
+      "path": "apps/sola-dashboard-next/src/domains/editor/engine/createStreamSync.ts",
+      "comments": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0xN1QxNjo1MjoyN1rO8MRvSg=="
+        },
+        "nodes": [
+          {
+            "databaseId": 4032260092,
+            "id": "PRRC_kwDOKs9ddM7wV2f8",
+            "path": "apps/sola-dashboard-next/src/domains/editor/engine/createStreamSync.ts",
+            "line": 96,
+            "originalLine": 91,
+            "startLine": 91,
+            "diffHunk": "@@ -0,0 +1,110 @@\n+import { SentryBrowser } from 'sentry-browser-shared';\n+\n+import type {\n+  CommittedFrame,\n+  DraftEventsSocket,\n+  OpenDraftEventsSocket,\n+} from 'src/domains/workflows';\n+\n+import",
+            "body": "<a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **Ini",
+            "replyTo": null,
+            "author": {
+              "login": "greptile-apps",
+              "__typename": "Bot"
+            },
+            "createdAt": "2026-09-17T01:30:10Z",
+            "updatedAt": "2026-09-17T01:30:13Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4032260092"
+          },
+          {
+            "databaseId": 4039405386,
+            "id": "PRRC_kwDOKs9ddM7wxG9K",
+            "path": "apps/sola-dashboard-next/src/domains/editor/engine/createStreamSync.ts",
+            "line": 96,
+            "originalLine": 91,
+            "startLine": 91,
+            "diffHunk": "@@ -0,0 +1,110 @@\n+import { SentryBrowser } from 'sentry-browser-shared';\n+\n+import type {\n+  CommittedFrame,\n+  DraftEventsSocket,\n+  OpenDraftEventsSocket,\n+} from 'src/domains/workflows';\n+\n+import",
+            "body": "Keeping the current M1 connection behavior. FE-1014 tracks moving the editor stream to Socket.IO, which will own reconne",
+            "replyTo": {
+              "databaseId": 4032260092
+            },
+            "author": {
+              "login": "jordan-sola",
+              "__typename": "User"
+            },
+            "createdAt": "2026-09-17T16:52:27Z",
+            "updatedAt": "2026-09-17T16:52:27Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4039405386"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOKs9ddM6jLHFf",
+      "isResolved": true,
+      "isOutdated": true,
+      "diffSide": "RIGHT",
+      "startDiffSide": "RIGHT",
+      "line": null,
+      "originalLine": 145,
+      "startLine": null,
+      "path": "apps/sola-dashboard-next/src/domains/workflows/api/draftEventsSocket.ts",
+      "comments": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0xN1QxNzo1ODoxN1rO8Mxqjw=="
+        },
+        "nodes": [
+          {
+            "databaseId": 4032260098,
+            "id": "PRRC_kwDOKs9ddM7wV2gC",
+            "path": "apps/sola-dashboard-next/src/domains/workflows/api/draftEventsSocket.ts",
+            "line": null,
+            "originalLine": 145,
+            "startLine": null,
+            "diffHunk": "@@ -0,0 +1,164 @@\n+import { SentryBrowser } from 'sentry-browser-shared';\n+import { z } from 'types-shared';\n+import { WorkflowDraftCommittedEvent } from 'types-shared/domains/workflow-drafts';\n+\n+imp",
+            "body": "<a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **Inv",
+            "replyTo": null,
+            "author": {
+              "login": "greptile-apps",
+              "__typename": "Bot"
+            },
+            "createdAt": "2026-09-17T01:30:10Z",
+            "updatedAt": "2026-09-17T01:30:13Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4032260098"
+          },
+          {
+            "databaseId": 4039923486,
+            "id": "PRRC_kwDOKs9ddM7wzFce",
+            "path": "apps/sola-dashboard-next/src/domains/workflows/api/draftEventsSocket.ts",
+            "line": null,
+            "originalLine": 145,
+            "startLine": null,
+            "diffHunk": "@@ -0,0 +1,164 @@\n+import { SentryBrowser } from 'sentry-browser-shared';\n+import { z } from 'types-shared';\n+import { WorkflowDraftCommittedEvent } from 'types-shared/domains/workflow-drafts';\n+\n+imp",
+            "body": "Keeping the connection open intentionally. Committed history is durable, and an unreadable frame cannot safely advance t",
+            "replyTo": {
+              "databaseId": 4032260098
+            },
+            "author": {
+              "login": "jordan-sola",
+              "__typename": "User"
+            },
+            "createdAt": "2026-09-17T17:57:37Z",
+            "updatedAt": "2026-09-17T17:57:37Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4039923486"
+          },
+          {
+            "databaseId": 4039928463,
+            "id": "PRRC_kwDOKs9ddM7wzGqP",
+            "path": "apps/sola-dashboard-next/src/domains/workflows/api/draftEventsSocket.ts",
+            "line": null,
+            "originalLine": 145,
+            "startLine": null,
+            "diffHunk": "@@ -0,0 +1,164 @@\n+import { SentryBrowser } from 'sentry-browser-shared';\n+import { z } from 'types-shared';\n+import { WorkflowDraftCommittedEvent } from 'types-shared/domains/workflow-drafts';\n+\n+imp",
+            "body": "That rationale is sound: with the cursor left unchanged, recovery would replay the same durable malformed frame, so keep",
+            "replyTo": {
+              "databaseId": 4032260098
+            },
+            "author": {
+              "login": "greptile-apps",
+              "__typename": "Bot"
+            },
+            "createdAt": "2026-09-17T17:58:17Z",
+            "updatedAt": "2026-09-17T17:58:17Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4039928463"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOKs9ddM6jLHFj",
+      "isResolved": true,
+      "isOutdated": false,
+      "diffSide": "RIGHT",
+      "startDiffSide": "RIGHT",
+      "line": 178,
+      "originalLine": 150,
+      "startLine": 139,
+      "path": "apps/sola-dashboard-next/src/domains/editor/engine/createSaver.ts",
+      "comments": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0xN1QxNzo1Mjo1OVrO8MvOGw=="
+        },
+        "nodes": [
+          {
+            "databaseId": 4032260104,
+            "id": "PRRC_kwDOKs9ddM7wV2gI",
+            "path": "apps/sola-dashboard-next/src/domains/editor/engine/createSaver.ts",
+            "line": 178,
+            "originalLine": 150,
+            "startLine": 162,
+            "diffHunk": "@@ -113,33 +132,49 @@ export function createSaver({\n       return;\n     }\n \n-    const sent = envelope;\n     const { outcome } = result.value;\n     failures = 0;\n     envelope = null;\n \n     if (outco",
+            "body": "<a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **Sta",
+            "replyTo": null,
+            "author": {
+              "login": "greptile-apps",
+              "__typename": "Bot"
+            },
+            "createdAt": "2026-09-17T01:30:10Z",
+            "updatedAt": "2026-09-17T01:30:13Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4032260104"
+          },
+          {
+            "databaseId": 4039888411,
+            "id": "PRRC_kwDOKs9ddM7wy84b",
+            "path": "apps/sola-dashboard-next/src/domains/editor/engine/createSaver.ts",
+            "line": 178,
+            "originalLine": 150,
+            "startLine": 162,
+            "diffHunk": "@@ -113,33 +132,49 @@ export function createSaver({\n       return;\n     }\n \n-    const sent = envelope;\n     const { outcome } = result.value;\n     failures = 0;\n     envelope = null;\n \n     if (outco",
+            "body": "Fixed. A conflict from an older draft epoch is recorded on the transaction history but no longer triggers recovery; the ",
+            "replyTo": {
+              "databaseId": 4032260104
+            },
+            "author": {
+              "login": "jordan-sola",
+              "__typename": "User"
+            },
+            "createdAt": "2026-09-17T17:52:59Z",
+            "updatedAt": "2026-09-17T17:52:59Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4039888411"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PRRT_kwDOKs9ddM6jLHFn",
+      "isResolved": true,
+      "isOutdated": false,
+      "diffSide": "RIGHT",
+      "startDiffSide": "RIGHT",
+      "line": 43,
+      "originalLine": 35,
+      "startLine": 40,
+      "path": "apps/sola-dashboard-next/src/domains/editor/store/slices/sync.ts",
+      "comments": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0xN1QxODowMjoyOVrO8MzscQ=="
+        },
+        "nodes": [
+          {
+            "databaseId": 4032260108,
+            "id": "PRRC_kwDOKs9ddM7wV2gM",
+            "path": "apps/sola-dashboard-next/src/domains/editor/store/slices/sync.ts",
+            "line": 43,
+            "originalLine": 35,
+            "startLine": 40,
+            "diffHunk": "@@ -1,38 +1,155 @@\n-import type { DraftRevisions } from 'types-shared/domains/workflow-drafts';\n+import type { WorkflowOperation } from 'workflow-operations/operations';\n \n-import type { Operation, Wo",
+            "body": "<a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=9\" align=\"top\"></a> **Tra",
+            "replyTo": null,
+            "author": {
+              "login": "greptile-apps",
+              "__typename": "Bot"
+            },
+            "createdAt": "2026-09-17T01:30:10Z",
+            "updatedAt": "2026-09-17T01:30:13Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4032260108"
+          },
+          {
+            "databaseId": 4039961713,
+            "id": "PRRC_kwDOKs9ddM7wzOxx",
+            "path": "apps/sola-dashboard-next/src/domains/editor/store/slices/sync.ts",
+            "line": 43,
+            "originalLine": 35,
+            "startLine": 40,
+            "diffHunk": "@@ -1,38 +1,155 @@\n-import type { DraftRevisions } from 'types-shared/domains/workflow-drafts';\n+import type { WorkflowOperation } from 'workflow-operations/operations';\n \n-import type { Operation, Wo",
+            "body": "Keeping the array-backed ledger for the M1 steel thread, where session volume is expected to remain in the hundreds and ",
+            "replyTo": {
+              "databaseId": 4032260108
+            },
+            "author": {
+              "login": "jordan-sola",
+              "__typename": "User"
+            },
+            "createdAt": "2026-09-17T18:02:29Z",
+            "updatedAt": "2026-09-17T18:02:30Z",
+            "url": "https://github.com/Sola-Solutions/monorepo/pull/20731#discussion_r4039961713"
+          }
+        ]
+      }
+    }
+  ]
+}

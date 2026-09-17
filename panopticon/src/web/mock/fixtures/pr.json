@@ -1,0 +1,265 @@
+{
+  "pr": {
+    "owner": "Sola-Solutions",
+    "repo": "monorepo",
+    "number": 1,
+    "title": "Greet users by name, in more than one language",
+    "body": "Adds multi-byte greetings, a new feature button, and cleans up the string helpers module.\n\n- Renames `str_helpers.py` to `strings.py`\n- Drops the unused `old_math.py`\n- Regenerates `bundle.generated.json`\n\nSee #0 for the design discussion.",
+    "state": "open",
+    "draft": false,
+    "author": {
+      "login": "josh-bassin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4",
+      "isBot": false
+    },
+    "base": {
+      "ref": "main",
+      "sha": "0000000000000000000000000000000000000000"
+    },
+    "head": {
+      "ref": "josh/greet-multibyte",
+      "sha": "9461011896657e8d356caf8fc7f601ce3ee58bf5"
+    },
+    "mergeCommitSha": null,
+    "additions": 2216,
+    "deletions": 2205,
+    "changedFiles": 9,
+    "createdAt": "2026-09-15T14:00:00Z",
+    "updatedAt": "2026-09-17T09:30:00Z",
+    "url": "https://github.com/Sola-Solutions/monorepo/pull/1"
+  },
+  "files": [
+    {
+      "path": "src/greet.ts",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "oldOid": "b370deafbdd03d9c5222f5b8605c53961a5eace7",
+      "newOid": "7cb77525ead768297980a4c46304b0dbff39f08d"
+    },
+    {
+      "path": "src/greet.test.ts",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 4,
+      "deletions": 0,
+      "oldOid": "2172c17e0749cbb5f9376393e659bd3b0f6d4715",
+      "newOid": "1ad212953b4a38f792ab9648c793cf483f7e4bea"
+    },
+    {
+      "path": "src/NewFeature.tsx",
+      "previousPath": null,
+      "status": "added",
+      "additions": 6,
+      "deletions": 0,
+      "oldOid": null,
+      "newOid": "53cf0fa462582365292c8481b10a5018f519790f"
+    },
+    {
+      "path": "src/format.ts",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "oldOid": "6e6e0078f896f12b3aca9525d4173fd0b6ff8214",
+      "newOid": "de5c188e4aead109f57695ac510156fc74053e8a"
+    },
+    {
+      "path": "src/legacy/old_math.py",
+      "previousPath": null,
+      "status": "removed",
+      "additions": 0,
+      "deletions": 2,
+      "oldOid": "caf28fe97fef69ad3b252e9abac1c4e4258799d7",
+      "newOid": null
+    },
+    {
+      "path": "src/utils/strings.py",
+      "previousPath": "src/utils/str_helpers.py",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 0,
+      "oldOid": "de48a49a9200b5e20db283832a97a1893d29f8ba",
+      "newOid": "a34d91e3e0058ade0bd30d478bf5fedc5d76a307"
+    },
+    {
+      "path": "README.md",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "oldOid": "aba46121412f37487050058f8120c017b2dd20c8",
+      "newOid": "5a51b6ff089ebbb6f832a79ff9da5e6ce6c628e3"
+    },
+    {
+      "path": "dist/bundle.generated.json",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 2200,
+      "deletions": 2200,
+      "oldOid": "e170b46b27eaf1a3250554bf856b361025b9df70",
+      "newOid": "3d568c9da38ca1e614b18f64b0921045b6831e7b"
+    },
+    {
+      "path": "assets/logo.png",
+      "previousPath": null,
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "oldOid": "70b2e3d622857c7191a16704aab3da7e4e029462",
+      "newOid": "22d68aea4faee17bcb4978d76382e972d16bebaf"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thread-live-1",
+      "path": "src/greet.ts",
+      "line": 2,
+      "originalLine": 2,
+      "startLine": null,
+      "side": "RIGHT",
+      "startSide": null,
+      "isResolved": false,
+      "isOutdated": false,
+      "diffHunk": "@@ -1,3 +1,3 @@\n export function greet(name: string): string {\n-  return `Hello, ${name}!`;\n+  return `h\u00e9llo, ${name}! \ud83c\udf89`;",
+      "comments": [
+        {
+          "id": 1,
+          "nodeId": "PRRC_1",
+          "author": {
+            "login": "reviewer-one",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/2?v=4",
+            "isBot": false
+          },
+          "body": "Nice, but should this be locale-aware instead of hardcoding `h\u00e9llo`?",
+          "createdAt": "2026-09-16T10:00:00Z",
+          "updatedAt": "2026-09-16T10:00:00Z",
+          "url": "https://github.com/Sola-Solutions/monorepo/pull/1#discussion_r1",
+          "inReplyToId": null
+        }
+      ]
+    },
+    {
+      "id": "thread-outdated-1",
+      "path": "src/format.ts",
+      "line": null,
+      "originalLine": 2,
+      "startLine": null,
+      "side": "RIGHT",
+      "startSide": null,
+      "isResolved": false,
+      "isOutdated": true,
+      "diffHunk": "@@ -1,3 +1,3 @@\n export function format(value: number): string {\n-  return value.toFixed(2);\n+    return value.toFixed(2);",
+      "comments": [
+        {
+          "id": 2,
+          "nodeId": "PRRC_2",
+          "author": {
+            "login": "greptile",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4",
+            "isBot": true
+          },
+          "body": "This changes indentation only \u2014 consider running the formatter instead of hand-editing.",
+          "createdAt": "2026-09-15T15:00:00Z",
+          "updatedAt": "2026-09-15T15:00:00Z",
+          "url": "https://github.com/Sola-Solutions/monorepo/pull/1#discussion_r2",
+          "inReplyToId": null
+        }
+      ]
+    },
+    {
+      "id": "thread-resolved-1",
+      "path": "src/utils/strings.py",
+      "line": 2,
+      "originalLine": 2,
+      "startLine": null,
+      "side": "RIGHT",
+      "startSide": null,
+      "isResolved": true,
+      "isOutdated": false,
+      "diffHunk": "@@ -1,2 +1,3 @@\n def upper(s):\n+    \"\"\"Uppercase a string.\"\"\"\n     return s.upper()",
+      "comments": [
+        {
+          "id": 3,
+          "nodeId": "PRRC_3",
+          "author": {
+            "login": "reviewer-two",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/4?v=4",
+            "isBot": false
+          },
+          "body": "Nit: docstrings usually go with a trailing period.",
+          "createdAt": "2026-09-16T11:00:00Z",
+          "updatedAt": "2026-09-16T11:20:00Z",
+          "url": "https://github.com/Sola-Solutions/monorepo/pull/1#discussion_r3",
+          "inReplyToId": null
+        },
+        {
+          "id": 4,
+          "nodeId": "PRRC_4",
+          "author": {
+            "login": "josh-bassin",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4",
+            "isBot": false
+          },
+          "body": "Fixed in a follow-up.",
+          "createdAt": "2026-09-16T11:20:00Z",
+          "updatedAt": "2026-09-16T11:20:00Z",
+          "url": "https://github.com/Sola-Solutions/monorepo/pull/1#discussion_r4",
+          "inReplyToId": 3
+        }
+      ]
+    }
+  ],
+  "issueComments": [
+    {
+      "id": 10,
+      "author": {
+        "login": "josh-bassin",
+        "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4",
+        "isBot": false
+      },
+      "body": "Opening this as a draft while I sort out the generated bundle diff noise.",
+      "createdAt": "2026-09-15T14:05:00Z",
+      "url": "https://github.com/Sola-Solutions/monorepo/pull/1#issuecomment-1"
+    },
+    {
+      "id": 11,
+      "author": {
+        "login": "reviewer-one",
+        "avatarUrl": "https://avatars.githubusercontent.com/u/2?v=4",
+        "isBot": false
+      },
+      "body": "Looks reasonable overall, left a couple of line comments.",
+      "createdAt": "2026-09-16T10:05:00Z",
+      "url": "https://github.com/Sola-Solutions/monorepo/pull/1#issuecomment-2"
+    }
+  ],
+  "reviews": [
+    {
+      "id": 20,
+      "author": {
+        "login": "reviewer-one",
+        "avatarUrl": "https://avatars.githubusercontent.com/u/2?v=4",
+        "isBot": false
+      },
+      "state": "COMMENTED",
+      "body": "A few small questions, nothing blocking.",
+      "submittedAt": "2026-09-16T10:06:00Z",
+      "url": "https://github.com/Sola-Solutions/monorepo/pull/1#pullrequestreview-1"
+    },
+    {
+      "id": 21,
+      "author": {
+        "login": "reviewer-two",
+        "avatarUrl": "https://avatars.githubusercontent.com/u/4?v=4",
+        "isBot": false
+      },
+      "state": "APPROVED",
+      "body": "LGTM once the generated bundle is regenerated for real.",
+      "submittedAt": "2026-09-16T11:25:00Z",
+      "url": "https://github.com/Sola-Solutions/monorepo/pull/1#pullrequestreview-2"
+    }
+  ],
+  "fetchedAt": "2026-09-17T09:30:00Z"
+}

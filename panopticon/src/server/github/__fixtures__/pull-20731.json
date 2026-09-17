@@ -1,0 +1,29 @@
+{
+  "number": 20731,
+  "title": "[FE-1003] editor: stream committed draft operations into the engine",
+  "body": "Closes FE-1003 (editor: stream committed draft operations to the frontend).\n\n## What\n\nThe editor subscribes to the draft operation socket while a draft is open. Committed transactions from every editor, including this tab's own echoes, are applied through `workflow-operations`; duplicates are dropped by transaction id; HTTP stays the submission path. Spec: `workflow-editor-streaming-plan.md` on the branch's author worktree (not committed).\n\n- `workflows/api/draftEventsSocket.ts`: transport only. Mints the socket token, builds the URL, parses frames. A failed mint reports through `onClose` with a client-side code.\n- `editor/engine/createStreamSync.ts`: socket lifetime behind a generation number; callbacks from a superseded connection are ignored.\n- `editor/engine/createOperationsEngine.ts`: applies remote frames, confirms own echoes without re-applying, recovers through one path (silence the stream, refetch, install snapshot, reconnect), `retryRecovery` after a failed refetch.\n- `editor/engine/createSaver.ts`: reads each head from its record, removes it from the queue by id, never writes the stream cursor from an HTTP response.\n- `editor/store/slices/sync.ts`: one arrival-ordered `transactions` history with an epoch stamp, plus `transactionStatus` and `sequenceMismatch` derivations. `confirmedRevisions`, `PendingOperation`, `DroppedEdit` and `droppedEdits` are removed.\n- Hooks `useHasSequenceMismatch` and `useSequenceMismatch`; `WorkflowEngineProvider` wires the socket and a `fetchQuery`-based `fetchDraft`.\n\n## Decisions\n\n- **A close before open does not recover.** A failed token mint or refused upgrade leaves `stream.status = 'closed'` and reports once. Recovery reconnects exactly once, so treating that close as a disconnect would loop refetch and reconnect for as long as the socket host is unreachable while HTTP stays up. Editing and saving continue without a stream.\n- **Sequence mismatches are informational.** A local transaction committing somewhere other than `sentBaseSequence + 1` is derived from the record and reported once, from whichever of the HTTP `applied` response or the echo establishes it first. It never triggers recovery and does not reconcile the visible draft (accepted divergence per the spec).\n- **`fetchDraft` is `queryClient.fetchQuery` with `staleTime: 0`** on the loader's options, so recovery reaches the network through the same query and refreshes the cache entry the loader boundary observes. The provider reads its bootstrap once, so that refresh is inert.\n- **Records carry `WorkflowOperation[]`**, since a remote frame may hold any operation the reducer accepts, not only the ones this editor authors.\n\n## Verification\n\n- 272 unit tests across `domains/editor` and `domains/workflows`, including the nine files the spec lists; type-aware lint and typecheck clean for both domains.\n- Manual: two elevated admin tabs on the local claims-intake draft against a dashboard-api from this tree. A rename in either tab appears in the other without a reload; the database holds both commits at sequences 1 and 2; neither tab shows \"Unsaved changes\" afterwards.\n\n## Not in this PR\n\n- A visible sequence indicator or debugging panel over `transactions` and `stream.status`.\n- Reconnect backoff and token refresh beyond one reconnect per recovery.\n- Acknowledging through the socket echo instead of the HTTP response.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01TZsGBhShFE7KWBoGp8SvBe\n",
+  "state": "closed",
+  "draft": false,
+  "user": {
+    "login": "jordan-sola",
+    "type": "User",
+    "avatar_url": "https://avatars.githubusercontent.com/u/304500111?v=4"
+  },
+  "base": {
+    "ref": "master",
+    "sha": "324b01e7a53f416eb5108a7f8c984be8bdd3a07c"
+  },
+  "head": {
+    "ref": "jordan/fe-1003-stream-draft-operations",
+    "sha": "2c7806eb6a01107d75d0854c018004a01887f43c"
+  },
+  "merge_commit_sha": "533d98f2e844d15ce902c92eb216482dc615c48d",
+  "merged_at": null,
+  "merged": false,
+  "additions": 3447,
+  "deletions": 536,
+  "changed_files": 31,
+  "created_at": "2026-09-17T01:24:25Z",
+  "updated_at": "2026-09-17T19:14:39Z",
+  "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20731"
+}

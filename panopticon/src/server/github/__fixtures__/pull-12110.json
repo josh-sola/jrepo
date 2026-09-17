@@ -1,0 +1,29 @@
+{
+  "number": 12110,
+  "title": "public-api: migrate to env-shared Config and pnpm generate:env [BE-1709]",
+  "body": "Part of BE-1709. public-api moves off hand-maintained env files onto the shared env-shared Config: the service declares its env surface once as a schema, `pnpm generate:env` materializes the local `.env` from dev Parameter Store, and the runtime validates the whole surface at boot. Every stored value already existed in dev Parameter Store and helm already injects every required var in every cluster, so there is no deploy dependency — this changes how local dev gets its env, not what deployed services see.\n\n## Testing\n\n| Step | Result |\n|---|---|\n| `pnpm -F public-api generate:env` against dev Parameter Store | 7-entry `.env` written (stored + local-default fields; runtime-default fields correctly omitted) |\n| Boot from the generated `.env` | clean start; `GET /healthz` 200, `GET /swagger.json` 200 |\n| Schema ⟂ helm cross-check | every required field injected in development, staging, and production values |\n\nThe full endpoint surface (browser-contexts CRUD, misc, workflows) is exercised live against the local stack in the stacked #15664.\n",
+  "state": "closed",
+  "draft": false,
+  "user": {
+    "login": "josh-sola",
+    "type": "User",
+    "avatar_url": "https://avatars.githubusercontent.com/u/293914497?v=4"
+  },
+  "base": {
+    "ref": "master",
+    "sha": "4487c3a32dec0bcc3ff3d9bdf4ee43723d13a457"
+  },
+  "head": {
+    "ref": "josh/be-1709-migrate-public-api-env-shared",
+    "sha": "ddf6e0ec64ea34e95df18a43389f90a606ee8b35"
+  },
+  "merge_commit_sha": "69c5bd42cb187871268549b3ee21ac269cbefbf7",
+  "merged_at": null,
+  "merged": false,
+  "additions": 34,
+  "deletions": 2,
+  "changed_files": 3,
+  "created_at": "2026-06-22T15:23:02Z",
+  "updated_at": "2026-08-06T14:19:48Z",
+  "html_url": "https://github.com/Sola-Solutions/monorepo/pull/12110"
+}

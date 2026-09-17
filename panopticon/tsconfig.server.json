@@ -4,5 +4,5 @@
     "lib": ["ESNext"],
     "types": ["bun-types"]
   },
-  "include": ["src/server/**/*", "src/shared/**/*"]
+  "include": ["src/server/**/*", "src/shared/**/*", "scripts/**/*"]
 }

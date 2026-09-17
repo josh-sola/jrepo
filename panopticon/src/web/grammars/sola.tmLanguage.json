@@ -1,0 +1,324 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Sola",
+  "scopeName": "source.sola",
+  "fileTypes": ["sola", "dsl"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#meta" },
+    { "include": "#execution" },
+    { "include": "#node-header" },
+    { "include": "#typed-declaration" },
+    { "include": "#decorator" },
+    { "include": "#derive" },
+    { "include": "#loop-binding" },
+    { "include": "#document-keyword" },
+    { "include": "#control-keyword" },
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.sola",
+      "begin": "#",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.sola" }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "name": "constant.other.action-id.sola",
+          "match": "\\bid:\\{[^\\s{}]+\\}"
+        }
+      ]
+    },
+    "meta": {
+      "begin": "(@meta)\\b",
+      "beginCaptures": {
+        "1": { "name": "storage.modifier.annotation.sola" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#json-literal" },
+        {
+          "name": "variable.other.property.sola",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+    "execution": {
+      "begin": "(@execution)\\b",
+      "beginCaptures": {
+        "1": { "name": "storage.modifier.annotation.sola" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "name": "constant.language.execution.sola",
+          "match": "\\b(?:run|skip|pause_for_user|pause_for_admin)\\b"
+        },
+        { "include": "#expression" }
+      ]
+    },
+    "decorator": {
+      "name": "storage.modifier.annotation.sola",
+      "match": "@(name|description|instructions|private|concurrent|label)\\b"
+    },
+    "node-header": {
+      "name": "meta.node-header.sola",
+      "begin": "^(\\s*)(step|graph)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "beginCaptures": {
+        "2": { "name": "storage.type.declaration.sola" },
+        "3": { "name": "entity.name.function.sola" }
+      },
+      "end": "(:)(?=\\s*(?:#.*)?$)",
+      "endCaptures": {
+        "1": { "name": "punctuation.separator.sola" }
+      },
+      "patterns": [
+        { "include": "#returns-clause" },
+        { "include": "#node-parameters" },
+        { "include": "#expression" }
+      ]
+    },
+    "node-parameters": {
+      "name": "meta.parameters.sola",
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.parameters.begin.sola" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.parameters.end.sola" }
+      },
+      "patterns": [
+        { "include": "#header-parameter" },
+        { "include": "#expression" }
+      ]
+    },
+    "header-parameter": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\s*:\\s*)([A-Za-z_$][A-Za-z0-9_$.-]*)([\\[\\]]*)(?=\\s*(?:,|\\)))",
+      "captures": {
+        "1": { "name": "variable.parameter.sola" },
+        "2": { "name": "punctuation.separator.annotation.sola" },
+        "3": { "name": "entity.name.type.sola" },
+        "4": { "name": "punctuation.definition.array.sola" }
+      }
+    },
+    "returns-clause": {
+      "name": "meta.returns.sola",
+      "begin": "\\b(returns)\\b\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.sola" },
+        "2": { "name": "punctuation.section.parameters.begin.sola" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.parameters.end.sola" }
+      },
+      "patterns": [
+        {
+          "name": "variable.other.property.sola",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        },
+        { "include": "#expression" }
+      ]
+    },
+    "typed-declaration": {
+      "match": "^(\\s*)(?:(@private)\\s+)?([A-Za-z_][A-Za-z0-9_]*)(\\s*:\\s*)([A-Za-z_$][A-Za-z0-9_$.-]*)([\\[\\]]*)(?=\\s*(?:=|#|$))",
+      "captures": {
+        "2": { "name": "storage.modifier.annotation.sola" },
+        "3": { "name": "variable.other.readwrite.sola" },
+        "4": { "name": "punctuation.separator.annotation.sola" },
+        "5": { "name": "entity.name.type.sola" },
+        "6": { "name": "punctuation.definition.array.sola" }
+      }
+    },
+    "derive": {
+      "match": "\\b(derive)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.sola" },
+        "2": { "name": "variable.other.readwrite.sola" }
+      }
+    },
+    "loop-binding": {
+      "match": "\\b(for|map)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s+in\\b)|\\b(as)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.sola" },
+        "2": { "name": "variable.other.readwrite.sola" },
+        "3": { "name": "keyword.control.sola" },
+        "4": { "name": "variable.other.readwrite.sola" }
+      }
+    },
+    "document-keyword": {
+      "name": "keyword.declaration.sola",
+      "match": "\\b(?:start|nodes|edges|workflow|returns)\\b"
+    },
+    "control-keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.sola",
+          "match": "\\b(?:if|elif|else|match|case|try|except|for|while|map|branch)\\b"
+        },
+        {
+          "name": "keyword.control.flow.sola",
+          "match": "\\b(?:return|fail|break|continue|raise|stop|pass)\\b"
+        },
+        {
+          "name": "constant.language.outcome.sola",
+          "match": "\\b(?:ok|error)\\b"
+        },
+        {
+          "name": "keyword.operator.word.sola",
+          "match": "\\b(?:in|as|collect|index|max|limit)\\b"
+        }
+      ]
+    },
+    "expression": {
+      "patterns": [
+        { "include": "#f-string" },
+        { "include": "#string" },
+        { "include": "#action-ref" },
+        { "include": "#json-literal" },
+        {
+          "name": "constant.language.sola",
+          "match": "\\b(?:True|False|None)\\b"
+        },
+        {
+          "name": "support.function.intrinsic.sola",
+          "match": "\\b(?:global|resource|expr)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.builtin.sola",
+          "match": "\\b(?:len|range|int|float|str|bool|abs|min|max|sum|round)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.method.sola",
+          "match": "(?<=\\.)\\b(?:startswith|endswith|lower|upper|strip|split|join)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "keyword.operator.word.sola",
+          "match": "\\b(?:or|and|not|in|is)\\b"
+        },
+        { "include": "#number" },
+        {
+          "name": "variable.parameter.sola",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        },
+        { "include": "#operator" },
+        { "include": "#braced-expression" },
+        { "include": "#punctuation" },
+        {
+          "name": "variable.other.sola",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "f-string": {
+      "name": "string.quoted.double.interpolated.sola",
+      "begin": "(?<![A-Za-z0-9_])f\\\"",
+      "beginCaptures": {
+        "0": { "name": "string.quoted.double.interpolated.sola" }
+      },
+      "end": "\\\"|$",
+      "endCaptures": {
+        "0": { "name": "string.quoted.double.interpolated.sola" }
+      },
+      "patterns": [
+        { "include": "#escape" },
+        {
+          "name": "constant.character.escape.sola",
+          "match": "\\{\\{|\\}\\}"
+        },
+        {
+          "name": "meta.interpolation.sola",
+          "begin": "\\{(?!\\{)",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.interpolation.begin.sola" }
+          },
+          "end": "\\}|$",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.interpolation.end.sola" }
+          },
+          "patterns": [{ "include": "#expression" }]
+        }
+      ]
+    },
+    "braced-expression": {
+      "name": "meta.braced-expression.sola",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.braces.begin.sola" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.braces.end.sola" }
+      },
+      "patterns": [{ "include": "#expression" }]
+    },
+    "string": {
+      "name": "string.quoted.double.sola",
+      "begin": "\\\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.sola" }
+      },
+      "end": "\\\"|$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.sola" }
+      },
+      "patterns": [{ "include": "#escape" }]
+    },
+    "escape": {
+      "name": "constant.character.escape.sola",
+      "match": "\\\\(?:[\\\"\\\\/bfnrt]|u[0-9A-Fa-f]{4})"
+    },
+    "json-literal": {
+      "patterns": [
+        {
+          "name": "constant.language.json.sola",
+          "match": "\\b(?:true|false|null)\\b"
+        },
+        { "include": "#number" }
+      ]
+    },
+    "number": {
+      "name": "constant.numeric.sola",
+      "match": "\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b"
+    },
+    "action-ref": {
+      "match": "\\b((?:[A-Za-z_][A-Za-z0-9_]*\\.)*[A-Za-z_][A-Za-z0-9_]*)(@)(\\d+)\\b",
+      "captures": {
+        "1": { "name": "entity.name.function.sola" },
+        "2": { "name": "punctuation.definition.version.sola" },
+        "3": { "name": "constant.numeric.version.sola" }
+      }
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.sola",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.comparison.sola",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.sola",
+          "match": "(?<![=!<>])=(?!=)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.sola",
+          "match": "//|[+\\-*/%]"
+        }
+      ]
+    },
+    "punctuation": {
+      "name": "punctuation.separator.sola",
+      "match": "[()\\[\\]{},:.]"
+    }
+  }
+}

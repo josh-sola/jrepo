@@ -1,0 +1,26 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "timelineItems": {
+          "nodes": [
+            {
+              "__typename": "BaseRefChangedEvent",
+              "previousRefName": "josh/be-1709-migrate-v2-api-env-shared",
+              "currentRefName": "graphite-base/12110",
+              "createdAt": "2026-07-09T06:25:25Z",
+              "actor": { "login": "graphite-app" }
+            },
+            {
+              "__typename": "BaseRefChangedEvent",
+              "previousRefName": "graphite-base/12110",
+              "currentRefName": "master",
+              "createdAt": "2026-08-05T15:57:15Z",
+              "actor": { "login": "anwar-sola" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
