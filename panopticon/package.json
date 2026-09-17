@@ -12,7 +12,7 @@
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "bun test",
+    "test": "bun test src/server src/shared && bun test src/web",
     "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test"
   },
   "dependencies": {

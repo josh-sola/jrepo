@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.panopticon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BUN_PATH__</string>
+        <string>src/server/index.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__WORKDIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__OUT_LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__ERR_LOG__</string>
+</dict>
+</plist>

@@ -50,3 +50,4 @@ install:
     ./wt-cli/install.sh
     ./claude-planter/install.sh
     ./claude-planter/login-item.sh install
+    ./panopticon/install.sh install

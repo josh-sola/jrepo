@@ -1,0 +1,181 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { Hono } from 'hono';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { InboxResponse } from '../../shared/inbox.ts';
+import type { PrSummary } from '../../shared/github.ts';
+import { openDb } from '../db.ts';
+import { PrRepository } from '../poller/prs.ts';
+import { groupIntoStacks, inboxRouter } from './inbox.ts';
+
+let dir: string | undefined;
+
+afterEach(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+  dir = undefined;
+});
+
+function freshDb() {
+  dir = mkdtempSync(join(tmpdir(), 'panopticon-inbox-test-'));
+  return openDb(join(dir, 'test.sqlite'));
+}
+
+function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
+  return {
+    owner: 'acme',
+    repo: 'widgets',
+    number: 1,
+    title: 'A pull request',
+    body: '',
+    state: 'open',
+    draft: false,
+    author: { login: 'jordan', avatarUrl: null, isBot: false },
+    base: { ref: 'master', sha: 'base-sha' },
+    head: { ref: 'feature', sha: 'head-sha' },
+    mergeCommitSha: null,
+    additions: 1,
+    deletions: 1,
+    changedFiles: 1,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    url: 'https://github.com/acme/widgets/pull/1',
+    ...overrides,
+  };
+}
+
+describe('groupIntoStacks', () => {
+  test('chains a three-PR stack bottom to top', () => {
+    const bottom = fakePr({
+      number: 1,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-1', sha: 's' },
+    });
+    const middle = fakePr({
+      number: 2,
+      base: { ref: 'branch-1', sha: 's' },
+      head: { ref: 'branch-2', sha: 's' },
+    });
+    const top = fakePr({
+      number: 3,
+      base: { ref: 'branch-2', sha: 's' },
+      head: { ref: 'branch-3', sha: 's' },
+    });
+
+    const stacks = groupIntoStacks([top, bottom, middle]);
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]?.map((pr) => pr.number)).toEqual([1, 2, 3]);
+  });
+
+  test('a PR based on trunk with nothing above it is a standalone stack', () => {
+    const standalone = fakePr({
+      number: 5,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-5', sha: 's' },
+    });
+
+    const stacks = groupIntoStacks([standalone]);
+
+    expect(stacks).toEqual([[standalone]]);
+  });
+
+  test('a chain plus a standalone PR produce two separate stacks', () => {
+    const bottom = fakePr({
+      number: 1,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-1', sha: 's' },
+    });
+    const top = fakePr({
+      number: 2,
+      base: { ref: 'branch-1', sha: 's' },
+      head: { ref: 'branch-2', sha: 's' },
+    });
+    const standalone = fakePr({
+      number: 9,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-9', sha: 's' },
+    });
+
+    const stacks = groupIntoStacks([bottom, top, standalone]);
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.map((stack) => stack.map((pr) => pr.number)).sort()).toEqual(
+      [[1, 2], [9]].sort(),
+    );
+  });
+});
+
+function mount(prs: PrRepository, repos: string[]): Hono {
+  return new Hono().route('/api/inbox', inboxRouter({ prs, repos }));
+}
+
+describe('inboxRouter GET /', () => {
+  test('groups mine open PRs into stacks and lists recent PRs separately', async () => {
+    const prs = new PrRepository(freshDb());
+    const bottom = fakePr({
+      number: 1,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-1', sha: 's' },
+    });
+    const top = fakePr({
+      number: 2,
+      base: { ref: 'branch-1', sha: 's' },
+      head: { ref: 'branch-2', sha: 's' },
+    });
+    const viewedOnly = fakePr({
+      number: 42,
+      author: { login: 'someone-else', avatarUrl: null, isBot: false },
+    });
+    prs.upsertSummary(bottom, true);
+    prs.upsertSummary(top, true);
+    prs.upsertSummary(viewedOnly, false);
+    prs.recordView('acme', 'widgets', 42);
+
+    const app = mount(prs, ['acme/widgets']);
+    const res = await app.request('/api/inbox');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as InboxResponse;
+    expect(body.stacks).toHaveLength(1);
+    expect(body.stacks[0]?.map((pr) => pr.number)).toEqual([1, 2]);
+    expect(body.recent.map((pr) => pr.number)).toEqual([42]);
+    expect(typeof body.fetchedAt).toBe('string');
+  });
+
+  test('recent excludes PRs already shown in a stack', async () => {
+    const prs = new PrRepository(freshDb());
+    const mine = fakePr({ number: 1 });
+    prs.upsertSummary(mine, true);
+    prs.recordView('acme', 'widgets', 1);
+
+    const app = mount(prs, ['acme/widgets']);
+    const res = await app.request('/api/inbox');
+    const body = (await res.json()) as InboxResponse;
+
+    expect(body.stacks[0]?.map((pr) => pr.number)).toEqual([1]);
+    expect(body.recent).toEqual([]);
+  });
+
+  test('a view on a PR the poller has not fetched yet is hidden until hydrated', async () => {
+    const prs = new PrRepository(freshDb());
+    prs.recordView('acme', 'widgets', 99);
+
+    const app = mount(prs, ['acme/widgets']);
+    const res = await app.request('/api/inbox');
+    const body = (await res.json()) as InboxResponse;
+
+    expect(body.recent).toEqual([]);
+  });
+
+  test('closed mine PRs do not appear in the My open PRs stacks', async () => {
+    const prs = new PrRepository(freshDb());
+    prs.upsertSummary(fakePr({ number: 1, state: 'closed' }), true);
+
+    const app = mount(prs, ['acme/widgets']);
+    const res = await app.request('/api/inbox');
+    const body = (await res.json()) as InboxResponse;
+
+    expect(body.stacks).toEqual([]);
+  });
+});

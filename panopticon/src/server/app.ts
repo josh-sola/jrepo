@@ -2,12 +2,17 @@ import type { Database } from 'bun:sqlite';
 import { serveStatic } from 'hono/bun';
 import { Hono } from 'hono';
 import type { Config } from './config.ts';
+import type { PrEventBus } from './events.ts';
+import type { PrRepository } from './poller/prs.ts';
+import { viewRecorder } from './poller/prs.ts';
 import type { GitHubApi } from './github/api.ts';
 import type { RepoStores } from './git/stores.ts';
 import type { HoverServers } from './hover/servers.ts';
 import type { TreeManager } from './hover/trees.ts';
 import { commentsRouter } from './routes/comments.ts';
 import { diffRouter } from './routes/diff.ts';
+import { eventsRouter } from './routes/events.ts';
+import { inboxRouter } from './routes/inbox.ts';
 import { healthRouter } from './routes/health.ts';
 import { hoverRouter } from './routes/hover.ts';
 import { loadPr, prRouter } from './routes/pr.ts';
@@ -25,16 +30,23 @@ export interface AppDeps {
   tmpDir: string;
   trees: TreeManager;
   servers: HoverServers;
+  prs: PrRepository;
+  bus: PrEventBus;
 }
 
 export function buildApp(deps: AppDeps): Hono {
-  const { db, config, github, stores, tmpDir, trees, servers } = deps;
+  const { db, config, github, stores, tmpDir, trees, servers, prs, bus } = deps;
   const trunkFor = (owner: string, repo: string): string =>
     config.repos[`${owner}/${repo}`]?.trunk ?? 'main';
   const app = new Hono();
 
   app.route('/api/health', healthRouter);
   app.route('/api/prefs', prefsRouter(db));
+  app.route(
+    '/api/inbox',
+    inboxRouter({ prs, repos: Object.keys(config.repos) }),
+  );
+  app.use('/api/pr/:owner/:repo/:number', viewRecorder(prs));
   app.route(
     '/api/pr/:owner/:repo/:number',
     prRouter({ github, stores, trunkFor }),
@@ -52,6 +64,7 @@ export function buildApp(deps: AppDeps): Hono {
     }),
   );
   app.route('/api/pr/:owner/:repo/:number/viewed', viewedRouter(db));
+  app.route('/api/pr/:owner/:repo/:number/events', eventsRouter({ bus }));
   app.route(
     '/api/pr/:owner/:repo/:number/hover',
     hoverRouter({

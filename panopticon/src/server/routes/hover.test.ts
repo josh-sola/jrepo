@@ -223,7 +223,7 @@ describe('hoverRouter GET /', () => {
 });
 
 describe('hoverRouter GET /status', () => {
-  test('reports failed with a message for an unsupported repo', async () => {
+  test('reports unsupported for a repo without a wt tree', async () => {
     const trees = fakeTrees({
       status: () => Promise.resolve<HoverTreeState>({ state: 'unsupported' }),
     });
@@ -236,8 +236,8 @@ describe('hoverRouter GET /status', () => {
     const res = await app.request(`${MOUNT}/status`);
 
     expect(await res.json()).toEqual({
-      tree: 'failed',
-      treeError: 'this repo has no wt tree configured for hover',
+      tree: 'unsupported',
+      treeError: null,
       servers: { typescript: 'stopped', python: 'stopped' },
     } satisfies HoverStatusResponse);
   });

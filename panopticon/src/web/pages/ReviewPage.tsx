@@ -14,6 +14,7 @@ import {
   useViewed,
 } from '../hooks/usePrData.ts';
 import { useViewMode, useWhitespaceIgnored } from '../hooks/usePrefs.ts';
+import { usePrEvents } from '../hooks/useEvents.ts';
 import { PrHeader } from '../components/PrHeader.tsx';
 import { StackPanel } from '../components/stack/StackPanel.tsx';
 import { ConversationTab } from '../components/ConversationTab.tsx';
@@ -68,6 +69,7 @@ function ReviewPageContent({
   const diffQuery = usePrDiff(params, whitespaceIgnored ? 'ignore' : 'keep');
   const viewedQuery = useViewed(params);
   const stackQuery = useStack(params);
+  usePrEvents(params);
   const setViewed = useSetViewed(params);
 
   const [collapsedOverrides, setCollapsedOverrides] = useState<

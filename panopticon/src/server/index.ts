@@ -3,6 +3,9 @@ import { join } from 'node:path';
 import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
 import { openDb } from './db.ts';
+import { PrEventBus } from './events.ts';
+import { Poller } from './poller/poller.ts';
+import { PrRepository } from './poller/prs.ts';
 import { assertDifftVersion } from './diff/difft.ts';
 import { RepoStores } from './git/stores.ts';
 import { createGitHubApi, readGhToken } from './github/client.ts';
@@ -30,7 +33,36 @@ const trees = new TreeManager({
   stopServers: (owner, repo, number) =>
     servers.stopAll({ owner, repo, number }),
 });
-const app = buildApp({ db, config, github, stores, tmpDir, trees, servers });
+const bus = new PrEventBus();
+const prs = new PrRepository(db);
+const trunkFor = (owner: string, repo: string): string =>
+  config.repos[`${owner}/${repo}`]?.trunk ?? 'main';
+const poller = new Poller({
+  github,
+  stores,
+  trunkFor,
+  prs,
+  bus,
+  db,
+  cleanup: {
+    teardownPr: (owner, repo, number) => trees.teardown(owner, repo, number),
+  },
+  repos: Object.keys(config.repos),
+  login: config.githubLogin,
+  intervalMs: config.pollIntervalSeconds * 1000,
+});
+const app = buildApp({
+  db,
+  config,
+  github,
+  stores,
+  tmpDir,
+  trees,
+  servers,
+  prs,
+  bus,
+});
+poller.start();
 
 Bun.serve({
   port: config.port,
