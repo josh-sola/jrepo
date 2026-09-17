@@ -1,7 +1,3 @@
-// Happy-dom smoke test for the review page against the mock fixtures, for
-// when a real browser isn't available to check it in. Confirms the
-// fixture's file count renders, the test file starts collapsed, and the
-// outdated thread renders at the top of its card.
 import '../test-setup.ts';
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { act } from 'react';
@@ -29,6 +25,29 @@ afterEach(() => {
   container.remove();
 });
 
+// happy-dom's native 'input' event doesn't reliably reach React's
+// controlled-input change detection in this test environment, so typing is
+// simulated by calling the DOM node's own React onChange handler directly.
+function typeInto(textarea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(textarea, value);
+  const propsKey = Object.keys(textarea).find((key) =>
+    key.startsWith('__reactProps'),
+  );
+  const props = propsKey
+    ? (
+        textarea as unknown as Record<
+          string,
+          { onChange?: (e: unknown) => void }
+        >
+      )[propsKey]
+    : undefined;
+  props?.onChange?.({ target: textarea, currentTarget: textarea });
+}
+
 async function renderReviewPage(): Promise<HTMLDivElement> {
   container = document.createElement('div');
   document.body.append(container);
@@ -49,10 +68,8 @@ async function renderReviewPage(): Promise<HTMLDivElement> {
       </QueryClientProvider>,
     );
   });
-  // Flush the fetch-backed queries (PR, diff, viewed) and their re-renders —
-  // a separate `act` call, since state updates that land after the initial
-  // render's `act` call has already returned don't get picked up if they're
-  // awaited inside that same call.
+  // Query results land after the first render's `act` returns, so they need
+  // their own `act`.
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   });
@@ -81,5 +98,37 @@ describe('ReviewPage against the fixture PR', () => {
     const card = el.querySelector('[data-file-card="src/format.ts"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('Outdated');
+  });
+
+  it('posts a new comment through the mock composer flow and renders it', async () => {
+    const el = await renderReviewPage();
+    const card = el.querySelector('[data-file-card="src/NewFeature.tsx"]');
+    expect(card).not.toBeNull();
+
+    const addButton = card!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Comment on this line"]',
+    );
+    expect(addButton).not.toBeNull();
+    act(() => addButton!.click());
+
+    const textarea = card!.querySelector('textarea');
+    expect(textarea).not.toBeNull();
+    act(() => {
+      typeInto(
+        textarea as HTMLTextAreaElement,
+        'This needs a locale-aware fallback.',
+      );
+    });
+
+    const submitButton = [...card!.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Comment',
+    );
+    expect(submitButton).toBeDefined();
+    await act(async () => {
+      submitButton!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(card!.textContent).toContain('This needs a locale-aware fallback.');
   });
 });

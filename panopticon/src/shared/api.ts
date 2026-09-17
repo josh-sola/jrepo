@@ -1,5 +1,6 @@
 import type { PrDiff } from './diff.ts';
 import type {
+  CommentSide,
   IssueComment,
   PrFile,
   PrSummary,
@@ -43,4 +44,38 @@ export interface SetViewedRequest {
   path: string;
   oid: string;
   viewed: boolean;
+}
+
+// GET /api/pr/:owner/:repo/:number/threads, and the response of every
+// comment write below, so the client replaces its thread list wholesale.
+export interface ThreadsResponse {
+  threads: ReviewThread[];
+}
+
+// POST /api/pr/:owner/:repo/:number/comments
+// commitId must be the PR's current head sha or GitHub rejects the comment.
+export interface CreateReviewCommentRequest {
+  body: string;
+  path: string;
+  line: number;
+  side: CommentSide;
+  startLine: number | null;
+  startSide: CommentSide | null;
+  commitId: string;
+}
+
+// POST /api/pr/:owner/:repo/:number/comments/:commentId/replies
+export interface ReplyRequest {
+  body: string;
+}
+
+// POST /api/pr/:owner/:repo/:number/threads/:threadId/resolve
+export interface ResolveThreadRequest {
+  resolved: boolean;
+}
+
+// Error body for every /api route that fails; GitHub's own message is passed
+// through so a 422 explains which line it refused.
+export interface ApiError {
+  error: string;
 }

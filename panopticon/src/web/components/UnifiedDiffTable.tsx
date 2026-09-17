@@ -12,7 +12,11 @@ import {
 import type { RowKind, UnifiedRow } from '../diff/rows.ts';
 import type { ThemedToken } from '../shiki.ts';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import type { RevealFoldHandler } from './SplitDiffTable.tsx';
+import type {
+  GutterSide,
+  RenderRowWidget,
+  RevealFoldHandler,
+} from './SplitDiffTable.tsx';
 
 const ROW_KIND_CLASS: Record<RowKind, string> = {
   add: 'bg-emerald-500/10',
@@ -31,7 +35,13 @@ export interface UnifiedDiffTableProps {
   rhsLines: string[];
   lhsTokens: ThemedToken[][] | null;
   rhsTokens: ThemedToken[][] | null;
-  renderRowWidget?: (side: 'old' | 'new', lineIndex: number) => React.ReactNode;
+  renderRowWidget?: RenderRowWidget;
+  isCommentable?: (side: GutterSide, lineIndex: number) => boolean;
+  onGutterAdd?: (
+    side: GutterSide,
+    lineIndex: number,
+    shiftKey: boolean,
+  ) => void;
 }
 
 function FoldBar({
@@ -97,6 +107,8 @@ export function UnifiedDiffTable({
   lhsTokens,
   rhsTokens,
   renderRowWidget,
+  isCommentable,
+  onGutterAdd,
 }: UnifiedDiffTableProps) {
   const folded = applyFolds(
     rows,
@@ -128,15 +140,16 @@ export function UnifiedDiffTable({
                 rhsLines={rhsLines}
                 lhsTokens={lhsTokens}
                 rhsTokens={rhsTokens}
+                isCommentable={isCommentable}
+                onGutterAdd={onGutterAdd}
               />
-              {item.row.r != null &&
-                renderRowWidget?.('new', item.row.r) != null && (
-                  <tr>
-                    <td colSpan={3} className="p-0">
-                      {renderRowWidget('new', item.row.r)}
-                    </td>
-                  </tr>
-                )}
+              {renderRowWidget?.({ l: item.row.l, r: item.row.r }) != null && (
+                <tr>
+                  <td colSpan={3} className="p-0">
+                    {renderRowWidget({ l: item.row.l, r: item.row.r })}
+                  </td>
+                </tr>
+              )}
             </Fragment>
           ),
         )}
@@ -152,6 +165,8 @@ function UnifiedRowEl({
   rhsLines,
   lhsTokens,
   rhsTokens,
+  isCommentable,
+  onGutterAdd,
 }: {
   path: string;
   row: UnifiedRow;
@@ -159,6 +174,12 @@ function UnifiedRowEl({
   rhsLines: string[];
   lhsTokens: ThemedToken[][] | null;
   rhsTokens: ThemedToken[][] | null;
+  isCommentable?: (side: GutterSide, lineIndex: number) => boolean;
+  onGutterAdd?: (
+    side: GutterSide,
+    lineIndex: number,
+    shiftKey: boolean,
+  ) => void;
 }) {
   const marker = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' ';
   const line = row.side === 'old' ? row.l : row.r;
@@ -173,10 +194,18 @@ function UnifiedRowEl({
       <GutterCell
         tintClassName={ROW_KIND_CLASS[row.kind]}
         number={row.l != null ? row.l + 1 : null}
+        commentable={row.l != null && (isCommentable?.('old', row.l) ?? false)}
+        onAdd={(shiftKey) =>
+          row.l != null && onGutterAdd?.('old', row.l, shiftKey)
+        }
       />
       <GutterCell
         tintClassName={ROW_KIND_CLASS[row.kind]}
         number={row.r != null ? row.r + 1 : null}
+        commentable={row.r != null && (isCommentable?.('new', row.r) ?? false)}
+        onAdd={(shiftKey) =>
+          row.r != null && onGutterAdd?.('new', row.r, shiftKey)
+        }
       />
       {line == null ? (
         <td aria-hidden="true" className="bg-black/5 dark:bg-white/5" />
@@ -210,18 +239,36 @@ function UnifiedRowEl({
 function GutterCell({
   tintClassName,
   number,
+  commentable,
+  onAdd,
 }: {
   tintClassName: string;
   number: number | null;
+  commentable?: boolean;
+  onAdd?: (shiftKey: boolean) => void;
 }) {
   return (
     <td
       className={cn(
-        'select-none text-right text-muted-foreground',
+        'group relative select-none text-right text-muted-foreground',
         tintClassName,
       )}
     >
-      {number != null && <span className="px-2">{number}</span>}
+      {number != null && (
+        <span className={cn('px-2', commentable && 'group-hover:invisible')}>
+          {number}
+        </span>
+      )}
+      {number != null && commentable && (
+        <button
+          type="button"
+          aria-label="Comment on this line"
+          onClick={(event) => onAdd?.(event.shiftKey)}
+          className="absolute inset-0 hidden items-center justify-center font-sans text-sm text-foreground hover:bg-accent group-hover:flex"
+        >
+          +
+        </button>
+      )}
     </td>
   );
 }

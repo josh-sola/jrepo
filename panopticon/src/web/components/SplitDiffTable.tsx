@@ -26,6 +26,17 @@ export type RevealFoldHandler = (
   n?: number,
 ) => void;
 
+// A widget slot for one aligned row. `row` carries both sides so a single
+// slot can hold an old-side block and a new-side block together (e.g. a
+// thread anchored on the old side plus a composer open on the new side).
+export interface RowWidgetRow {
+  l: number | null;
+  r: number | null;
+}
+export type RenderRowWidget = (row: RowWidgetRow) => React.ReactNode;
+
+export type GutterSide = 'old' | 'new';
+
 export interface SplitDiffTableProps {
   path: string;
   rows: DiffRow[];
@@ -35,7 +46,13 @@ export interface SplitDiffTableProps {
   rhsLines: string[];
   lhsTokens: ThemedToken[][] | null;
   rhsTokens: ThemedToken[][] | null;
-  renderRowWidget?: (side: 'old' | 'new', lineIndex: number) => React.ReactNode;
+  renderRowWidget?: RenderRowWidget;
+  isCommentable?: (side: GutterSide, lineIndex: number) => boolean;
+  onGutterAdd?: (
+    side: GutterSide,
+    lineIndex: number,
+    shiftKey: boolean,
+  ) => void;
 }
 
 function FoldBar({
@@ -137,18 +154,36 @@ function CodeCell({
 function GutterCell({
   tintClassName,
   number,
+  commentable,
+  onAdd,
 }: {
   tintClassName: string;
   number: number | null;
+  commentable?: boolean;
+  onAdd?: (shiftKey: boolean) => void;
 }) {
   return (
     <td
       className={cn(
-        'select-none text-right text-muted-foreground',
+        'group relative select-none text-right text-muted-foreground',
         tintClassName,
       )}
     >
-      {number != null && <span className="px-2">{number}</span>}
+      {number != null && (
+        <span className={cn('px-2', commentable && 'group-hover:invisible')}>
+          {number}
+        </span>
+      )}
+      {number != null && commentable && (
+        <button
+          type="button"
+          aria-label="Comment on this line"
+          onClick={(event) => onAdd?.(event.shiftKey)}
+          className="absolute inset-0 hidden items-center justify-center font-sans text-sm text-foreground hover:bg-accent group-hover:flex"
+        >
+          +
+        </button>
+      )}
     </td>
   );
 }
@@ -163,6 +198,8 @@ export function SplitDiffTable({
   lhsTokens,
   rhsTokens,
   renderRowWidget,
+  isCommentable,
+  onGutterAdd,
 }: SplitDiffTableProps) {
   const folded = applyFolds(rows, foldWindowsForSplit(foldState));
 
@@ -193,6 +230,14 @@ export function SplitDiffTable({
                 <GutterCell
                   tintClassName={ROW_KIND_CLASS[item.row.kind]}
                   number={item.row.l != null ? item.row.l + 1 : null}
+                  commentable={
+                    item.row.l != null &&
+                    (isCommentable?.('old', item.row.l) ?? false)
+                  }
+                  onAdd={(shiftKey) =>
+                    item.row.l != null &&
+                    onGutterAdd?.('old', item.row.l, shiftKey)
+                  }
                 />
                 <CodeCell
                   path={path}
@@ -204,6 +249,14 @@ export function SplitDiffTable({
                 <GutterCell
                   tintClassName={ROW_KIND_CLASS[item.row.kind]}
                   number={item.row.r != null ? item.row.r + 1 : null}
+                  commentable={
+                    item.row.r != null &&
+                    (isCommentable?.('new', item.row.r) ?? false)
+                  }
+                  onAdd={(shiftKey) =>
+                    item.row.r != null &&
+                    onGutterAdd?.('new', item.row.r, shiftKey)
+                  }
                 />
                 <CodeCell
                   path={path}
@@ -213,14 +266,13 @@ export function SplitDiffTable({
                   raw={rhsLines}
                 />
               </tr>
-              {item.row.r != null &&
-                renderRowWidget?.('new', item.row.r) != null && (
-                  <tr>
-                    <td colSpan={4} className="p-0">
-                      {renderRowWidget('new', item.row.r)}
-                    </td>
-                  </tr>
-                )}
+              {renderRowWidget?.(item.row) != null && (
+                <tr>
+                  <td colSpan={4} className="p-0">
+                    {renderRowWidget(item.row)}
+                  </td>
+                </tr>
+              )}
             </Fragment>
           ),
         )}

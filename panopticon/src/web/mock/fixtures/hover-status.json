@@ -1,0 +1,8 @@
+{
+  "tree": "ready",
+  "treeError": null,
+  "servers": {
+    "typescript": "ready",
+    "python": "ready"
+  }
+}

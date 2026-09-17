@@ -6,6 +6,9 @@ import { openDb } from './db.ts';
 import { assertDifftVersion } from './diff/difft.ts';
 import { RepoStores } from './git/stores.ts';
 import { createGitHubApi, readGhToken } from './github/client.ts';
+import { createHoverServers } from './hover/servers.ts';
+import { TreeManager } from './hover/trees.ts';
+import { BunWtRunner } from './hover/wt.ts';
 
 // The diff engine's golden tests were recorded against this difft release.
 const DIFFT_VERSION = '0.69.0';
@@ -19,7 +22,15 @@ mkdirSync(tmpDir, { recursive: true });
 const db = openDb(join(config.dataDir, 'panopticon.sqlite'));
 const github = createGitHubApi(await readGhToken());
 const stores = new RepoStores(config.dataDir, config.repos);
-const app = buildApp({ db, config, github, stores, tmpDir });
+const servers = createHoverServers();
+const trees = new TreeManager({
+  db,
+  runner: new BunWtRunner(),
+  repos: config.repos,
+  stopServers: (owner, repo, number) =>
+    servers.stopAll({ owner, repo, number }),
+});
+const app = buildApp({ db, config, github, stores, tmpDir, trees, servers });
 
 Bun.serve({
   port: config.port,

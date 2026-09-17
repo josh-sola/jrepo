@@ -1,0 +1,4 @@
+{
+  "status": "ready",
+  "contents": "```typescript\nfunction resolveStack(pr: PrSummary): Promise<StackEntry[]>\n```\n\nWalks the PR's base refs down to trunk and its open descendants up, returning the stack bottom to top."
+}

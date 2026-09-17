@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Columns2, Moon, Rows3, Search, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import type { PrParams } from '../hooks/usePrData.ts';
+import { HoverStatusBadge } from './hover/HoverStatusBadge.tsx';
 import { Toggle } from '@/components/ui/toggle';
 import {
   Tooltip,
@@ -26,6 +28,7 @@ export interface TopBarProps {
   onWhitespaceChange: (ignored: boolean) => void;
   files: DiffPayload[];
   onJumpToFile: (path: string) => void;
+  params: PrParams;
 }
 
 export function TopBar({
@@ -35,6 +38,7 @@ export function TopBar({
   onWhitespaceChange,
   files,
   onJumpToFile,
+  params,
 }: TopBarProps) {
   const { theme, setTheme } = useTheme();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -52,6 +56,7 @@ export function TopBar({
 
   return (
     <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-1.5">
+      <HoverStatusBadge params={params} />
       <div className="flex items-center overflow-hidden rounded-md border border-border">
         <Toggle
           pressed={viewMode === 'split'}

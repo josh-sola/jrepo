@@ -1,6 +1,12 @@
 export type HoverLanguage = 'typescript' | 'python';
 
-export type TreeState = 'none' | 'provisioning' | 'ready' | 'failed';
+// 'unsupported' means the repo has no wt tree configured, so hover is off.
+export type TreeState =
+  | 'none'
+  | 'provisioning'
+  | 'ready'
+  | 'failed'
+  | 'unsupported';
 export type ServerState = 'stopped' | 'starting' | 'ready' | 'failed';
 
 // GET /api/pr/:owner/:repo/:number/hover/status

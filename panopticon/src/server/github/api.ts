@@ -12,6 +12,7 @@ import type {
   ReviewThread,
   CommentSide,
 } from '../../shared/github.ts';
+import type { CreateReviewCommentRequest } from '../../shared/api.ts';
 import { ConditionalFetcher, InMemoryEtagStore } from './conditional.ts';
 import type { ConditionalLoadResult } from './conditional.ts';
 
@@ -75,6 +76,25 @@ export interface RestClient {
       per_page: number;
       page: number;
       headers?: Record<string, string>;
+    }): Promise<OctokitResponseLike>;
+    createReviewComment(params: {
+      owner: string;
+      repo: string;
+      pull_number: number;
+      body: string;
+      commit_id: string;
+      path: string;
+      line: number;
+      side: CommentSide;
+      start_line?: number;
+      start_side?: CommentSide;
+    }): Promise<OctokitResponseLike>;
+    createReplyForReviewComment(params: {
+      owner: string;
+      repo: string;
+      pull_number: number;
+      comment_id: number;
+      body: string;
     }): Promise<OctokitResponseLike>;
   };
   issues: {
@@ -746,6 +766,20 @@ export interface GitHubApi {
     repo: string,
     number: number,
   ): Promise<ReviewSummary[]>;
+  createReviewComment(
+    owner: string,
+    repo: string,
+    number: number,
+    input: CreateReviewCommentRequest,
+  ): Promise<void>;
+  replyToReviewComment(
+    owner: string,
+    repo: string,
+    number: number,
+    commentId: number,
+    body: string,
+  ): Promise<void>;
+  setThreadResolved(threadNodeId: string, resolved: boolean): Promise<void>;
 }
 
 function isNotModifiedError(error: unknown): boolean {
@@ -827,6 +861,20 @@ query($id: ID!, $cursor: String) {
         }
       }
     }
+  }
+}`;
+
+const RESOLVE_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { id }
+  }
+}`;
+
+const UNRESOLVE_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) {
+    thread { id }
   }
 }`;
 
@@ -1152,6 +1200,70 @@ class OctokitGitHubApi implements GitHubApi {
         return mapReviewThread(thread, comments);
       }),
     );
+  }
+
+  async createReviewComment(
+    owner: string,
+    repo: string,
+    number: number,
+    input: CreateReviewCommentRequest,
+  ): Promise<void> {
+    const startFields =
+      input.startLine != null
+        ? {
+            start_line: input.startLine,
+            start_side: input.startSide ?? input.side,
+          }
+        : {};
+    try {
+      await this.rest.pulls.createReviewComment({
+        owner,
+        repo,
+        pull_number: number,
+        body: input.body,
+        commit_id: input.commitId,
+        path: input.path,
+        line: input.line,
+        side: input.side,
+        ...startFields,
+      });
+    } catch (error) {
+      throw toGitHubError(error);
+    }
+  }
+
+  async replyToReviewComment(
+    owner: string,
+    repo: string,
+    number: number,
+    commentId: number,
+    body: string,
+  ): Promise<void> {
+    try {
+      await this.rest.pulls.createReplyForReviewComment({
+        owner,
+        repo,
+        pull_number: number,
+        comment_id: commentId,
+        body,
+      });
+    } catch (error) {
+      throw toGitHubError(error);
+    }
+  }
+
+  async setThreadResolved(
+    threadNodeId: string,
+    resolved: boolean,
+  ): Promise<void> {
+    const mutation = resolved
+      ? RESOLVE_THREAD_MUTATION
+      : UNRESOLVE_THREAD_MUTATION;
+    try {
+      await this.graphqlClient(mutation, { threadId: threadNodeId });
+    } catch (error) {
+      throw toGitHubError(error);
+    }
   }
 }
 

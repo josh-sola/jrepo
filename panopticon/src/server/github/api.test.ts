@@ -35,6 +35,10 @@ function stubRest(overrides: RestStubOverrides): RestClient {
       list: unexpected('pulls.list'),
       listFiles: unexpected('pulls.listFiles'),
       listReviews: unexpected('pulls.listReviews'),
+      createReviewComment: unexpected('pulls.createReviewComment'),
+      createReplyForReviewComment: unexpected(
+        'pulls.createReplyForReviewComment',
+      ),
       ...overrides.pulls,
     },
     issues: {
@@ -459,5 +463,168 @@ describe('listIssueComments and listReviews', () => {
     expect(approved?.author.login).toBe('jared-sola');
     const bot = reviews.find((r) => r.author.login === 'greptile-apps[bot]');
     expect(bot?.author.isBot).toBe(true);
+  });
+});
+
+describe('createReviewComment', () => {
+  test('posts body, commit_id, path, line, and side, omitting start_line for a single-line comment', async () => {
+    let captured: unknown;
+    const rest = stubRest({
+      pulls: {
+        createReviewComment: async (params) => {
+          captured = params;
+          return ok({});
+        },
+      },
+    });
+    const api = createOctokitGitHubApi(rest, noGraphql);
+    await api.createReviewComment('o', 'r', 1, {
+      body: 'looks good',
+      path: 'src/greet.ts',
+      line: 12,
+      side: 'RIGHT',
+      startLine: null,
+      startSide: null,
+      commitId: 'abc123',
+    });
+    expect(captured).toEqual({
+      owner: 'o',
+      repo: 'r',
+      pull_number: 1,
+      body: 'looks good',
+      commit_id: 'abc123',
+      path: 'src/greet.ts',
+      line: 12,
+      side: 'RIGHT',
+    });
+  });
+
+  test('adds start_line and start_side for a multi-line comment', async () => {
+    let captured: unknown;
+    const rest = stubRest({
+      pulls: {
+        createReviewComment: async (params) => {
+          captured = params;
+          return ok({});
+        },
+      },
+    });
+    const api = createOctokitGitHubApi(rest, noGraphql);
+    await api.createReviewComment('o', 'r', 1, {
+      body: 'range comment',
+      path: 'src/greet.ts',
+      line: 15,
+      side: 'RIGHT',
+      startLine: 12,
+      startSide: 'RIGHT',
+      commitId: 'abc123',
+    });
+    expect(captured).toEqual({
+      owner: 'o',
+      repo: 'r',
+      pull_number: 1,
+      body: 'range comment',
+      commit_id: 'abc123',
+      path: 'src/greet.ts',
+      line: 15,
+      side: 'RIGHT',
+      start_line: 12,
+      start_side: 'RIGHT',
+    });
+  });
+
+  test('wraps a 422 in a GitHubError carrying the message GitHub gives for the refused line', async () => {
+    const rest = stubRest({
+      pulls: {
+        createReviewComment: async () => {
+          throw {
+            status: 422,
+            response: { data: { message: 'line must be part of the diff' } },
+          };
+        },
+      },
+    });
+    const api = createOctokitGitHubApi(rest, noGraphql);
+    try {
+      await api.createReviewComment('o', 'r', 1, {
+        body: 'x',
+        path: 'p',
+        line: 1,
+        side: 'RIGHT',
+        startLine: null,
+        startSide: null,
+        commitId: 'abc',
+      });
+      throw new Error('expected createReviewComment to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(GitHubError);
+      expect((error as GitHubError).status).toBe(422);
+      expect((error as GitHubError).message).toBe(
+        'line must be part of the diff',
+      );
+    }
+  });
+});
+
+describe('replyToReviewComment', () => {
+  test('posts to the replies endpoint with comment_id and body', async () => {
+    let captured: unknown;
+    const rest = stubRest({
+      pulls: {
+        createReplyForReviewComment: async (params) => {
+          captured = params;
+          return ok({});
+        },
+      },
+    });
+    const api = createOctokitGitHubApi(rest, noGraphql);
+    await api.replyToReviewComment('o', 'r', 1, 42, 'thanks');
+    expect(captured).toEqual({
+      owner: 'o',
+      repo: 'r',
+      pull_number: 1,
+      comment_id: 42,
+      body: 'thanks',
+    });
+  });
+});
+
+describe('setThreadResolved', () => {
+  test('calls resolveReviewThread with the thread id', async () => {
+    let capturedQuery = '';
+    let capturedVars: Record<string, unknown> = {};
+    const graphqlClient = async (
+      query: string,
+      variables: Record<string, unknown>,
+    ) => {
+      capturedQuery = query;
+      capturedVars = variables;
+      return { resolveReviewThread: { thread: { id: 'T1' } } };
+    };
+    const api = createOctokitGitHubApi(stubRest({}), graphqlClient);
+    await api.setThreadResolved('T1', true);
+    expect(capturedQuery).toContain('resolveReviewThread');
+    expect(capturedVars).toEqual({ threadId: 'T1' });
+  });
+
+  test('calls unresolveReviewThread when resolved is false', async () => {
+    let capturedQuery = '';
+    const graphqlClient = async (query: string) => {
+      capturedQuery = query;
+      return { unresolveReviewThread: { thread: { id: 'T1' } } };
+    };
+    const api = createOctokitGitHubApi(stubRest({}), graphqlClient);
+    await api.setThreadResolved('T1', false);
+    expect(capturedQuery).toContain('unresolveReviewThread');
+  });
+
+  test('wraps a GraphQL failure in a GitHubError', async () => {
+    const graphqlClient = async () => {
+      throw { status: 403, message: 'Resource not accessible' };
+    };
+    const api = createOctokitGitHubApi(stubRest({}), graphqlClient);
+    await expect(api.setThreadResolved('T1', true)).rejects.toThrow(
+      GitHubError,
+    );
   });
 });

@@ -18,9 +18,12 @@ import { PrHeader } from '../components/PrHeader.tsx';
 import { StackPanel } from '../components/stack/StackPanel.tsx';
 import { ConversationTab } from '../components/ConversationTab.tsx';
 import { FileSidebar } from '../components/FileSidebar.tsx';
-import { FileCard } from '../components/FileCard.tsx';
+import { FileCard, type ComposerRequest } from '../components/FileCard.tsx';
 import { TopBar } from '../components/TopBar.tsx';
-import { ThreadList, buildThreadRowWidget } from '../components/ThreadList.tsx';
+import {
+  computeCommentableLines,
+  firstCommentableLine,
+} from '../components/comments/commentable.ts';
 import { byteSpansToCharSpans, rangesForSpans } from '../diff/changeSpans.ts';
 import { refineFileSpans, type EffectiveSpans } from '../diff/refineSpans.ts';
 import type { DiffPayload } from '../../shared/diff.ts';
@@ -71,6 +74,10 @@ function ReviewPageContent({
     Record<string, boolean>
   >({});
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [composerRequest, setComposerRequest] = useState<
+    (ComposerRequest & { path: string }) | null
+  >(null);
+  const [focusedThreadId, setFocusedThreadId] = useState<string | null>(null);
   const [renderRevision, setRenderRevision] = useState(0);
   const bumpRenderRevision = useCallback(
     () => setRenderRevision((n) => n + 1),
@@ -146,6 +153,59 @@ function ReviewPageContent({
       ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }, []);
 
+  const prThreads = prQuery.data?.threads;
+  // File order, then the server's thread order within a file — good enough
+  // for a stable next/previous sequence across the diff.
+  const unresolvedThreadOrder = useMemo(() => {
+    const threads = prThreads ?? [];
+    const order: { path: string; id: string }[] = [];
+    for (const file of files) {
+      for (const thread of threads) {
+        if (thread.path === file.path && !thread.isResolved) {
+          order.push({ path: file.path, id: thread.id });
+        }
+      }
+    }
+    return order;
+  }, [files, prThreads]);
+
+  const jumpToThread = useCallback(
+    (direction: 1 | -1) => {
+      if (unresolvedThreadOrder.length === 0) return;
+      const currentIndex = focusedThreadId
+        ? unresolvedThreadOrder.findIndex((t) => t.id === focusedThreadId)
+        : -1;
+      const length = unresolvedThreadOrder.length;
+      const nextIndex = (currentIndex + direction + length) % length;
+      const target = unresolvedThreadOrder[nextIndex];
+      if (!target) return;
+      setFocusedThreadId(target.id);
+      setCollapsedOverrides((prev) => ({ ...prev, [target.path]: false }));
+      scrollToFile(target.path);
+      setTimeout(() => {
+        fileRefs.current
+          .get(target.path)
+          ?.querySelector(`[data-thread-id="${target.id}"]`)
+          ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 50);
+    },
+    [unresolvedThreadOrder, focusedThreadId, scrollToFile],
+  );
+
+  const openComposerOnActiveCard = useCallback(() => {
+    if (!activePath) return;
+    const file = files.find((f) => f.path === activePath);
+    if (!file) return;
+    const target = firstCommentableLine(computeCommentableLines(file));
+    if (!target) return;
+    setCollapsedOverrides((prev) => ({ ...prev, [activePath]: false }));
+    setComposerRequest({
+      path: activePath,
+      side: target.side,
+      line: target.line,
+    });
+  }, [activePath, files]);
+
   const effectiveSpansByPath = useMemo(() => {
     const map = new Map<string, EffectiveSpans>();
     for (const file of files) map.set(file.path, refineFileSpans(file));
@@ -220,11 +280,25 @@ function ReviewPageContent({
         for (const file of files) next[file.path] = event.key === '[';
         setCollapsedOverrides(next);
         bumpRenderRevision();
+      } else if (event.key === 'c') {
+        openComposerOnActiveCard();
+      } else if (event.key === 'n') {
+        jumpToThread(1);
+      } else if (event.key === 'p') {
+        jumpToThread(-1);
       }
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [files, activePath, scrollToFile, toggleViewed, bumpRenderRevision]);
+  }, [
+    files,
+    activePath,
+    scrollToFile,
+    toggleViewed,
+    bumpRenderRevision,
+    openComposerOnActiveCard,
+    jumpToThread,
+  ]);
 
   if (prQuery.isPending || diffQuery.isPending || viewedQuery.isPending) {
     return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
@@ -267,6 +341,7 @@ function ReviewPageContent({
         onWhitespaceChange={setWhitespaceIgnored}
         files={files}
         onJumpToFile={scrollToFile}
+        params={params}
       />
       <Tabs defaultValue="files" className="min-h-0 flex-1">
         <TabsList className="mx-3 mt-2 w-fit">
@@ -320,12 +395,15 @@ function ReviewPageContent({
                       viewed={isViewed(file.path)}
                       viewedStale={isStale(file.path)}
                       onToggleViewed={toggleViewed}
-                      renderRowWidget={
-                        threads.length > 0
-                          ? buildThreadRowWidget(threads)
-                          : undefined
+                      threads={threads}
+                      commitId={pr.pr.head.sha}
+                      prParams={params}
+                      composerRequest={
+                        composerRequest?.path === file.path
+                          ? composerRequest
+                          : null
                       }
-                      outdatedThreads={<ThreadList threads={threads} />}
+                      onComposerRequestHandled={() => setComposerRequest(null)}
                       onTokenized={bumpRenderRevision}
                     />
                   );

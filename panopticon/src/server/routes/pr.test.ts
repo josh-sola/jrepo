@@ -72,6 +72,9 @@ function fakeGitHub(options: FakeGitHubOptions): GitHubApi {
     listReviewThreads: async () => options.threads ?? [],
     listIssueComments: async () => options.issueComments ?? [],
     listReviews: async () => options.reviews ?? [],
+    createReviewComment: async () => {},
+    replyToReviewComment: async () => {},
+    setThreadResolved: async () => {},
   };
 }
 
