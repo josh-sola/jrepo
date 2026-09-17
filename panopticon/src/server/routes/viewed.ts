@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import type { SetViewedRequest, ViewedResponse } from '../../shared/api.ts';
 import { ensureSchema } from '../db.ts';
 
-const VIEWED_SCHEMA = `
+export const VIEWED_SCHEMA = `
 CREATE TABLE IF NOT EXISTS viewed (
   owner TEXT NOT NULL,
   repo TEXT NOT NULL,

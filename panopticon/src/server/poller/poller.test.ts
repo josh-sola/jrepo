@@ -22,21 +22,7 @@ afterEach(() => {
 
 function freshDb() {
   dir = mkdtempSync(join(tmpdir(), 'panopticon-poller-test-'));
-  const db = openDb(join(dir, 'test.sqlite'));
-  // Owned by the viewed-state route; recreated here only so the poller's
-  // own prune query has a table to run against in isolation.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS viewed (
-      owner TEXT NOT NULL,
-      repo TEXT NOT NULL,
-      number INTEGER NOT NULL,
-      path TEXT NOT NULL,
-      oid TEXT NOT NULL,
-      viewed_at TEXT NOT NULL,
-      PRIMARY KEY (owner, repo, number, path)
-    );
-  `);
-  return db;
+  return openDb(join(dir, 'test.sqlite'));
 }
 
 function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {

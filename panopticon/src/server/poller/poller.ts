@@ -7,6 +7,8 @@ import type { GitHubApi } from '../github/api.ts';
 import { withLandedState } from '../github/landed.ts';
 import type { RepoStores } from '../git/stores.ts';
 import type { PrRepository } from './prs.ts';
+import { ensureSchema } from '../db.ts';
+import { VIEWED_SCHEMA } from '../routes/viewed.ts';
 
 export interface Cleanup {
   teardownPr(owner: string, repo: string, number: number): Promise<void>;
@@ -95,8 +97,8 @@ export class Poller {
     this.clock = deps.clock ?? Date.now;
     this.setTimer = deps.setTimer ?? setTimeout;
 
-    // The viewed route creates this table when the app mounts, before the
-    // poller starts.
+    // The viewed route owns this table, but the poller may be built first.
+    ensureSchema(this.db, VIEWED_SCHEMA);
     this.pruneViewedStmt = this.db.query<unknown, { $cutoff: string }>(
       'DELETE FROM viewed WHERE viewed_at < $cutoff',
     );
