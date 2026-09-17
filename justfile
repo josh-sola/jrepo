@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: fmt clippy test bash swift check-palette
+check: fmt clippy test bash swift check-palette panopticon
 
 # Check Rust formatting.
 fmt:
@@ -40,6 +40,10 @@ swift:
     swiftc -O -o "$tmpdir/planter-codex-bridge" claude-planter/PlanterCodexBridge.swift
     "$tmpdir/planter-tests" "$tmpdir/planter"
     "$tmpdir/planter-codex-bridge" --self-test
+
+# Install dependencies and run panopticon's checks.
+panopticon:
+    cd panopticon && bun install --frozen-lockfile && bun run check
 
 install:
     ./ghostty/install.sh

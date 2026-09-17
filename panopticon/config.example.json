@@ -1,0 +1,10 @@
+{
+  "githubLogin": "josh-sola",
+  "repos": {
+    "Sola-Solutions/monorepo": {
+      "wtRepo": "monorepo",
+      "referenceClone": "~/repos/monorepo",
+      "trunk": "master"
+    }
+  }
+}

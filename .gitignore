@@ -1,3 +1,5 @@
 /target/
 /.pi/
 /node_modules/
+panopticon/node_modules/
+panopticon/dist/
