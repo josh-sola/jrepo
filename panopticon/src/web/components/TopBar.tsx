@@ -1,14 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Columns2, Moon, Rows3, Search, Sun } from 'lucide-react';
+import { Link } from 'react-router';
+import { Columns2, Inbox, Moon, Rows3, Search, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { PrParams } from '../hooks/usePrData.ts';
 import { HoverStatusBadge } from './hover/HoverStatusBadge.tsx';
 import { Toggle } from '@/components/ui/toggle';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
 import {
   CommandDialog,
   CommandEmpty,
@@ -24,8 +20,6 @@ import type { DiffPayload } from '../../shared/diff.ts';
 export interface TopBarProps {
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
-  whitespaceIgnored: boolean;
-  onWhitespaceChange: (ignored: boolean) => void;
   files: DiffPayload[];
   onJumpToFile: (path: string) => void;
   params: PrParams;
@@ -34,8 +28,6 @@ export interface TopBarProps {
 export function TopBar({
   viewMode,
   onViewModeChange,
-  whitespaceIgnored,
-  onWhitespaceChange,
   files,
   onJumpToFile,
   params,
@@ -55,7 +47,19 @@ export function TopBar({
   }, []);
 
   return (
-    <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-1.5">
+    <div className="sticky top-0 z-20 flex h-(--toolbar-height) items-center gap-2 border-b border-border bg-card px-3">
+      <Button
+        variant="ghost"
+        size="sm"
+        asChild
+        aria-label="Inbox"
+        className="gap-1.5"
+      >
+        <Link to="/">
+          <Inbox className="h-4 w-4" />
+          Inbox
+        </Link>
+      </Button>
       <HoverStatusBadge params={params} />
       <div className="flex items-center overflow-hidden rounded-md border border-border">
         <Toggle
@@ -79,21 +83,6 @@ export function TopBar({
           Unified
         </Toggle>
       </div>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Toggle
-            pressed={whitespaceIgnored}
-            onPressedChange={onWhitespaceChange}
-            size="sm"
-            aria-label="Ignore whitespace"
-          >
-            Ignore whitespace
-          </Toggle>
-        </TooltipTrigger>
-        <TooltipContent>
-          Only affects files rendered with the plain-text fallback.
-        </TooltipContent>
-      </Tooltip>
       <div className="flex-1" />
       <Button
         variant="outline"

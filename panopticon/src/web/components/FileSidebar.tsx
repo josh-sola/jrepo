@@ -93,7 +93,7 @@ export function FileSidebar({
   const groups = groupByDirectory(rest);
 
   return (
-    <nav className="flex flex-col gap-3 overflow-y-auto p-2 text-sm">
+    <nav className="sticky top-(--toolbar-height) flex max-h-[calc(100vh-var(--toolbar-height))] flex-col gap-3 overflow-y-auto p-2 text-sm">
       {groups.map(([dir, groupFiles]) => (
         <div key={dir || '.'}>
           <div className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-muted-foreground">

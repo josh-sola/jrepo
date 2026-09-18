@@ -31,7 +31,7 @@ function graphiteUrl(pr: PrSummary): string {
 }
 
 export function PrHeader({ pr, stackSlot }: PrHeaderProps) {
-  const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [descriptionOpen, setDescriptionOpen] = useState(true);
   const state = prState(pr);
 
   return (

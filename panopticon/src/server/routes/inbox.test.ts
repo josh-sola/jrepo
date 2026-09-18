@@ -7,6 +7,9 @@ import type { InboxResponse } from '../../shared/inbox.ts';
 import type { PrSummary } from '../../shared/github.ts';
 import { openDb } from '../db.ts';
 import { PrRepository } from '../poller/prs.ts';
+import type { GraphiteSnapshot } from '../stack/graphiteLocal.ts';
+import { GraphiteLocal } from '../stack/graphiteLocal.ts';
+import type { InboxDeps } from './inbox.ts';
 import { groupIntoStacks, inboxRouter } from './inbox.ts';
 
 let dir: string | undefined;
@@ -44,6 +47,12 @@ function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
   };
 }
 
+function parentOfFromSnapshot(
+  snapshot: GraphiteSnapshot | null,
+): (pr: PrSummary) => string {
+  return (pr) => snapshot?.branches.get(pr.head.ref)?.parent ?? pr.base.ref;
+}
+
 describe('groupIntoStacks', () => {
   test('chains a three-PR stack bottom to top', () => {
     const bottom = fakePr({
@@ -62,10 +71,19 @@ describe('groupIntoStacks', () => {
       head: { ref: 'branch-3', sha: 's' },
     });
 
-    const stacks = groupIntoStacks([top, bottom, middle]);
+    const stacks = groupIntoStacks(
+      [top, bottom, middle],
+      parentOfFromSnapshot(null),
+    );
 
     expect(stacks).toHaveLength(1);
-    expect(stacks[0]?.map((pr) => pr.number)).toEqual([1, 2, 3]);
+    expect(stacks[0]?.owner).toBe('acme');
+    expect(stacks[0]?.repo).toBe('widgets');
+    expect(stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [1, null],
+      [2, 1],
+      [3, 2],
+    ]);
   });
 
   test('a PR based on trunk with nothing above it is a standalone stack', () => {
@@ -75,9 +93,12 @@ describe('groupIntoStacks', () => {
       head: { ref: 'branch-5', sha: 's' },
     });
 
-    const stacks = groupIntoStacks([standalone]);
+    const stacks = groupIntoStacks([standalone], parentOfFromSnapshot(null));
 
-    expect(stacks).toEqual([[standalone]]);
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [5, null],
+    ]);
   });
 
   test('a chain plus a standalone PR produce two separate stacks', () => {
@@ -97,17 +118,104 @@ describe('groupIntoStacks', () => {
       head: { ref: 'branch-9', sha: 's' },
     });
 
-    const stacks = groupIntoStacks([bottom, top, standalone]);
+    const stacks = groupIntoStacks(
+      [bottom, top, standalone],
+      parentOfFromSnapshot(null),
+    );
 
     expect(stacks).toHaveLength(2);
-    expect(stacks.map((stack) => stack.map((pr) => pr.number)).sort()).toEqual(
-      [[1, 2], [9]].sort(),
+    expect(
+      stacks.map((stack) => stack.entries.map((e) => e.number)).sort(),
+    ).toEqual([[1, 2], [9]].sort());
+  });
+
+  test('a fork keeps every child instead of only the newest', () => {
+    const bottom = fakePr({
+      number: 1,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-a', sha: 's' },
+    });
+    const forkOne = fakePr({
+      number: 2,
+      base: { ref: 'branch-a', sha: 's' },
+      head: { ref: 'branch-b', sha: 's' },
+    });
+    const forkTwo = fakePr({
+      number: 3,
+      base: { ref: 'branch-a', sha: 's' },
+      head: { ref: 'branch-c', sha: 's' },
+    });
+    const aboveForkOne = fakePr({
+      number: 4,
+      base: { ref: 'branch-b', sha: 's' },
+      head: { ref: 'branch-d', sha: 's' },
+    });
+
+    const stacks = groupIntoStacks(
+      [bottom, forkOne, forkTwo, aboveForkOne],
+      parentOfFromSnapshot(null),
+    );
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [1, null],
+      [2, 1],
+      [3, 1],
+      [4, 2],
+    ]);
+  });
+
+  test('a PR pinned to a graphite-base placeholder joins its local metadata parent', () => {
+    const bottom = fakePr({
+      number: 1,
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'branch-1', sha: 's' },
+    });
+    // Graphite pinned the top PR's base to a placeholder named after
+    // itself; the local branch metadata still carries the real parent.
+    const top = fakePr({
+      number: 2,
+      base: { ref: 'graphite-base/2', sha: 's' },
+      head: { ref: 'branch-2', sha: 's' },
+    });
+    const snapshot: GraphiteSnapshot = {
+      trunk: 'master',
+      branches: new Map([
+        [
+          'branch-1',
+          { name: 'branch-1', parent: 'master', children: ['branch-2'] },
+        ],
+        ['branch-2', { name: 'branch-2', parent: 'branch-1', children: [] }],
+      ]),
+      prsByHead: new Map(),
+      prsByNumber: new Map(),
+    };
+
+    const stacks = groupIntoStacks(
+      [bottom, top],
+      parentOfFromSnapshot(snapshot),
+    );
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [1, null],
+      [2, 1],
+    ]);
+    expect(stacks[0]?.entries.find((e) => e.number === 2)?.baseRef).toBe(
+      'branch-1',
     );
   });
 });
 
-function mount(prs: PrRepository, repos: string[]): Hono {
-  return new Hono().route('/api/inbox', inboxRouter({ prs, repos }));
+function mount(
+  prs: PrRepository,
+  repos: string[],
+  graphiteFor: InboxDeps['graphiteFor'] = () => new GraphiteLocal(null),
+): Hono {
+  return new Hono().route(
+    '/api/inbox',
+    inboxRouter({ prs, repos, graphiteFor }),
+  );
 }
 
 describe('inboxRouter GET /', () => {
@@ -138,9 +246,45 @@ describe('inboxRouter GET /', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as InboxResponse;
     expect(body.stacks).toHaveLength(1);
-    expect(body.stacks[0]?.map((pr) => pr.number)).toEqual([1, 2]);
+    expect(body.stacks[0]?.entries.map((e) => e.number)).toEqual([1, 2]);
     expect(body.recent.map((pr) => pr.number)).toEqual([42]);
     expect(typeof body.fetchedAt).toBe('string');
+  });
+
+  test('orders stacks by their most recently updated PR', async () => {
+    const prs = new PrRepository(freshDb());
+    // Stack A: an old bottom with a freshly updated PR on top.
+    const aBottom = fakePr({
+      number: 1,
+      updatedAt: '2026-01-01T00:00:00Z',
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'a-1', sha: 's' },
+    });
+    const aTop = fakePr({
+      number: 2,
+      updatedAt: '2026-03-01T00:00:00Z',
+      base: { ref: 'a-1', sha: 's' },
+      head: { ref: 'a-2', sha: 's' },
+    });
+    // Stack B: a single PR updated between the two.
+    const b = fakePr({
+      number: 3,
+      updatedAt: '2026-02-01T00:00:00Z',
+      base: { ref: 'master', sha: 's' },
+      head: { ref: 'b-1', sha: 's' },
+    });
+    prs.upsertSummary(b, true);
+    prs.upsertSummary(aBottom, true);
+    prs.upsertSummary(aTop, true);
+
+    const app = mount(prs, ['acme/widgets']);
+    const body = (await (
+      await app.request('/api/inbox')
+    ).json()) as InboxResponse;
+
+    expect(body.stacks.map((stack) => stack.entries[0]?.number)).toEqual([
+      1, 3,
+    ]);
   });
 
   test('recent excludes PRs already shown in a stack', async () => {
@@ -153,7 +297,7 @@ describe('inboxRouter GET /', () => {
     const res = await app.request('/api/inbox');
     const body = (await res.json()) as InboxResponse;
 
-    expect(body.stacks[0]?.map((pr) => pr.number)).toEqual([1]);
+    expect(body.stacks[0]?.entries.map((e) => e.number)).toEqual([1]);
     expect(body.recent).toEqual([]);
   });
 

@@ -173,13 +173,19 @@ export class Poller {
     const watchedNumbers = new Set(watchedRows.map((row) => row.number));
 
     // The open list covers the whole repo (over a thousand PRs on a busy
-    // one), so only mine and already-watched PRs are stored from it.
+    // one), so only mine and already-watched PRs are stored from it. That
+    // list also never carries additions/deletions/changed_files (see
+    // mapPrListSummary in github/api.ts), so an authored PR's line counts
+    // are backfilled with a direct fetch below.
     const openPulls = await this.github.listOpenPulls(owner, repo);
     const touchedNumbers = new Set<number>();
     for (const pr of openPulls) {
       const isMine = pr.author.login === this.login;
       if (!isMine && !watchedNumbers.has(pr.number)) continue;
-      this.applyUpdate(pr, isMine);
+      const withCounts = isMine
+        ? await this.withAuthoredCounts(owner, repo, pr)
+        : pr;
+      this.applyUpdate(withCounts, isMine);
       touchedNumbers.add(pr.number);
     }
 
@@ -203,6 +209,54 @@ export class Poller {
 
     for (const number of touchedNumbers) {
       await this.refreshThreadsIfSubscribed(owner, repo, number);
+    }
+  }
+
+  // Reuses the previous poll's counts when the PR is unchanged (same
+  // updatedAt, and the stored counts aren't themselves stale zeros from an
+  // earlier list-only fetch), so a direct getPull only runs when the PR
+  // actually moved. The GitHub client ETags getPull, so even that fetch is a
+  // cheap 304 on repeated polls.
+  private async withAuthoredCounts(
+    owner: string,
+    repo: string,
+    pr: PrSummary,
+  ): Promise<PrSummary> {
+    const stored = this.prs.get(owner, repo, pr.number);
+    const storedSummary = stored?.summary ?? null;
+    const storedCountsAreZero =
+      storedSummary === null ||
+      (storedSummary.additions === 0 &&
+        storedSummary.deletions === 0 &&
+        storedSummary.changedFiles === 0);
+    if (
+      storedSummary !== null &&
+      storedSummary.updatedAt === pr.updatedAt &&
+      !storedCountsAreZero
+    ) {
+      return {
+        ...pr,
+        additions: storedSummary.additions,
+        deletions: storedSummary.deletions,
+        changedFiles: storedSummary.changedFiles,
+      };
+    }
+
+    try {
+      const full = await this.github.getPull(owner, repo, pr.number);
+      return {
+        ...pr,
+        additions: full.additions,
+        deletions: full.deletions,
+        changedFiles: full.changedFiles,
+      };
+    } catch (error) {
+      if (isRateLimited(error)) throw error;
+      console.error(
+        `panopticon poller: ${owner}/${repo}#${pr.number} count fetch failed`,
+        error,
+      );
+      return pr;
     }
   }
 

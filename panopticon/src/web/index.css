@@ -5,6 +5,9 @@
 
 :root {
   --radius: 0.625rem;
+  /* The review toolbar stays pinned while the page scrolls; the sticky
+     file-card headers and sidebar sit just below it. */
+  --toolbar-height: 2.75rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -136,6 +139,45 @@
 .markdown-body pre code {
   background-color: transparent;
   padding: 0;
+}
+/* `.shiki`'s own color/background rules (below) sit at equal-or-lower
+   specificity than the inline-code rules above; this keeps the highlighted
+   spans' colors winning without a background or padding leaking back in. */
+.markdown-body pre code.shiki {
+  background-color: transparent;
+  padding: 0;
+}
+
+/* VS Code-style hover card: a monospace, non-wrapping signature fence
+   followed by a divider, then normal markdown prose. Only applies when the
+   card's first child actually is a fence; plain-prose hovers are untouched. */
+.hover-markdown > pre:first-child {
+  margin: 0 0 0.5em;
+  padding: 0;
+  border-radius: 0;
+  background-color: transparent;
+  /* Long type signatures wrap like VS Code's hover instead of scrolling. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.hover-markdown > pre:first-child code {
+  font-size: var(--text-xs);
+}
+.hover-markdown > pre:first-child + * {
+  margin-top: 0;
+  padding-top: 0.5em;
+  border-top: 1px solid var(--border);
+}
+/* The lines a new comment will attach to while its composer is open. An
+   inset shadow tints over the row's add/del background instead of replacing
+   it, so the change colour stays visible under the selection. */
+.diff-table td[data-comment-target] {
+  box-shadow: inset 0 0 0 100vmax oklch(0.62 0.19 255 / 0.22);
+}
+.dark .diff-table td[data-comment-target] {
+  box-shadow: inset 0 0 0 100vmax oklch(0.7 0.17 255 / 0.28);
 }
 .markdown-body blockquote {
   border-left: 3px solid var(--border);

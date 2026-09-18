@@ -9,6 +9,7 @@ import { ThemeProvider } from '../theme.tsx';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { installMockFetch } from '../mock/installMockFetch.ts';
 import diffFixture from '../mock/fixtures/diff.json';
+import prFixture from '../mock/fixtures/pr.json';
 
 beforeAll(() => {
   installMockFetch();
@@ -48,6 +49,29 @@ function typeInto(textarea: HTMLTextAreaElement, value: string): void {
   props?.onChange?.({ target: textarea, currentTarget: textarea });
 }
 
+// Temporarily replaces window.fetch's handling of the diff route (the mock
+// fetch installed in beforeAll still serves everything else), and returns a
+// restore function. Matches on the fixed `/diff` segment in the test PR's
+// path rather than reimplementing installMockFetch's routing.
+function interceptDiffFetch(
+  respond: () => Response | Promise<Response>,
+): () => void {
+  const previous = window.fetch;
+  window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    if (url.includes('/diff')) return respond();
+    return previous(input, init);
+  }) as typeof fetch;
+  return () => {
+    window.fetch = previous;
+  };
+}
+
 async function renderReviewPage(): Promise<HTMLDivElement> {
   container = document.createElement('div');
   document.body.append(container);
@@ -56,7 +80,12 @@ async function renderReviewPage(): Promise<HTMLDivElement> {
     [{ path: '/pr/:owner/:repo/:number', Component: ReviewPage }],
     { initialEntries: ['/pr/Sola-Solutions/monorepo/1'] },
   );
-  const queryClient = new QueryClient();
+  // No retries: a deliberately failing diff fetch in these tests should
+  // surface as an error within the fixed wait below, not after react-query's
+  // default backoff.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   act(() => {
     root.render(
       <QueryClientProvider client={queryClient}>
@@ -81,6 +110,11 @@ describe('ReviewPage against the fixture PR', () => {
     const el = await renderReviewPage();
     const cards = el.querySelectorAll('[data-file-card]');
     expect(cards.length).toBe(diffFixture.files.length);
+  });
+
+  it('links back to the inbox from the toolbar', async () => {
+    const el = await renderReviewPage();
+    expect(el.querySelector('a[href="/"]')).not.toBeNull();
   });
 
   it('starts the *.test.ts file collapsed (collapseReason: "test")', async () => {
@@ -130,5 +164,38 @@ describe('ReviewPage against the fixture PR', () => {
     });
 
     expect(card!.textContent).toContain('This needs a locale-aware fallback.');
+  });
+
+  it('renders the header and a loading note while the diff is still pending', async () => {
+    const restore = interceptDiffFetch(() => new Promise(() => {}));
+    try {
+      const el = await renderReviewPage();
+      expect(el.textContent).toContain(prFixture.pr.title);
+      expect(el.textContent).toContain('Loading diff…');
+    } finally {
+      restore();
+    }
+  });
+
+  it('renders the diff error message and a retry button, with the header still up', async () => {
+    const restore = interceptDiffFetch(
+      () =>
+        new Response(
+          JSON.stringify({ error: 'difft timed out after 20s on x.py' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    try {
+      const el = await renderReviewPage();
+      expect(el.textContent).toContain(prFixture.pr.title);
+      expect(el.textContent).toContain('Could not load the diff.');
+      expect(el.textContent).toContain('difft timed out after 20s on x.py');
+      const retryButton = [...el.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Retry',
+      );
+      expect(retryButton).toBeDefined();
+    } finally {
+      restore();
+    }
   });
 });

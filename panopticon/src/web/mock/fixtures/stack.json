@@ -7,7 +7,10 @@
       "draft": false,
       "headRef": "demo/types",
       "baseRef": "master",
-      "isCurrent": false
+      "isCurrent": false,
+      "parent": null,
+      "additions": 120,
+      "deletions": 4
     },
     {
       "number": 2,
@@ -16,7 +19,10 @@
       "draft": false,
       "headRef": "demo/endpoint",
       "baseRef": "demo/types",
-      "isCurrent": true
+      "isCurrent": true,
+      "parent": 1,
+      "additions": 48,
+      "deletions": 12
     },
     {
       "number": 3,
@@ -25,7 +31,34 @@
       "draft": true,
       "headRef": "demo/read",
       "baseRef": "demo/endpoint",
-      "isCurrent": false
+      "isCurrent": false,
+      "parent": 2,
+      "additions": 210,
+      "deletions": 31
+    },
+    {
+      "number": 5,
+      "title": "worker: stream results",
+      "state": "open",
+      "draft": false,
+      "headRef": "demo/stream",
+      "baseRef": "demo/read",
+      "isCurrent": false,
+      "parent": 3,
+      "additions": 77,
+      "deletions": 9
+    },
+    {
+      "number": 4,
+      "title": "docs: describe the endpoint",
+      "state": "open",
+      "draft": true,
+      "headRef": "demo/docs",
+      "baseRef": "demo/endpoint",
+      "isCurrent": false,
+      "parent": 2,
+      "additions": 15,
+      "deletions": 0
     }
   ],
   "truncatedBelow": false

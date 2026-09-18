@@ -9,6 +9,7 @@ import { PrRepository } from './poller/prs.ts';
 import { assertDifftVersion } from './diff/difft.ts';
 import { RepoStores } from './git/stores.ts';
 import { createGitHubApi, readGhToken } from './github/client.ts';
+import { GraphiteLocals } from './stack/graphiteLocals.ts';
 import { createHoverServers } from './hover/servers.ts';
 import { TreeManager } from './hover/trees.ts';
 import { BunWtRunner } from './hover/wt.ts';
@@ -25,6 +26,7 @@ mkdirSync(tmpDir, { recursive: true });
 const db = openDb(join(config.dataDir, 'panopticon.sqlite'));
 const github = createGitHubApi(await readGhToken());
 const stores = new RepoStores(config.dataDir, config.repos);
+const graphiteLocals = new GraphiteLocals(config.repos);
 const servers = createHoverServers();
 const trees = new TreeManager({
   db,
@@ -56,6 +58,7 @@ const app = buildApp({
   config,
   github,
   stores,
+  graphiteLocals,
   tmpDir,
   trees,
   servers,

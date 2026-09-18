@@ -12,7 +12,7 @@ import {
 } from './cache.ts';
 import { buildBinaryPayload, isBinary } from './binary.ts';
 import { classifyCollapse } from './collapse.ts';
-import { runDifft } from './difft.ts';
+import { type DifftFile, runDifft } from './difft.ts';
 import { buildStructuralPayload } from './payload.ts';
 import { Semaphore } from './semaphore.ts';
 import { buildTextPayload } from './textdiff.ts';
@@ -140,7 +140,22 @@ async function runStructuralOrFallback(
       writeFile(oldPath, oldText, 'utf-8'),
       writeFile(newPath, newText, 'utf-8'),
     ]);
-    const result = await runDifft(oldPath, newPath);
+    let result: DifftFile;
+    try {
+      result = await runDifft(oldPath, newPath);
+    } catch (error) {
+      // difftastic panics on some inputs (e.g. "Hunk lines should be present
+      // in matched lines"). One bad file must not fail the whole PR diff.
+      console.warn(
+        `difft failed on ${file.path}; using text diff: ${
+          error instanceof Error ? error.message.split('\n')[0] : String(error)
+        }`,
+      );
+      return buildTextPayload(file, oldText, newText, {
+        ignoreWhitespace: whitespace === 'ignore',
+        reason: 'difft failed',
+      });
+    }
     if (result.language.startsWith('Text')) {
       return buildTextPayload(file, oldText, newText, {
         ignoreWhitespace: whitespace === 'ignore',

@@ -37,6 +37,25 @@ export type RenderRowWidget = (row: RowWidgetRow) => React.ReactNode;
 
 export type GutterSide = 'old' | 'new';
 
+// The lines a not-yet-posted comment will attach to, while its composer is
+// open. Line indices are 0-based, matching DiffRow.l / DiffRow.r.
+export interface CommentTarget {
+  side: GutterSide;
+  startLine: number;
+  line: number;
+}
+
+export function isCommentTarget(
+  target: CommentTarget | null | undefined,
+  side: GutterSide,
+  line: number | null,
+): boolean {
+  if (!target || line == null || target.side !== side) return false;
+  const lo = Math.min(target.startLine, target.line);
+  const hi = Math.max(target.startLine, target.line);
+  return line >= lo && line <= hi;
+}
+
 export interface SplitDiffTableProps {
   path: string;
   rows: DiffRow[];
@@ -53,6 +72,7 @@ export interface SplitDiffTableProps {
     lineIndex: number,
     shiftKey: boolean,
   ) => void;
+  commentTarget?: CommentTarget | null;
 }
 
 function FoldBar({
@@ -118,12 +138,14 @@ function CodeCell({
   line,
   tokens,
   raw,
+  targeted,
 }: {
   path: string;
   side: 'old' | 'new';
   line: number | null;
   tokens: ThemedToken[][] | null;
   raw: string[];
+  targeted?: boolean;
 }) {
   if (line == null)
     return <td aria-hidden="true" className="bg-black/5 dark:bg-white/5" />;
@@ -135,6 +157,7 @@ function CodeCell({
       data-file={path}
       data-side={side}
       data-line={line}
+      data-comment-target={targeted ? '' : undefined}
     >
       {highlighted && tokenText === raw[line] ? (
         <code className="shiki">
@@ -156,11 +179,13 @@ function GutterCell({
   number,
   commentable,
   onAdd,
+  targeted,
 }: {
   tintClassName: string;
   number: number | null;
   commentable?: boolean;
   onAdd?: (shiftKey: boolean) => void;
+  targeted?: boolean;
 }) {
   return (
     <td
@@ -168,6 +193,7 @@ function GutterCell({
         'group relative select-none text-right text-muted-foreground',
         tintClassName,
       )}
+      data-comment-target={targeted ? '' : undefined}
     >
       {number != null && (
         <span className={cn('px-2', commentable && 'group-hover:invisible')}>
@@ -200,6 +226,7 @@ export function SplitDiffTable({
   renderRowWidget,
   isCommentable,
   onGutterAdd,
+  commentTarget,
 }: SplitDiffTableProps) {
   const folded = applyFolds(rows, foldWindowsForSplit(foldState));
 
@@ -238,6 +265,7 @@ export function SplitDiffTable({
                     item.row.l != null &&
                     onGutterAdd?.('old', item.row.l, shiftKey)
                   }
+                  targeted={isCommentTarget(commentTarget, 'old', item.row.l)}
                 />
                 <CodeCell
                   path={path}
@@ -245,6 +273,7 @@ export function SplitDiffTable({
                   line={item.row.l}
                   tokens={lhsTokens}
                   raw={lhsLines}
+                  targeted={isCommentTarget(commentTarget, 'old', item.row.l)}
                 />
                 <GutterCell
                   tintClassName={ROW_KIND_CLASS[item.row.kind]}
@@ -257,6 +286,7 @@ export function SplitDiffTable({
                     item.row.r != null &&
                     onGutterAdd?.('new', item.row.r, shiftKey)
                   }
+                  targeted={isCommentTarget(commentTarget, 'new', item.row.r)}
                 />
                 <CodeCell
                   path={path}
@@ -264,6 +294,7 @@ export function SplitDiffTable({
                   line={item.row.r}
                   tokens={rhsTokens}
                   raw={rhsLines}
+                  targeted={isCommentTarget(commentTarget, 'new', item.row.r)}
                 />
               </tr>
               {renderRowWidget?.(item.row) != null && (

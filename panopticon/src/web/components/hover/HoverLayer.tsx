@@ -47,8 +47,8 @@ function defaultHitTest(x: number, y: number): HitTestResult | null {
 }
 
 // The popover's own width guess for keeping it inside the viewport; matches
-// the `max-w-sm` class below.
-const POPOVER_WIDTH = 384;
+// the `max-w-xl` class below.
+const POPOVER_WIDTH = 576;
 const VIEWPORT_MARGIN = 8;
 
 function popoverPosition(rect: DOMRect): { left: number; top: number } {
@@ -170,7 +170,7 @@ export function HoverLayer({
   return (
     <div
       role="tooltip"
-      className="fixed z-50 max-w-sm rounded-md border border-border bg-popover p-3 text-sm text-popover-foreground shadow-md"
+      className="fixed z-50 max-h-96 max-w-xl overflow-auto rounded-md border border-border bg-popover p-3 text-sm text-popover-foreground shadow-md"
       style={{ left, top }}
     >
       {isPreparing ? (
@@ -179,7 +179,7 @@ export function HoverLayer({
           Preparing types…
         </span>
       ) : (
-        <Markdown>{contents ?? ''}</Markdown>
+        <Markdown className="hover-markdown">{contents ?? ''}</Markdown>
       )}
     </div>
   );

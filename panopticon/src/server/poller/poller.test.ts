@@ -143,6 +143,109 @@ describe('Poller.tick', () => {
     expect(stored?.state).toBe('open');
   });
 
+  test('backfills line counts for an authored open PR via getPull, since listOpenPulls zeroes them', async () => {
+    let getPullCalls = 0;
+    const deps = basePollerDeps({
+      github: fakeGitHub({
+        openPulls: [fakePr({ additions: 0, deletions: 0, changedFiles: 0 })],
+        getPull: async (number) => {
+          getPullCalls += 1;
+          return fakePr({
+            number,
+            additions: 5,
+            deletions: 3,
+            changedFiles: 2,
+          });
+        },
+      }),
+    });
+    const poller = new Poller(deps);
+
+    await poller.tick();
+
+    expect(getPullCalls).toBe(1);
+    const stored = deps.prs.get('acme', 'widgets', 1);
+    expect(stored?.summary.additions).toBe(5);
+    expect(stored?.summary.deletions).toBe(3);
+    expect(stored?.summary.changedFiles).toBe(2);
+  });
+
+  test('a second poll with the same updatedAt reuses stored counts instead of calling getPull again', async () => {
+    let getPullCalls = 0;
+    const openPr = fakePr({ additions: 0, deletions: 0, changedFiles: 0 });
+    const deps = basePollerDeps({
+      github: fakeGitHub({
+        openPulls: [openPr],
+        getPull: async (number) => {
+          getPullCalls += 1;
+          return fakePr({
+            number,
+            additions: 5,
+            deletions: 3,
+            changedFiles: 2,
+          });
+        },
+      }),
+    });
+    const poller = new Poller(deps);
+
+    await poller.tick();
+    await poller.tick();
+
+    expect(getPullCalls).toBe(1);
+    const stored = deps.prs.get('acme', 'widgets', 1);
+    expect(stored?.summary.additions).toBe(5);
+    expect(stored?.summary.deletions).toBe(3);
+    expect(stored?.summary.changedFiles).toBe(2);
+  });
+
+  test('a changed updatedAt triggers getPull again to refresh the counts', async () => {
+    let getPullCalls = 0;
+    const deps = basePollerDeps({
+      github: fakeGitHub({
+        openPulls: [],
+        getPull: async (number) => {
+          getPullCalls += 1;
+          return fakePr({
+            number,
+            additions: 5,
+            deletions: 3,
+            changedFiles: 2,
+          });
+        },
+      }),
+    });
+    let openPulls = [
+      fakePr({
+        additions: 0,
+        deletions: 0,
+        changedFiles: 0,
+        updatedAt: '2026-01-01T00:00:00Z',
+      }),
+    ];
+    deps.github.listOpenPulls = async () => openPulls;
+    const poller = new Poller(deps);
+
+    await poller.tick();
+    expect(getPullCalls).toBe(1);
+
+    openPulls = [
+      fakePr({
+        additions: 0,
+        deletions: 0,
+        changedFiles: 0,
+        updatedAt: '2026-01-02T00:00:00Z',
+      }),
+    ];
+    await poller.tick();
+
+    expect(getPullCalls).toBe(2);
+    const stored = deps.prs.get('acme', 'widgets', 1);
+    expect(stored?.summary.additions).toBe(5);
+    expect(stored?.summary.deletions).toBe(3);
+    expect(stored?.summary.changedFiles).toBe(2);
+  });
+
   test("does not store someone else's open PR unless it is watched", async () => {
     const deps = basePollerDeps({
       github: fakeGitHub({

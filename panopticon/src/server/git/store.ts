@@ -123,6 +123,14 @@ export class RepoStore {
   private readonly remoteUrl: string;
   private readonly referenceClone: string | null;
 
+  // Serializes every `git fetch` against this store so two concurrent
+  // callers never race into the same bare repo (fetch can collide on ref
+  // locks and throw). Each fetch appends itself to this chain and the chain
+  // itself never rejects, so one failed fetch does not wedge the next.
+  private fetchQueue: Promise<void> = Promise.resolve();
+  private ensureInFlight: Promise<void> | null = null;
+  private readonly fetchPullInFlight = new Map<string, Promise<void>>();
+
   constructor(options: RepoStoreOptions) {
     this.dir = options.dir;
     this.remoteUrl = options.remoteUrl;
@@ -130,6 +138,16 @@ export class RepoStore {
   }
 
   async ensure(): Promise<void> {
+    if (existsSync(this.dir)) return;
+    if (this.ensureInFlight) return this.ensureInFlight;
+    const promise = this.doEnsure().finally(() => {
+      this.ensureInFlight = null;
+    });
+    this.ensureInFlight = promise;
+    return promise;
+  }
+
+  private async doEnsure(): Promise<void> {
     if (existsSync(this.dir)) return;
     mkdirSync(dirname(this.dir), { recursive: true });
     const args = ['clone', '--bare'];
@@ -140,19 +158,64 @@ export class RepoStore {
     await runGitOrThrow(args);
   }
 
-  async fetchPull(number: number, baseSha: string): Promise<void> {
-    await runGitOrThrow(
-      ['fetch', 'origin', `+refs/pull/${number}/head:refs/pr/${number}/head`],
+  private runFetch(args: string[]): Promise<void> {
+    const run = this.fetchQueue
+      .catch(() => {})
+      .then(() => runGitOrThrow(args, this.dir));
+    this.fetchQueue = run.catch(() => {});
+    return run;
+  }
+
+  async hasCommit(sha: string): Promise<boolean> {
+    const { exitCode } = await runGit(
+      ['cat-file', '-e', `${sha}^{commit}`],
       this.dir,
     );
-    await runGitOrThrow(['fetch', 'origin', baseSha], this.dir);
+    return exitCode === 0;
+  }
+
+  // Not `async`: returning `existing` here must hand back the exact same
+  // promise object a concurrent caller is already awaiting, not a fresh one
+  // wrapping it, so two callers with the same key truly share one fetch.
+  fetchPull(number: number, baseSha: string, headSha: string): Promise<void> {
+    const key = `${number}:${baseSha}:${headSha}`;
+    const existing = this.fetchPullInFlight.get(key);
+    if (existing) return existing;
+    const promise = this.doFetchPull(number, baseSha, headSha).finally(() => {
+      this.fetchPullInFlight.delete(key);
+    });
+    this.fetchPullInFlight.set(key, promise);
+    return promise;
+  }
+
+  private async doFetchPull(
+    number: number,
+    baseSha: string,
+    headSha: string,
+  ): Promise<void> {
+    const [hasHead, hasBase] = await Promise.all([
+      this.hasCommit(headSha),
+      this.hasCommit(baseSha),
+    ]);
+    if (hasHead && hasBase) return;
+    if (!hasHead) {
+      await this.runFetch([
+        'fetch',
+        'origin',
+        `+refs/pull/${number}/head:refs/pr/${number}/head`,
+      ]);
+    }
+    if (!hasBase) {
+      await this.runFetch(['fetch', 'origin', baseSha]);
+    }
   }
 
   async fetchTrunk(trunk: string): Promise<void> {
-    await runGitOrThrow(
-      ['fetch', 'origin', `+refs/heads/${trunk}:refs/remotes/origin/${trunk}`],
-      this.dir,
-    );
+    await this.runFetch([
+      'fetch',
+      'origin',
+      `+refs/heads/${trunk}:refs/remotes/origin/${trunk}`,
+    ]);
   }
 
   // Graphite's merge queue closes a PR instead of merging it through
@@ -191,6 +254,28 @@ export class RepoStore {
     );
     if (exitCode !== 0) return null;
     return new TextDecoder().decode(stdout).trim();
+  }
+
+  // Resolves every path against one tree in a single process instead of one
+  // `rev-parse` per path. `git cat-file --batch-check` echoes one line per
+  // input, in order: either the object id, or "<input> missing".
+  async blobOids(treeSha: string, paths: string[]): Promise<(string | null)[]> {
+    if (paths.length === 0) return [];
+    const input = paths.map((path) => `${treeSha}:${path}\n`).join('');
+    const { stdout, stderr, exitCode } = await runGit(
+      ['cat-file', '--batch-check=%(objectname)'],
+      this.dir,
+      input,
+    );
+    if (exitCode !== 0) {
+      throw new Error(`git cat-file --batch-check failed: ${stderr.trim()}`);
+    }
+    const lines = new TextDecoder().decode(stdout).split('\n');
+    return paths.map((_, index) => {
+      const line = lines[index];
+      if (line === undefined || line.endsWith(' missing')) return null;
+      return line;
+    });
   }
 
   async readBlob(oid: string): Promise<Uint8Array | null> {

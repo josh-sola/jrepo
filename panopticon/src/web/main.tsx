@@ -17,7 +17,18 @@ const router = createBrowserRouter([
   { path: '/pr/:owner/:repo/:number', Component: ReviewPage },
 ]);
 
-const queryClient = new QueryClient();
+// Live updates arrive over SSE (see useEvents.ts), which invalidates the
+// `pr*` query keys itself, so a window-focus refetch is redundant. One retry
+// covers a transient race without turning a real failure into four requests.
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('missing #root element');

@@ -14,8 +14,6 @@ export interface PrParams {
   number: string;
 }
 
-export type WhitespaceMode = 'keep' | 'ignore';
-
 function prBasePath({ owner, repo, number }: PrParams): string {
   return `/api/pr/${owner}/${repo}/${number}`;
 }
@@ -27,10 +25,13 @@ export function usePr(params: PrParams) {
   });
 }
 
-export function usePrDiff(params: PrParams, ws: WhitespaceMode) {
+// Whitespace-only changes are always ignored; there is no toggle. This only
+// affects files that fall back to a plain-text diff, since difftastic
+// already ignores whitespace for the languages it parses.
+export function usePrDiff(params: PrParams) {
   return useQuery({
-    queryKey: ['pr-diff', params.owner, params.repo, params.number, ws],
-    queryFn: () => apiGet<PrDiff>(`${prBasePath(params)}/diff?ws=${ws}`),
+    queryKey: ['pr-diff', params.owner, params.repo, params.number],
+    queryFn: () => apiGet<PrDiff>(`${prBasePath(params)}/diff?ws=ignore`),
   });
 }
 

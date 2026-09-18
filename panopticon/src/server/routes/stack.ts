@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { StackResponse } from '../../shared/stack.ts';
+import type { GraphiteLocal } from '../stack/graphiteLocal.ts';
 import type { StackCache } from '../stack/cache.ts';
 import { stackCacheKey } from '../stack/cache.ts';
 import { resolveStack, StackError } from '../stack/resolve.ts';
@@ -8,6 +9,7 @@ import type { StackSource } from '../stack/source.ts';
 export interface StackRouterDeps {
   sourceFor(owner: string, repo: string): StackSource;
   trunkFor(owner: string, repo: string): string;
+  graphiteFor(owner: string, repo: string): GraphiteLocal;
   cache: StackCache;
 }
 
@@ -29,8 +31,14 @@ export function stackRouter(deps: StackRouterDeps): Hono {
 
     try {
       const source = deps.sourceFor(owner, repo);
-      const trunk = deps.trunkFor(owner, repo);
-      const stack: StackResponse = await resolveStack(source, number, trunk);
+      const snapshot = await deps.graphiteFor(owner, repo).snapshot();
+      const trunk = snapshot?.trunk ?? deps.trunkFor(owner, repo);
+      const stack: StackResponse = await resolveStack(
+        source,
+        number,
+        trunk,
+        snapshot,
+      );
       deps.cache.set(key, stack);
       return c.json(stack);
     } catch (error) {

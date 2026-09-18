@@ -6,7 +6,9 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useInbox } from '../hooks/useInbox.ts';
+import { StackGraph } from '../components/stack/StackGraph.tsx';
 import type { PrState, PrSummary } from '../../shared/github.ts';
+import type { InboxStack } from '../../shared/inbox.ts';
 import type { OwnerRepo } from './inboxInput.ts';
 import { parsePrInput } from './inboxInput.ts';
 
@@ -37,11 +39,24 @@ function updatedLabel(iso: string): string {
 }
 
 function firstOwnerRepo(
-  stacks: PrSummary[][],
+  stacks: InboxStack[],
   recent: PrSummary[],
 ): OwnerRepo | null {
-  const first = stacks[0]?.[0] ?? recent[0];
-  return first ? { owner: first.owner, repo: first.repo } : null;
+  const firstStack = stacks[0];
+  if (firstStack) return { owner: firstStack.owner, repo: firstStack.repo };
+  const firstRecent = recent[0];
+  return firstRecent
+    ? { owner: firstRecent.owner, repo: firstRecent.repo }
+    : null;
+}
+
+// Keyed on the bottom (trunk-most) entry, which sits first since entries
+// list parents before children.
+function stackKey(stack: InboxStack): string {
+  const bottom = stack.entries[0];
+  return bottom
+    ? `${stack.owner}/${stack.repo}#${bottom.number}`
+    : `${stack.owner}/${stack.repo}`;
 }
 
 function PrRow({ pr, className }: { pr: PrSummary; className?: string }) {
@@ -66,18 +81,18 @@ function PrRow({ pr, className }: { pr: PrSummary; className?: string }) {
   );
 }
 
-function StackCard({ stack }: { stack: PrSummary[] }) {
-  const topFirst = [...stack].reverse();
+function StackCard({ stack }: { stack: InboxStack }) {
   return (
-    <div className="overflow-hidden rounded-lg border bg-card text-card-foreground">
-      <ol className="divide-y divide-border">
-        {topFirst.map((pr, index) => (
-          <li key={pr.number}>
-            <PrRow pr={pr} className={index === 0 ? 'font-medium' : ''} />
-          </li>
-        ))}
-      </ol>
-    </div>
+    <StackGraph
+      entries={stack.entries}
+      owner={stack.owner}
+      repo={stack.repo}
+      trailing={(entry) => (
+        <span className="text-xs text-muted-foreground">
+          {updatedLabel(entry.updatedAt)}
+        </span>
+      )}
+    />
   );
 }
 
@@ -117,7 +132,7 @@ export function InboxPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 p-6">
       <header className="flex flex-col gap-2">
         <h1 className="text-2xl font-semibold">Inbox</h1>
         <form onSubmit={goToPr} className="flex gap-2">
@@ -146,10 +161,7 @@ export function InboxPage() {
           </p>
         )}
         {inboxQuery.data?.stacks.map((stack) => (
-          <StackCard
-            key={stack.map((pr) => pr.number).join('-')}
-            stack={stack}
-          />
+          <StackCard key={stackKey(stack)} stack={stack} />
         ))}
       </section>
 

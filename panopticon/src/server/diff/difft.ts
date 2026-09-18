@@ -171,20 +171,38 @@ function parseConcatenatedObjects(text: string): unknown[] {
   return objects;
 }
 
+export const DIFFT_TIMEOUT_MS = 20_000;
+
 export async function runDifft(
   oldFile: string,
   newFile: string,
+  timeoutMs: number = DIFFT_TIMEOUT_MS,
 ): Promise<DifftFile> {
   const proc = Bun.spawn(['difft', '--display', 'json', oldFile, newFile], {
     env: { ...process.env, DFT_UNSTABLE: 'yes' },
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+  }, timeoutMs);
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (timedOut) {
+    throw new Error(`difft timed out after ${timeoutMs / 1000}s on ${newFile}`);
+  }
   if (exitCode !== 0) {
     throw new Error(`difft failed on ${newFile} (exit ${exitCode}): ${stderr}`);
   }

@@ -12,10 +12,12 @@ import {
 import type { RowKind, UnifiedRow } from '../diff/rows.ts';
 import type { ThemedToken } from '../shiki.ts';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import type {
-  GutterSide,
-  RenderRowWidget,
-  RevealFoldHandler,
+import {
+  type CommentTarget,
+  type GutterSide,
+  type RenderRowWidget,
+  type RevealFoldHandler,
+  isCommentTarget,
 } from './SplitDiffTable.tsx';
 
 const ROW_KIND_CLASS: Record<RowKind, string> = {
@@ -42,6 +44,7 @@ export interface UnifiedDiffTableProps {
     lineIndex: number,
     shiftKey: boolean,
   ) => void;
+  commentTarget?: CommentTarget | null;
 }
 
 function FoldBar({
@@ -109,6 +112,7 @@ export function UnifiedDiffTable({
   renderRowWidget,
   isCommentable,
   onGutterAdd,
+  commentTarget,
 }: UnifiedDiffTableProps) {
   const folded = applyFolds(
     rows,
@@ -142,6 +146,10 @@ export function UnifiedDiffTable({
                 rhsTokens={rhsTokens}
                 isCommentable={isCommentable}
                 onGutterAdd={onGutterAdd}
+                targeted={
+                  isCommentTarget(commentTarget, 'old', item.row.l) ||
+                  isCommentTarget(commentTarget, 'new', item.row.r)
+                }
               />
               {renderRowWidget?.({ l: item.row.l, r: item.row.r }) != null && (
                 <tr>
@@ -167,6 +175,7 @@ function UnifiedRowEl({
   rhsTokens,
   isCommentable,
   onGutterAdd,
+  targeted,
 }: {
   path: string;
   row: UnifiedRow;
@@ -180,6 +189,7 @@ function UnifiedRowEl({
     lineIndex: number,
     shiftKey: boolean,
   ) => void;
+  targeted: boolean;
 }) {
   const marker = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' ';
   const line = row.side === 'old' ? row.l : row.r;
@@ -198,6 +208,7 @@ function UnifiedRowEl({
         onAdd={(shiftKey) =>
           row.l != null && onGutterAdd?.('old', row.l, shiftKey)
         }
+        targeted={targeted}
       />
       <GutterCell
         tintClassName={ROW_KIND_CLASS[row.kind]}
@@ -206,6 +217,7 @@ function UnifiedRowEl({
         onAdd={(shiftKey) =>
           row.r != null && onGutterAdd?.('new', row.r, shiftKey)
         }
+        targeted={targeted}
       />
       {line == null ? (
         <td aria-hidden="true" className="bg-black/5 dark:bg-white/5" />
@@ -215,6 +227,7 @@ function UnifiedRowEl({
           data-file={path}
           data-side={row.side}
           data-line={line}
+          data-comment-target={targeted ? '' : undefined}
         >
           <code>
             {marker}
@@ -241,11 +254,13 @@ function GutterCell({
   number,
   commentable,
   onAdd,
+  targeted,
 }: {
   tintClassName: string;
   number: number | null;
   commentable?: boolean;
   onAdd?: (shiftKey: boolean) => void;
+  targeted?: boolean;
 }) {
   return (
     <td
@@ -253,6 +268,7 @@ function GutterCell({
         'group relative select-none text-right text-muted-foreground',
         tintClassName,
       )}
+      data-comment-target={targeted ? '' : undefined}
     >
       {number != null && (
         <span className={cn('px-2', commentable && 'group-hover:invisible')}>

@@ -13,7 +13,7 @@ import {
   useSetViewed,
   useViewed,
 } from '../hooks/usePrData.ts';
-import { useViewMode, useWhitespaceIgnored } from '../hooks/usePrefs.ts';
+import { useViewMode } from '../hooks/usePrefs.ts';
 import { usePrEvents } from '../hooks/useEvents.ts';
 import { PrHeader } from '../components/PrHeader.tsx';
 import { StackPanel } from '../components/stack/StackPanel.tsx';
@@ -21,6 +21,12 @@ import { ConversationTab } from '../components/ConversationTab.tsx';
 import { FileSidebar } from '../components/FileSidebar.tsx';
 import { FileCard, type ComposerRequest } from '../components/FileCard.tsx';
 import { TopBar } from '../components/TopBar.tsx';
+import { Button } from '@/components/ui/button';
+import {
+  DiffErrorPanel,
+  DiffMainLoading,
+  DiffSidebarLoading,
+} from '../components/DiffLoadState.tsx';
 import {
   computeCommentableLines,
   firstCommentableLine,
@@ -36,6 +42,15 @@ interface HighlightRegistry {
 interface HighlightWindow {
   Highlight?: new (...ranges: Range[]) => unknown;
 }
+
+const PAGE_SCROLL_GROUP_STYLE = {
+  height: 'auto',
+  overflow: 'visible',
+} as const;
+const PAGE_SCROLL_PANEL_STYLE = {
+  maxHeight: 'none',
+  overflow: 'visible',
+} as const;
 
 function prFileByPath(files: PrFile[]): Map<string, PrFile> {
   return new Map(files.map((file) => [file.path, file]));
@@ -63,10 +78,9 @@ function ReviewPageContent({
     [owner, repo, number],
   );
   const [viewMode, setViewMode] = useViewMode();
-  const [whitespaceIgnored, setWhitespaceIgnored] = useWhitespaceIgnored();
 
   const prQuery = usePr(params);
-  const diffQuery = usePrDiff(params, whitespaceIgnored ? 'ignore' : 'keep');
+  const diffQuery = usePrDiff(params);
   const viewedQuery = useViewed(params);
   const stackQuery = useStack(params);
   usePrEvents(params);
@@ -302,20 +316,19 @@ function ReviewPageContent({
     jumpToThread,
   ]);
 
-  if (prQuery.isPending || diffQuery.isPending || viewedQuery.isPending) {
+  if (prQuery.isPending || viewedQuery.isPending) {
     return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
   }
   if (prQuery.isError) {
     return (
-      <div className="p-6 text-sm text-destructive">
-        Could not load this pull request.
-      </div>
-    );
-  }
-  if (diffQuery.isError) {
-    return (
-      <div className="p-6 text-sm text-destructive">
-        Could not load the diff.
+      <div className="flex flex-col items-start gap-3 p-6 text-sm">
+        <p className="text-destructive">Could not load this pull request.</p>
+        <p className="font-mono text-xs text-muted-foreground">
+          {prQuery.error.message}
+        </p>
+        <Button variant="outline" size="sm" onClick={() => prQuery.refetch()}>
+          Retry
+        </Button>
       </div>
     );
   }
@@ -323,7 +336,7 @@ function ReviewPageContent({
   if (!pr) return null;
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex min-h-screen flex-col">
       <PrHeader
         pr={pr.pr}
         stackSlot={
@@ -339,78 +352,98 @@ function ReviewPageContent({
       <TopBar
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        whitespaceIgnored={whitespaceIgnored}
-        onWhitespaceChange={setWhitespaceIgnored}
         files={files}
         onJumpToFile={scrollToFile}
         params={params}
       />
-      <Tabs defaultValue="files" className="min-h-0 flex-1">
+      <Tabs defaultValue="files" className="flex-1">
         <TabsList className="mx-3 mt-2 w-fit">
           <TabsTrigger value="files">Files</TabsTrigger>
           <TabsTrigger value="conversation">Conversation</TabsTrigger>
         </TabsList>
-        <TabsContent
-          value="conversation"
-          className="min-h-0 flex-1 overflow-y-auto"
-        >
+        <TabsContent value="conversation">
           <ConversationTab
             issueComments={pr.issueComments}
             reviews={pr.reviews}
           />
         </TabsContent>
-        <TabsContent value="files" className="flex min-h-0 flex-1">
+        <TabsContent value="files" className="flex">
+          {/* The page scrolls as a whole, so the diff grows to its full
+              height instead of scrolling inside its own panel. The library
+              pins the group to 100% height and gives each panel an
+              overflow:auto wrapper via inline styles, so the overrides have
+              to be inline too. */}
           <ResizablePanelGroup
             orientation="horizontal"
-            className="min-h-0 flex-1"
+            className="flex-1"
+            style={PAGE_SCROLL_GROUP_STYLE}
           >
-            <ResizablePanel defaultSize={20} minSize={12} maxSize={35}>
-              <FileSidebar
-                files={files}
-                isViewed={isViewed}
-                isCollapsed={isCollapsed}
-                activePath={activePath}
-                onSelect={scrollToFile}
-              />
+            {/* react-resizable-panels v4 reads bare numbers as pixels, so
+                percentages have to be strings. */}
+            <ResizablePanel
+              defaultSize="20%"
+              minSize={180}
+              maxSize="35%"
+              style={PAGE_SCROLL_PANEL_STYLE}
+            >
+              {diffQuery.data ? (
+                <FileSidebar
+                  files={files}
+                  isViewed={isViewed}
+                  isCollapsed={isCollapsed}
+                  activePath={activePath}
+                  onSelect={scrollToFile}
+                />
+              ) : (
+                <DiffSidebarLoading files={pr.files} />
+              )}
             </ResizablePanel>
             <ResizableHandle withHandle />
-            <ResizablePanel defaultSize={80}>
-              <div
-                ref={containerRef}
-                className="flex h-full flex-col gap-3 overflow-y-auto p-3"
-              >
-                {files.map((file) => {
-                  const threads = pr.threads.filter(
-                    (thread) => thread.path === file.path,
-                  );
-                  return (
-                    <FileCard
-                      key={file.path}
-                      ref={(el) => {
-                        if (el) fileRefs.current.set(file.path, el);
-                        else fileRefs.current.delete(file.path);
-                      }}
-                      file={file}
-                      viewMode={viewMode}
-                      collapsed={isCollapsed(file.path)}
-                      onToggleCollapsed={toggleCollapsed}
-                      viewed={isViewed(file.path)}
-                      viewedStale={isStale(file.path)}
-                      onToggleViewed={toggleViewed}
-                      threads={threads}
-                      commitId={pr.pr.head.sha}
-                      prParams={params}
-                      composerRequest={
-                        composerRequest?.path === file.path
-                          ? composerRequest
-                          : null
-                      }
-                      onComposerRequestHandled={() => setComposerRequest(null)}
-                      onTokenized={bumpRenderRevision}
-                    />
-                  );
-                })}
-              </div>
+            <ResizablePanel defaultSize="80%" style={PAGE_SCROLL_PANEL_STYLE}>
+              {diffQuery.isError ? (
+                <DiffErrorPanel
+                  message={diffQuery.error.message}
+                  onRetry={() => diffQuery.refetch()}
+                />
+              ) : !diffQuery.data ? (
+                <DiffMainLoading />
+              ) : (
+                <div ref={containerRef} className="flex flex-col gap-3 p-3">
+                  {files.map((file) => {
+                    const threads = pr.threads.filter(
+                      (thread) => thread.path === file.path,
+                    );
+                    return (
+                      <FileCard
+                        key={file.path}
+                        ref={(el) => {
+                          if (el) fileRefs.current.set(file.path, el);
+                          else fileRefs.current.delete(file.path);
+                        }}
+                        file={file}
+                        viewMode={viewMode}
+                        collapsed={isCollapsed(file.path)}
+                        onToggleCollapsed={toggleCollapsed}
+                        viewed={isViewed(file.path)}
+                        viewedStale={isStale(file.path)}
+                        onToggleViewed={toggleViewed}
+                        threads={threads}
+                        commitId={pr.pr.head.sha}
+                        prParams={params}
+                        composerRequest={
+                          composerRequest?.path === file.path
+                            ? composerRequest
+                            : null
+                        }
+                        onComposerRequestHandled={() =>
+                          setComposerRequest(null)
+                        }
+                        onTokenized={bumpRenderRevision}
+                      />
+                    );
+                  })}
+                </div>
+              )}
             </ResizablePanel>
           </ResizablePanelGroup>
         </TabsContent>

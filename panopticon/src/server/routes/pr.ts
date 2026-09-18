@@ -13,46 +13,36 @@ export interface PrDeps {
   trunkFor(owner: string, repo: string): string;
 }
 
-const OID_FILL_CONCURRENCY = 16;
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = Array.from({ length: items.length });
-  let next = 0;
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const index = next;
-      next += 1;
-      if (index >= items.length) return;
-      const item = items[index];
-      if (item === undefined) return;
-      results[index] = await fn(item);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
-  );
-  return results;
-}
-
 async function fillBlobOids(
   store: RepoStore,
   pr: PrSummary,
   files: PrFile[],
 ): Promise<PrFile[]> {
-  return mapWithConcurrency(files, OID_FILL_CONCURRENCY, async (file) => {
-    const oldPath = file.previousPath ?? file.path;
-    const [oldOid, newOid] = await Promise.all([
-      store.blobOid(pr.base.sha, oldPath),
-      store.blobOid(pr.head.sha, file.path),
-    ]);
-    return { ...file, oldOid, newOid };
-  });
+  const oldPaths = files.map((file) => file.previousPath ?? file.path);
+  const newPaths = files.map((file) => file.path);
+  const [oldOids, newOids] = await Promise.all([
+    store.blobOids(pr.base.sha, oldPaths),
+    store.blobOids(pr.head.sha, newPaths),
+  ]);
+  return files.map((file, index) => ({
+    ...file,
+    oldOid: oldOids[index] ?? null,
+    newOid: newOids[index] ?? null,
+  }));
+}
+
+// Concurrent callers loading the same PR (the pr, diff, and hover routes
+// all fire on page load) share one in-flight load instead of each running
+// its own GitHub calls and git fetches. Entries are removed once they
+// settle, success or failure, so a later call always sees fresh state —
+// the poller and SSE invalidation rely on that when the head changes.
+const inFlightLoads = new Map<
+  string,
+  Promise<{ pr: PrSummary; files: PrFile[] }>
+>();
+
+export function resetLoadPrForTests(): void {
+  inFlightLoads.clear();
 }
 
 // Fetches a PR's summary and file list, fetches its base and head into the
@@ -65,13 +55,33 @@ export async function loadPr(
   repo: string,
   number: number,
 ): Promise<{ pr: PrSummary; files: PrFile[] }> {
-  const rawPr = await deps.github.getPull(owner, repo, number);
+  const key = `${owner}/${repo}#${number}`;
+  const existing = inFlightLoads.get(key);
+  if (existing) return existing;
+  const promise = loadPrUncached(deps, owner, repo, number).finally(() => {
+    inFlightLoads.delete(key);
+  });
+  inFlightLoads.set(key, promise);
+  return promise;
+}
+
+async function loadPrUncached(
+  deps: PrDeps,
+  owner: string,
+  repo: string,
+  number: number,
+): Promise<{ pr: PrSummary; files: PrFile[] }> {
+  // The file list does not depend on the PR summary, so both GitHub calls
+  // go out at once; only the git fetch has to wait for the base and head shas.
+  const fileListPromise = deps.github.listPullFiles(owner, repo, number);
   const store = deps.stores.for(owner, repo);
+  const ensurePromise = store.ensure();
+  const rawPr = await deps.github.getPull(owner, repo, number);
   const pr = await withLandedState(rawPr, store, deps.trunkFor(owner, repo));
 
   const [fileList] = await Promise.all([
-    deps.github.listPullFiles(owner, repo, number),
-    store.ensure().then(() => store.fetchPull(number, pr.base.sha)),
+    fileListPromise,
+    ensurePromise.then(() => store.fetchPull(number, pr.base.sha, pr.head.sha)),
   ]);
 
   const files = fileList.truncated

@@ -6,7 +6,6 @@ import type { PrefsResponse, UpsertPrefsRequest } from '../../shared/api.ts';
 
 const STORAGE_KEY = 'panopticon-prefs';
 const VIEW_MODE_KEY = 'viewMode';
-const WHITESPACE_KEY = 'whitespace';
 
 export type ViewMode = 'split' | 'unified';
 
@@ -61,14 +60,4 @@ export function useViewMode(): [ViewMode, (mode: ViewMode) => void] {
     data?.prefs[VIEW_MODE_KEY] === 'unified' ? 'unified' : 'split';
   const setMode = (next: ViewMode) => mutate({ [VIEW_MODE_KEY]: next });
   return [mode, setMode];
-}
-
-export function useWhitespaceIgnored(): [boolean, (ignored: boolean) => void] {
-  const { data } = usePrefsQuery();
-  const { mutate } = useSetPrefs();
-  const ignored = data?.prefs[WHITESPACE_KEY] === 'ignore';
-  const setIgnored = (next: boolean) => {
-    mutate({ [WHITESPACE_KEY]: next ? 'ignore' : 'keep' });
-  };
-  return [ignored, setIgnored];
 }

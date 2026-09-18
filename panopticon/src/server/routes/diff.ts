@@ -6,6 +6,7 @@ import type { CollapseRule } from '../config.ts';
 import { ensureSchema } from '../db.ts';
 import { DIFF_CACHE_SCHEMA } from '../diff/cache.ts';
 import { buildPrDiff } from '../diff/index.ts';
+import { GitHubError } from '../github/api.ts';
 
 export interface DiffRouterDeps {
   loadPr(
@@ -43,27 +44,41 @@ export function diffRouter(deps: DiffRouterDeps): Hono {
     const number = Number(requireParam(c.req.param('number'), 'number'));
     const ignoreWhitespace = c.req.query('ws') === 'ignore';
 
-    const { pr, files } = await deps.loadPr(owner, repo, number);
-    const store = await deps.storeFor(owner, repo);
+    try {
+      const { pr, files } = await deps.loadPr(owner, repo, number);
+      const store = await deps.storeFor(owner, repo);
 
-    const diff = await buildPrDiff(
-      {
-        readBlob: (oid) => store.readBlob(oid),
-        generatedPaths: (headSha, paths) =>
-          store.generatedPaths(headSha, paths),
-        db: deps.db,
-        tmpDir: deps.tmpDir,
-        rules: deps.rules,
-      },
-      {
-        baseSha: pr.base.sha,
-        headSha: pr.head.sha,
-        files,
-        ignoreWhitespace,
-      },
-    );
+      const diff = await buildPrDiff(
+        {
+          readBlob: (oid) => store.readBlob(oid),
+          generatedPaths: (headSha, paths) =>
+            store.generatedPaths(headSha, paths),
+          db: deps.db,
+          tmpDir: deps.tmpDir,
+          rules: deps.rules,
+        },
+        {
+          baseSha: pr.base.sha,
+          headSha: pr.head.sha,
+          files,
+          ignoreWhitespace,
+        },
+      );
 
-    const body: PrDiffResponse = diff;
-    return c.json(body);
+      const body: PrDiffResponse = diff;
+      return c.json(body);
+    } catch (error) {
+      if (error instanceof GitHubError) {
+        if (error.status === 404) {
+          return c.json({ error: error.message }, 404);
+        }
+        return c.json({ error: error.message }, 502);
+      }
+      console.error('diff route failed', error);
+      return c.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        500,
+      );
+    }
   });
 }

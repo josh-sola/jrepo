@@ -122,6 +122,25 @@ describe('HoverLayer', () => {
     expect(mountEl.textContent).toContain('Preparing types');
   });
 
+  it('shows a fenced signature above the doc prose', async () => {
+    mount({
+      status: 'ready',
+      contents:
+        '```typescript\nfunction resolveStack(pr: PrSummary): Promise<StackEntry[]>\n```\n\nWalks the stack.',
+    });
+    hoverTheWord();
+
+    await act(async () => {
+      await wait(PAST_DEBOUNCE_MS);
+    });
+
+    expect(mountEl.textContent).toContain(
+      'function resolveStack(pr: PrSummary): Promise<StackEntry[]>',
+    );
+    expect(mountEl.textContent).toContain('Walks the stack.');
+    expect(mountEl.querySelector('pre')).not.toBeNull();
+  });
+
   it('hides again once the pointer leaves the diff container', async () => {
     mount({ status: 'ready', contents: 'Greets someone by name.' });
     hoverTheWord();

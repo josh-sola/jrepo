@@ -155,6 +155,69 @@ describe('RepoStore', () => {
     });
     expect(await store.generatedPaths(headSha, [])).toEqual(new Set());
   });
+
+  test('blobOids resolves oids in input order with null for a missing path', async () => {
+    const store = new RepoStore({
+      dir: bareDir,
+      remoteUrl: sourceDir,
+      referenceClone: null,
+    });
+    const [bOid, cOid] = await Promise.all([
+      store.blobOid(headSha, 'b.txt'),
+      store.blobOid(headSha, 'c.txt'),
+    ]);
+
+    const oids = await store.blobOids(headSha, [
+      'b.txt',
+      'does-not-exist.txt',
+      'c.txt',
+    ]);
+
+    expect(oids).toEqual([bOid, null, cOid]);
+  });
+
+  test('blobOids returns an empty array for no paths', async () => {
+    const store = new RepoStore({
+      dir: bareDir,
+      remoteUrl: sourceDir,
+      referenceClone: null,
+    });
+    expect(await store.blobOids(headSha, [])).toEqual([]);
+  });
+});
+
+describe('RepoStore fetchPull', () => {
+  test('makes no fetch when both commits already exist locally', async () => {
+    // Point origin at a path that does not exist. If fetchPull tried to
+    // fetch anyway, git would fail loudly and this test would catch it.
+    await git(
+      ['remote', 'set-url', 'origin', join(dir!, 'no-such-remote')],
+      bareDir,
+    );
+    const store = new RepoStore({
+      dir: bareDir,
+      remoteUrl: sourceDir,
+      referenceClone: null,
+    });
+    await expect(store.fetchPull(1, baseSha, headSha)).resolves.toBeUndefined();
+  });
+
+  test('shares one in-flight promise for concurrent calls with the same key', async () => {
+    const store = new RepoStore({
+      dir: bareDir,
+      remoteUrl: sourceDir,
+      referenceClone: null,
+    });
+
+    const first = store.fetchPull(42, baseSha, headSha);
+    const second = store.fetchPull(42, baseSha, headSha);
+    expect(second).toBe(first);
+    await first;
+
+    const third = store.fetchPull(42, baseSha, headSha);
+    expect(third).not.toBe(first);
+    await third;
+  });
 });
 
 describe('RepoStore trunk landing', () => {

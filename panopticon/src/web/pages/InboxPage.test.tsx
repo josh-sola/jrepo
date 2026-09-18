@@ -4,7 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import type { InboxResponse } from '../../shared/inbox.ts';
+import type { InboxResponse, InboxStackEntry } from '../../shared/inbox.ts';
 import type { PrSummary } from '../../shared/github.ts';
 import { InboxPage } from './InboxPage.tsx';
 
@@ -47,6 +47,26 @@ function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
   };
 }
 
+function fakeEntry(
+  overrides: Partial<InboxStackEntry> & { number: number },
+): InboxStackEntry {
+  return {
+    title: `pr ${overrides.number}`,
+    state: 'open',
+    draft: false,
+    headRef: `branch-${overrides.number}`,
+    baseRef: 'master',
+    isCurrent: false,
+    parent: null,
+    additions: 1,
+    deletions: 1,
+    owner: 'acme',
+    repo: 'widgets',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
 function stubInboxFetch(response: InboxResponse): void {
   originalFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
@@ -76,24 +96,27 @@ async function renderInboxPage(): Promise<HTMLDivElement> {
 
 describe('InboxPage', () => {
   test('renders a three-PR stack top-first and a recent row', async () => {
-    const bottom = fakePr({
+    const bottom = fakeEntry({
       number: 1,
       title: 'actuation: add select',
-      base: { ref: 'master', sha: 's' },
-      head: { ref: 'branch-1', sha: 's' },
+      baseRef: 'master',
+      headRef: 'branch-1',
+      parent: null,
     });
-    const middle = fakePr({
+    const middle = fakeEntry({
       number: 2,
       title: 'actions: expose select',
-      base: { ref: 'branch-1', sha: 's' },
-      head: { ref: 'branch-2', sha: 's' },
+      baseRef: 'branch-1',
+      headRef: 'branch-2',
+      parent: 1,
     });
-    const top = fakePr({
+    const top = fakeEntry({
       number: 3,
       title: 'gym: cover select',
       draft: true,
-      base: { ref: 'branch-2', sha: 's' },
-      head: { ref: 'branch-3', sha: 's' },
+      baseRef: 'branch-2',
+      headRef: 'branch-3',
+      parent: 2,
     });
     const recentPr = fakePr({
       number: 42,
@@ -101,7 +124,9 @@ describe('InboxPage', () => {
       author: { login: 'someone-else', avatarUrl: null, isBot: false },
     });
     stubInboxFetch({
-      stacks: [[bottom, middle, top]],
+      stacks: [
+        { owner: 'acme', repo: 'widgets', entries: [bottom, middle, top] },
+      ],
       recent: [recentPr],
       fetchedAt: '2026-01-01T00:00:00Z',
     });
@@ -129,6 +154,49 @@ describe('InboxPage', () => {
     expect(
       stackCard?.querySelector('a')?.textContent?.includes('gym: cover select'),
     ).toBe(true);
+  });
+
+  test('renders both branches of a fork', async () => {
+    const rootEntry = fakeEntry({
+      number: 1,
+      title: 'types: add wire schemas',
+      baseRef: 'master',
+      headRef: 'branch-1',
+      parent: null,
+    });
+    const branchA = fakeEntry({
+      number: 2,
+      title: 'worker: resolve values',
+      baseRef: 'branch-1',
+      headRef: 'branch-2a',
+      parent: 1,
+    });
+    const branchB = fakeEntry({
+      number: 3,
+      title: 'docs: describe the endpoint',
+      baseRef: 'branch-1',
+      headRef: 'branch-2b',
+      parent: 1,
+    });
+    stubInboxFetch({
+      stacks: [
+        {
+          owner: 'acme',
+          repo: 'widgets',
+          entries: [rootEntry, branchA, branchB],
+        },
+      ],
+      recent: [],
+      fetchedAt: '2026-01-01T00:00:00Z',
+    });
+
+    const el = await renderInboxPage();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(el.textContent).toContain('worker: resolve values');
+    expect(el.textContent).toContain('docs: describe the endpoint');
   });
 
   test('shows empty-state copy when there is nothing to show', async () => {

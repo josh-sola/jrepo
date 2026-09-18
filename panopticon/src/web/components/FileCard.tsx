@@ -357,9 +357,9 @@ export const FileCard = forwardRef<HTMLDivElement, FileCardProps>(
       <div
         ref={ref}
         data-file-card={file.path}
-        className="scroll-mt-14 rounded-md border border-border"
+        className="scroll-mt-[calc(var(--toolbar-height)+0.75rem)] rounded-md border border-border"
       >
-        <div className="sticky top-0 z-10 flex items-center gap-2 rounded-t-md border-b border-border bg-card px-3 py-2 text-sm">
+        <div className="sticky top-(--toolbar-height) z-10 flex items-center gap-2 rounded-t-md border-b border-border bg-card px-3 py-2 text-sm">
           <button
             type="button"
             aria-label={collapsed ? 'Expand file' : 'Collapse file'}
@@ -462,6 +462,7 @@ export const FileCard = forwardRef<HTMLDivElement, FileCardProps>(
                 renderRowWidget={renderRowWidget}
                 isCommentable={isCommentableSide}
                 onGutterAdd={openComposer}
+                commentTarget={newThreadTarget}
               />
             ) : (
               <UnifiedDiffTable
@@ -477,6 +478,7 @@ export const FileCard = forwardRef<HTMLDivElement, FileCardProps>(
                 renderRowWidget={renderRowWidget}
                 isCommentable={isCommentableSide}
                 onGutterAdd={openComposer}
+                commentTarget={newThreadTarget}
               />
             )}
             <HoverLayer

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +7,15 @@ import type { PrFile } from '../../shared/github.ts';
 import type { CollapseRule } from '../config.ts';
 import { ensureSchema, openDb } from '../db.ts';
 import { DIFF_CACHE_SCHEMA } from './cache.ts';
+import * as difft from './difft.ts';
 import { buildPrDiff, type DiffDeps } from './index.ts';
+
+// Captured before any test mocks './difft.ts': `mock.module()` swaps the
+// live module registry entry in place, so an `import * as` binding read
+// after mocking would already see the replacement. Spreading into a plain
+// object here snapshots every export by value, which is what actually lets
+// a later `mock.module('./difft.ts', () => realDifftModule)` undo the mock.
+const realDifftModule = { ...difft };
 
 const FIXTURES = join(import.meta.dir, '__fixtures__');
 const NO_RULES: CollapseRule[] = [];
@@ -134,6 +142,47 @@ describe('buildPrDiff', () => {
     expect(file?.structural).toBe(false);
     expect(file?.fallbackReason?.startsWith('Text')).toBe(true);
     cleanup();
+  });
+
+  test('falls back to text diff with reason "difft failed" when difft throws', async () => {
+    // difftastic panics on some real inputs (exit 101, "Hunk lines should
+    // be present in matched lines") without producing a parse-error Text
+    // payload, so this exercises that path directly rather than relying on
+    // a fixture that happens to make the real binary crash.
+    mock.module('./difft.ts', () => ({
+      runDifft: async () => {
+        throw new Error(
+          'difft failed on new.ts (exit 101): panicked at Hunk lines should be present in matched lines',
+        );
+      },
+    }));
+
+    try {
+      const { deps, cleanup } = newDeps({
+        readBlob: async (oid) => {
+          if (oid === 'old-oid')
+            return blobFromFixture(join(FIXTURES, 'typescript', 'old.ts'));
+          if (oid === 'new-oid')
+            return blobFromFixture(join(FIXTURES, 'typescript', 'new.ts'));
+          return null;
+        },
+      });
+      dir = deps.tmpDir;
+
+      const diff = await buildPrDiff(deps, {
+        baseSha: 'base',
+        headSha: 'head',
+        files: [prFile()],
+        ignoreWhitespace: false,
+      });
+
+      const file = diff.files[0];
+      expect(file?.structural).toBe(false);
+      expect(file?.fallbackReason).toBe('difft failed');
+      cleanup();
+    } finally {
+      mock.module('./difft.ts', () => realDifftModule);
+    }
   });
 
   test('builds a binary stub without invoking difft', async () => {

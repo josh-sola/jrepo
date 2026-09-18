@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { LspClient } from './lsp.ts';
+import { LspClient, hoverContentsToMarkdown } from './lsp.ts';
 
 const FIXTURE_PATH = join(import.meta.dirname, '__fixtures__', 'fake-lsp.ts');
 
@@ -88,5 +88,17 @@ describe('LspClient', () => {
     await expect(client.hover('file:///nope.ts', 0, 0)).rejects.toThrow(
       /not started/,
     );
+  });
+});
+
+describe('hoverContentsToMarkdown', () => {
+  test('passes markdown through and fences plaintext', () => {
+    expect(
+      hoverContentsToMarkdown({ kind: 'markdown', value: '```ts\nx\n```' }),
+    ).toBe('```ts\nx\n```');
+    expect(
+      hoverContentsToMarkdown({ kind: 'plaintext', value: 'const x: number' }),
+    ).toBe('```\nconst x: number\n```');
+    expect(hoverContentsToMarkdown({ kind: 'markdown', value: '' })).toBeNull();
   });
 });

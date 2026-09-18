@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { PrResponse } from '../../shared/api.ts';
 import type {
@@ -11,7 +11,7 @@ import type {
 import type { BaseRefChange, GitHubApi } from '../github/api.ts';
 import { GitHubError } from '../github/api.ts';
 import type { RepoStores } from '../git/stores.ts';
-import { loadPr, prRouter } from './pr.ts';
+import { loadPr, prRouter, resetLoadPrForTests } from './pr.ts';
 
 function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
   return {
@@ -56,11 +56,13 @@ interface FakeGitHubOptions {
   issueComments?: IssueComment[];
   reviews?: ReviewSummary[];
   getPullError?: Error;
+  onGetPull?: () => void;
 }
 
 function fakeGitHub(options: FakeGitHubOptions): GitHubApi {
   return {
     getPull: async () => {
+      options.onGetPull?.();
       if (options.getPullError) throw options.getPullError;
       return options.pr ?? fakePr();
     },
@@ -80,17 +82,23 @@ function fakeGitHub(options: FakeGitHubOptions): GitHubApi {
 
 interface FakeStoreOptions {
   blobOid?: (treeSha: string, path: string) => Promise<string | null>;
+  hasCommit?: (sha: string) => Promise<boolean>;
   nameStatus?: PrFile[];
   landedCommit?: string | null;
 }
 
 function fakeStores(options: FakeStoreOptions = {}): RepoStores {
+  const blobOid =
+    options.blobOid ?? (async (treeSha: string) => `${treeSha}-blob`);
   const store = {
     ensure: async () => {},
     fetchPull: async () => {},
     fetchTrunk: async () => {},
+    hasCommit: options.hasCommit ?? (async () => true),
     landedCommit: async () => options.landedCommit ?? null,
-    blobOid: options.blobOid ?? (async (treeSha: string) => `${treeSha}-blob`),
+    blobOid,
+    blobOids: async (treeSha: string, paths: string[]) =>
+      Promise.all(paths.map((path) => blobOid(treeSha, path))),
     readBlob: async () => null,
     nameStatus: async () => options.nameStatus ?? [],
     generatedPaths: async () => new Set<string>(),
@@ -183,6 +191,47 @@ describe('loadPr', () => {
 
     expect(result.pr.state).toBe('closed');
     expect(result.pr.mergeCommitSha).toBeNull();
+  });
+});
+
+describe('loadPr concurrency', () => {
+  beforeEach(() => {
+    resetLoadPrForTests();
+  });
+
+  test('two concurrent loads for the same PR call github.getPull once', async () => {
+    // Mirrors how the pr, diff, and hover routes each call loadPr on the
+    // same page load: fired together, before either has settled.
+    let getPullCalls = 0;
+    const github = fakeGitHub({
+      onGetPull: () => {
+        getPullCalls += 1;
+      },
+    });
+    const stores = fakeStores();
+
+    const [firstResult, secondResult] = await Promise.all([
+      loadPr({ github, stores, trunkFor }, 'o', 'r', 1),
+      loadPr({ github, stores, trunkFor }, 'o', 'r', 1),
+    ]);
+
+    expect(getPullCalls).toBe(1);
+    expect(firstResult).toEqual(secondResult);
+  });
+
+  test('a later load for the same PR runs fresh, after the first settles', async () => {
+    let getPullCalls = 0;
+    const github = fakeGitHub({
+      onGetPull: () => {
+        getPullCalls += 1;
+      },
+    });
+    const stores = fakeStores();
+
+    await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+    await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+
+    expect(getPullCalls).toBe(2);
   });
 });
 

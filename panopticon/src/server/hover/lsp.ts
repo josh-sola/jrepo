@@ -55,8 +55,17 @@ function markedStringToMarkdown(value: MarkedString): string {
   return ['```' + value.language, value.value, '```'].join('\n');
 }
 
-function hoverContentsToMarkdown(contents: Hover['contents']): string | null {
-  if (isMarkupContent(contents)) return contents.value;
+// Servers that answer in plaintext (or fall back to it) send a bare
+// signature; fence it so the viewer shows code, not a wrapped paragraph.
+export function hoverContentsToMarkdown(
+  contents: Hover['contents'],
+): string | null {
+  if (isMarkupContent(contents)) {
+    if (contents.value.length === 0) return null;
+    return contents.kind === 'plaintext'
+      ? ['```', contents.value, '```'].join('\n')
+      : contents.value;
+  }
   if (Array.isArray(contents)) {
     const parts = contents
       .map(markedStringToMarkdown)
@@ -123,7 +132,11 @@ export class LspClient {
       const initParams: InitializeParams = {
         processId: process.pid,
         rootUri,
-        capabilities: {},
+        // Without this, `tsc --lsp` answers hover in plaintext with no code
+        // fence, and the viewer renders the signature as prose.
+        capabilities: {
+          textDocument: { hover: { contentFormat: ['markdown', 'plaintext'] } },
+        },
         workspaceFolders: [{ uri: rootUri, name: 'root' }],
         initializationOptions: this.options.initializationOptions,
       };

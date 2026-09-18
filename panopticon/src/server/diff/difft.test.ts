@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertDifftVersion, parseDifftOutput, runDifft } from './difft.ts';
@@ -118,6 +124,30 @@ describe('runDifft', () => {
 
     const result = await runDifft(oldPath, newPath2);
     expect(result.language.startsWith('Text')).toBe(true);
+  });
+
+  test('kills the process and throws once it runs past the timeout', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'panopticon-difft-timeout-test-'));
+    const fakeDifft = join(dir, 'difft');
+    // `exec` replaces the shell with `sleep` in the same process, so
+    // proc.kill() actually reaches the process that is still running past
+    // the timeout instead of an orphaned grandchild holding stdout open.
+    writeFileSync(fakeDifft, '#!/bin/sh\nexec sleep 5\n');
+    chmodSync(fakeDifft, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${dir}:${originalPath}`;
+
+    try {
+      await expect(
+        runDifft(
+          join(FIXTURES, 'typescript', 'old.ts'),
+          join(FIXTURES, 'typescript', 'new.ts'),
+          200,
+        ),
+      ).rejects.toThrow(/^difft timed out after 0\.2s on /);
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 });
 

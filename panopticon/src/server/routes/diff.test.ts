@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { PrDiffResponse } from '../../shared/api.ts';
 import type { PrFile, PrSummary } from '../../shared/github.ts';
 import { openDb } from '../db.ts';
+import { GitHubError } from '../github/api.ts';
 import { diffRouter, type DiffRouterDeps } from './diff.ts';
 
 const FIXTURES = join(import.meta.dir, '..', 'diff', '__fixtures__');
@@ -168,6 +169,58 @@ describe('diffRouter', () => {
     const router = mountedRouter(deps);
     await router.request('/api/pr/acme/widgets/42/diff');
     expect(calls).toEqual([['acme', 'widgets', 42]]);
+
+    db.close();
+  });
+
+  test('a throwing loadPr yields a 500 with a JSON error body', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'panopticon-diff-route-test-'));
+    const db = openDb(join(dir, 'test.sqlite'));
+
+    const deps: DiffRouterDeps = {
+      loadPr: async () => {
+        throw new Error('boom');
+      },
+      storeFor: async () => ({
+        readBlob: async () => null,
+        generatedPaths: async () => new Set(),
+      }),
+      db,
+      tmpDir: dir,
+      rules: [],
+    };
+
+    const router = mountedRouter(deps);
+    const res = await router.request('/api/pr/acme/widgets/42/diff');
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('boom');
+
+    db.close();
+  });
+
+  test('a GitHubError 404 from loadPr yields a 404 with the GitHub message', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'panopticon-diff-route-test-'));
+    const db = openDb(join(dir, 'test.sqlite'));
+
+    const deps: DiffRouterDeps = {
+      loadPr: async () => {
+        throw new GitHubError(404, 'Not Found');
+      },
+      storeFor: async () => ({
+        readBlob: async () => null,
+        generatedPaths: async () => new Set(),
+      }),
+      db,
+      tmpDir: dir,
+      rules: [],
+    };
+
+    const router = mountedRouter(deps);
+    const res = await router.request('/api/pr/acme/widgets/42/diff');
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Not Found');
 
     db.close();
   });
