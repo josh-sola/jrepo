@@ -8,6 +8,7 @@ import prefsFixture from './fixtures/prefs.json';
 import stackFixture from './fixtures/stack.json';
 import hoverFixture from './fixtures/hover.json';
 import hoverStatusFixture from './fixtures/hover-status.json';
+import reviewInboxFixture from './fixtures/reviewInbox.json';
 import type {
   CreateReviewCommentRequest,
   PrResponse,
@@ -35,6 +36,7 @@ const STATIC_ROUTES: { pattern: RegExp; fixture: Fixture }[] = [
     fixture: hoverFixture,
   },
   { pattern: /^\/api\/prefs$/, fixture: prefsFixture },
+  { pattern: /^\/api\/review-inbox$/, fixture: reviewInboxFixture },
 ];
 
 const PR_PATTERN = /^\/api\/pr\/[^/]+\/[^/]+\/\d+$/;

@@ -300,6 +300,177 @@ function isReviewState(value: unknown): value is ReviewState {
   );
 }
 
+// ---------------------------------------------------------------------------
+// GraphQL search results for the review inbox. `search` returns a union of
+// result types, so a node not carrying the PullRequest fields (an Issue, a
+// Repository, ...) is skipped rather than treated as an error.
+
+interface RawSearchAuthor {
+  __typename: string;
+  login: string;
+  avatarUrl: string | null;
+}
+
+function isRawSearchAuthor(value: unknown): value is RawSearchAuthor {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.__typename === 'string' &&
+    typeof value.login === 'string' &&
+    isStringOrNull(value.avatarUrl)
+  );
+}
+
+interface RawSearchReviewAuthor {
+  __typename: string;
+  login: string;
+}
+
+function isRawSearchReviewAuthor(
+  value: unknown,
+): value is RawSearchReviewAuthor {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.__typename === 'string' && typeof value.login === 'string'
+  );
+}
+
+interface RawSearchReview {
+  state: string;
+  submittedAt: string | null;
+  author: RawSearchReviewAuthor | null;
+}
+
+function isRawSearchReview(value: unknown): value is RawSearchReview {
+  if (!isRecord(value)) return false;
+  const author = value.author;
+  return (
+    typeof value.state === 'string' &&
+    isStringOrNull(value.submittedAt) &&
+    (author === null || isRawSearchReviewAuthor(author))
+  );
+}
+
+interface RawSearchPullRequest {
+  __typename: 'PullRequest';
+  number: number;
+  title: string;
+  url: string;
+  isDraft: boolean;
+  createdAt: string;
+  updatedAt: string;
+  additions: number;
+  deletions: number;
+  repository: { name: string; owner: { login: string } };
+  author: RawSearchAuthor | null;
+  latestOpinionatedReviews: { nodes: RawSearchReview[] };
+}
+
+function isRawSearchPullRequest(value: unknown): value is RawSearchPullRequest {
+  if (!isRecord(value) || value.__typename !== 'PullRequest') return false;
+  const repository = value.repository;
+  if (!isRecord(repository) || typeof repository.name !== 'string') {
+    return false;
+  }
+  const owner = repository.owner;
+  if (!isRecord(owner) || typeof owner.login !== 'string') return false;
+  const reviews = value.latestOpinionatedReviews;
+  if (
+    !isRecord(reviews) ||
+    !Array.isArray(reviews.nodes) ||
+    !reviews.nodes.every(isRawSearchReview)
+  ) {
+    return false;
+  }
+  return (
+    typeof value.number === 'number' &&
+    typeof value.title === 'string' &&
+    typeof value.url === 'string' &&
+    typeof value.isDraft === 'boolean' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    typeof value.additions === 'number' &&
+    typeof value.deletions === 'number' &&
+    (value.author === null || isRawSearchAuthor(value.author))
+  );
+}
+
+function isReviewInboxSearchResponse(
+  value: unknown,
+): value is { search: { nodes: unknown[] } } {
+  if (!isRecord(value)) return false;
+  const search = value.search;
+  return isRecord(search) && Array.isArray(search.nodes);
+}
+
+// A GraphQL author's __typename is 'Bot' for GitHub Apps and integrations;
+// a login ending in "[bot]" catches the rest (Dependabot, etc.).
+function isHumanAuthor(
+  author: { __typename: string; login: string } | null,
+): boolean {
+  if (!author) return false;
+  return author.__typename !== 'Bot' && !author.login.endsWith('[bot]');
+}
+
+export interface ReviewInboxReview {
+  state: ReviewState;
+  submittedAt: string | null;
+  authorLogin: string | null;
+  isHuman: boolean;
+}
+
+// One PR the review inbox's two searches found. `reviews` is GitHub's
+// latestOpinionatedReviews: the latest APPROVED/CHANGES_REQUESTED review per
+// reviewer, so categorizeReviewInbox never has to reduce it itself.
+export interface ReviewInboxCandidate {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  draft: boolean;
+  createdAt: string;
+  updatedAt: string;
+  additions: number;
+  deletions: number;
+  author: PrUser;
+  reviews: ReviewInboxReview[];
+}
+
+function mapSearchAuthor(raw: RawSearchAuthor | null): PrUser {
+  if (!raw) return { login: 'ghost', avatarUrl: null, isBot: false };
+  return {
+    login: raw.login,
+    avatarUrl: raw.avatarUrl,
+    isBot: raw.__typename === 'Bot' || raw.login.endsWith('[bot]'),
+  };
+}
+
+function mapSearchReview(raw: RawSearchReview): ReviewInboxReview {
+  return {
+    state: isReviewState(raw.state) ? raw.state : 'COMMENTED',
+    submittedAt: raw.submittedAt,
+    authorLogin: raw.author?.login ?? null,
+    isHuman: isHumanAuthor(raw.author),
+  };
+}
+
+function mapSearchPullRequest(raw: RawSearchPullRequest): ReviewInboxCandidate {
+  return {
+    owner: raw.repository.owner.login,
+    repo: raw.repository.name,
+    number: raw.number,
+    title: raw.title,
+    url: raw.url,
+    draft: raw.isDraft,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    additions: raw.additions,
+    deletions: raw.deletions,
+    author: mapSearchAuthor(raw.author),
+    reviews: raw.latestOpinionatedReviews.nodes.map(mapSearchReview),
+  };
+}
+
 interface RawReview {
   id: number;
   user: RawUser | null;
@@ -780,6 +951,7 @@ export interface GitHubApi {
     body: string,
   ): Promise<void>;
   setThreadResolved(threadNodeId: string, resolved: boolean): Promise<void>;
+  searchReviewInbox(query: string): Promise<ReviewInboxCandidate[]>;
 }
 
 function isNotModifiedError(error: unknown): boolean {
@@ -901,6 +1073,35 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             newBase
             createdAt
             actor { login }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const REVIEW_INBOX_SEARCH_QUERY = `
+query($q: String!) {
+  search(query: $q, type: ISSUE, first: 50) {
+    nodes {
+      __typename
+      ... on PullRequest {
+        number
+        title
+        url
+        isDraft
+        createdAt
+        updatedAt
+        additions
+        deletions
+        reviewDecision
+        repository { name owner { login } }
+        author { __typename login avatarUrl }
+        latestOpinionatedReviews(first: 20) {
+          nodes {
+            state
+            submittedAt
+            author { __typename login }
           }
         }
       }
@@ -1264,6 +1465,29 @@ class OctokitGitHubApi implements GitHubApi {
     } catch (error) {
       throw toGitHubError(error);
     }
+  }
+
+  async searchReviewInbox(query: string): Promise<ReviewInboxCandidate[]> {
+    let response: unknown;
+    try {
+      response = await this.graphqlClient(REVIEW_INBOX_SEARCH_QUERY, {
+        q: query,
+      });
+    } catch (error) {
+      throw toGitHubError(error);
+    }
+    if (!isReviewInboxSearchResponse(response)) {
+      throw new Error(
+        'unexpected shape for a review-inbox search GraphQL response',
+      );
+    }
+    const candidates: ReviewInboxCandidate[] = [];
+    for (const node of response.search.nodes) {
+      if (isRawSearchPullRequest(node)) {
+        candidates.push(mapSearchPullRequest(node));
+      }
+    }
+    return candidates;
   }
 }
 

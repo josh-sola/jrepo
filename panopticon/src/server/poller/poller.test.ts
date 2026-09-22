@@ -75,6 +75,7 @@ function fakeGitHub(options: FakeGitHubOptions = {}): GitHubApi {
     createReviewComment: async () => {},
     replyToReviewComment: async () => {},
     setThreadResolved: async () => {},
+    searchReviewInbox: async () => [],
   };
 }
 

@@ -1,16 +1,15 @@
-import { useState } from 'react';
-import type { FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link } from 'react-router';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useInbox } from '../hooks/useInbox.ts';
 import { StackGraph } from '../components/stack/StackGraph.tsx';
+import { GoToPrForm } from '../components/GoToPrForm.tsx';
+import { LoadingSkeleton } from '../components/LoadingSkeleton.tsx';
+import { ViewToggle } from '../components/ViewToggle.tsx';
+import { updatedLabel } from '../lib/time.ts';
 import type { PrState, PrSummary } from '../../shared/github.ts';
 import type { InboxStack } from '../../shared/inbox.ts';
 import type { OwnerRepo } from './inboxInput.ts';
-import { parsePrInput } from './inboxInput.ts';
 
 type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline';
 
@@ -24,18 +23,6 @@ const STATE_BADGES: Record<PrState, { label: string; variant: BadgeVariant }> =
 function stateBadge(pr: PrSummary): { label: string; variant: BadgeVariant } {
   if (pr.draft) return { label: 'Draft', variant: 'outline' };
   return STATE_BADGES[pr.state];
-}
-
-function updatedLabel(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return iso;
-  const minutes = Math.round((Date.now() - then) / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return `${days}d ago`;
 }
 
 function firstOwnerRepo(
@@ -96,55 +83,21 @@ function StackCard({ stack }: { stack: InboxStack }) {
   );
 }
 
-function LoadingSkeleton() {
-  return (
-    <div className="flex flex-col gap-2">
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-2/3" />
-    </div>
-  );
-}
-
 export function InboxPage() {
   const inboxQuery = useInbox();
-  const navigate = useNavigate();
-  const [input, setInput] = useState('');
-  const [inputError, setInputError] = useState<string | null>(null);
-
-  function goToPr(event: FormEvent) {
-    event.preventDefault();
-    const defaultOwnerRepo = firstOwnerRepo(
-      inboxQuery.data?.stacks ?? [],
-      inboxQuery.data?.recent ?? [],
-    );
-    const parsed = parsePrInput(input, defaultOwnerRepo);
-    if (!parsed) {
-      setInputError(
-        defaultOwnerRepo
-          ? 'Enter a PR number, owner/repo#number, or a GitHub PR URL.'
-          : 'Enter owner/repo#number or a GitHub PR URL — there is no default repo yet.',
-      );
-      return;
-    }
-    setInputError(null);
-    navigate(`/pr/${parsed.owner}/${parsed.repo}/${parsed.number}`);
-  }
+  const defaultOwnerRepo = firstOwnerRepo(
+    inboxQuery.data?.stacks ?? [],
+    inboxQuery.data?.recent ?? [],
+  );
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 p-6">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold">Inbox</h1>
-        <form onSubmit={goToPr} className="flex gap-2">
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="1234, owner/repo#1234, or a GitHub PR URL"
-            className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
-          />
-          <Button type="submit">Go</Button>
-        </form>
-        {inputError && <p className="text-sm text-destructive">{inputError}</p>}
+      <header className="flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold">Inbox</h1>
+          <ViewToggle />
+        </div>
+        <GoToPrForm defaultOwnerRepo={defaultOwnerRepo} />
       </header>
 
       <section className="flex flex-col gap-2">

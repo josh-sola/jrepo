@@ -15,6 +15,7 @@ import { commentsRouter } from './routes/comments.ts';
 import { diffRouter } from './routes/diff.ts';
 import { eventsRouter } from './routes/events.ts';
 import { inboxRouter } from './routes/inbox.ts';
+import { reviewInboxRouter } from './routes/reviewInbox.ts';
 import { healthRouter } from './routes/health.ts';
 import { hoverRouter } from './routes/hover.ts';
 import { loadPr, prRouter } from './routes/pr.ts';
@@ -80,6 +81,15 @@ export function buildApp(deps: AppDeps): Hono {
   app.route(
     '/api/inbox',
     inboxRouter({ prs, repos: Object.keys(config.repos), graphiteFor }),
+  );
+  app.route(
+    '/api/review-inbox',
+    reviewInboxRouter({
+      github,
+      login: config.githubLogin,
+      repos: Object.keys(config.repos),
+      clock: Date.now,
+    }),
   );
   app.use('/api/pr/:owner/:repo/:number', viewRecorder(prs));
   app.route(

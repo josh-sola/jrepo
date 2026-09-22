@@ -77,6 +77,9 @@ function fakeGitHub(options: FakeGitHubOptions = {}): GitHubApi {
       options.onResolve?.(threadId, resolved);
       if (options.resolveError) throw options.resolveError;
     },
+    searchReviewInbox: () => {
+      throw new Error('not used');
+    },
   };
 }
 

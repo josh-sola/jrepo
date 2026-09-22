@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createBrowserRouter, RouterProvider } from 'react-router';
-import { InboxPage, ReviewPage } from './App.tsx';
+import { InboxPage, ReviewInboxPage, ReviewPage } from './App.tsx';
 import { ThemeProvider } from './theme.tsx';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import './index.css';
@@ -14,6 +14,7 @@ if (import.meta.env.VITE_MOCK) {
 
 const router = createBrowserRouter([
   { path: '/', Component: InboxPage },
+  { path: '/inbox', Component: ReviewInboxPage },
   { path: '/pr/:owner/:repo/:number', Component: ReviewPage },
 ]);
 

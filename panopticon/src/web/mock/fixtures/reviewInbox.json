@@ -1,0 +1,95 @@
+{
+  "sections": {
+    "returned": [
+      {
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 101,
+        "title": "actuation: add select support",
+        "url": "https://github.com/acme/widgets/pull/101",
+        "draft": false,
+        "author": {
+          "login": "josh-bassin",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        "updatedAt": "2026-09-22T14:00:00Z",
+        "additions": 42,
+        "deletions": 8,
+        "reviewers": [{ "login": "ann-reviewer", "state": "CHANGES_REQUESTED" }]
+      }
+    ],
+    "needsReview": [
+      {
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 202,
+        "title": "worker: resolve values lazily",
+        "url": "https://github.com/acme/widgets/pull/202",
+        "draft": false,
+        "author": {
+          "login": "bo-author",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/2?v=4"
+        },
+        "updatedAt": "2026-09-22T13:30:00Z",
+        "additions": 120,
+        "deletions": 15,
+        "reviewers": []
+      }
+    ],
+    "approved": [
+      {
+        "owner": "acme",
+        "repo": "gadgets",
+        "number": 303,
+        "title": "docs: describe the endpoint",
+        "url": "https://github.com/acme/gadgets/pull/303",
+        "draft": false,
+        "author": {
+          "login": "josh-bassin",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        "updatedAt": "2026-09-22T12:00:00Z",
+        "additions": 10,
+        "deletions": 2,
+        "reviewers": [{ "login": "ann-reviewer", "state": "APPROVED" }]
+      }
+    ],
+    "waiting": [
+      {
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 404,
+        "title": "types: add wire schemas",
+        "url": "https://github.com/acme/widgets/pull/404",
+        "draft": false,
+        "author": {
+          "login": "josh-bassin",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        "updatedAt": "2026-09-22T11:15:00Z",
+        "additions": 30,
+        "deletions": 4,
+        "reviewers": []
+      }
+    ],
+    "drafts": [
+      {
+        "owner": "acme",
+        "repo": "gadgets",
+        "number": 505,
+        "title": "wip: spike a new collapse rule",
+        "url": "https://github.com/acme/gadgets/pull/505",
+        "draft": true,
+        "author": {
+          "login": "josh-bassin",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        "updatedAt": "2026-09-22T10:00:00Z",
+        "additions": 5,
+        "deletions": 1,
+        "reviewers": []
+      }
+    ]
+  },
+  "fetchedAt": "2026-09-22T14:05:00Z"
+}
