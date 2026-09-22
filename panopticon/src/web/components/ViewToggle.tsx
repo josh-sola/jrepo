@@ -2,11 +2,11 @@ import { Link, useLocation } from 'react-router';
 import { cn } from '@/lib/utils';
 
 const VIEWS = [
-  { to: '/inbox', label: 'Inbox' },
-  { to: '/', label: 'Stacks' },
+  { to: '/', label: 'Inbox' },
+  { to: '/stacks', label: 'Stacks' },
 ] as const;
 
-// Segmented switch between the review inbox (/inbox) and the stack view (/),
+// Segmented switch between the review inbox (/) and the stack view (/stacks),
 // shown at the top of both pages.
 export function ViewToggle() {
   const location = useLocation();

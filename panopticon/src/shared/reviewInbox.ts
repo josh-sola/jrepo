@@ -7,6 +7,7 @@ export type ReviewInboxReviewerState = 'APPROVED' | 'CHANGES_REQUESTED';
 
 export interface ReviewInboxReviewer {
   login: string;
+  avatarUrl: string;
   state: ReviewInboxReviewerState;
 }
 

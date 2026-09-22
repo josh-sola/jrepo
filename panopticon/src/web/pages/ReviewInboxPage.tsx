@@ -1,9 +1,9 @@
 import { Link } from 'react-router';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useReviewInbox } from '../hooks/useReviewInbox.ts';
 import { GoToPrForm } from '../components/GoToPrForm.tsx';
 import { LoadingSkeleton } from '../components/LoadingSkeleton.tsx';
+import { PersonChip } from '../components/PersonChip.tsx';
 import { ViewToggle } from '../components/ViewToggle.tsx';
 import { updatedLabel } from '../lib/time.ts';
 import type {
@@ -58,25 +58,18 @@ function ReviewInboxRow({
         {item.owner}/{item.repo}#{item.number}
       </span>
       {showAuthor && (
-        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          {item.author.avatarUrl && (
-            <img
-              src={item.author.avatarUrl}
-              alt=""
-              className="h-4 w-4 rounded-full"
-            />
-          )}
-          {item.author.login}
-        </span>
+        <PersonChip
+          login={item.author.login}
+          avatarUrl={item.author.avatarUrl}
+        />
       )}
       {item.reviewers.map((reviewer) => (
-        <Badge
+        <PersonChip
           key={reviewer.login}
-          variant={reviewer.state === 'APPROVED' ? 'secondary' : 'destructive'}
-          className="shrink-0 text-[10px]"
-        >
-          {reviewer.login}
-        </Badge>
+          login={reviewer.login}
+          avatarUrl={reviewer.avatarUrl}
+          state={reviewer.state}
+        />
       ))}
       <span className="shrink-0 text-xs text-muted-foreground">
         +{item.additions} -{item.deletions}
@@ -88,8 +81,8 @@ function ReviewInboxRow({
   );
 }
 
-// Empty sections still render their heading so the page's layout doesn't
-// jump around as sections fill in.
+// An empty section renders nothing at all, not even its heading, so the
+// page doesn't fill up with "Nothing here" placeholders.
 function Section({
   title,
   items,
@@ -99,24 +92,21 @@ function Section({
   items: ReviewInboxItem[];
   showAuthor: boolean;
 }) {
+  if (items.length === 0) return null;
   return (
     <section className="flex flex-col gap-2">
       <h2 className="text-sm font-semibold text-muted-foreground">
         {title} ({items.length})
       </h2>
-      {items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing here.</p>
-      ) : (
-        <div className="overflow-hidden rounded-lg border bg-card text-card-foreground">
-          <ol className="divide-y divide-border">
-            {items.map((item) => (
-              <li key={itemKey(item)}>
-                <ReviewInboxRow item={item} showAuthor={showAuthor} />
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+      <div className="overflow-hidden rounded-lg border bg-card text-card-foreground">
+        <ol className="divide-y divide-border">
+          {items.map((item) => (
+            <li key={itemKey(item)}>
+              <ReviewInboxRow item={item} showAuthor={showAuthor} />
+            </li>
+          ))}
+        </ol>
+      </div>
     </section>
   );
 }
@@ -124,6 +114,11 @@ function Section({
 export function ReviewInboxPage() {
   const reviewInboxQuery = useReviewInbox();
   const defaultOwnerRepo = firstOwnerRepo(reviewInboxQuery.data?.sections);
+  const isEmpty =
+    !!reviewInboxQuery.data &&
+    SECTIONS.every(
+      ({ key }) => reviewInboxQuery.data.sections[key].length === 0,
+    );
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 p-6">
@@ -150,7 +145,11 @@ export function ReviewInboxPage() {
           </Button>
         </div>
       )}
+      {reviewInboxQuery.data && isEmpty && (
+        <p className="text-sm text-muted-foreground">Nothing in your inbox.</p>
+      )}
       {reviewInboxQuery.data &&
+        !isEmpty &&
         SECTIONS.map(({ key, title, showAuthor }) => (
           <Section
             key={key}

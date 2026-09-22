@@ -323,6 +323,7 @@ function isRawSearchAuthor(value: unknown): value is RawSearchAuthor {
 interface RawSearchReviewAuthor {
   __typename: string;
   login: string;
+  avatarUrl: string | null;
 }
 
 function isRawSearchReviewAuthor(
@@ -330,7 +331,9 @@ function isRawSearchReviewAuthor(
 ): value is RawSearchReviewAuthor {
   if (!isRecord(value)) return false;
   return (
-    typeof value.__typename === 'string' && typeof value.login === 'string'
+    typeof value.__typename === 'string' &&
+    typeof value.login === 'string' &&
+    isStringOrNull(value.avatarUrl)
   );
 }
 
@@ -415,6 +418,7 @@ export interface ReviewInboxReview {
   state: ReviewState;
   submittedAt: string | null;
   authorLogin: string | null;
+  authorAvatarUrl: string | null;
   isHuman: boolean;
 }
 
@@ -450,6 +454,7 @@ function mapSearchReview(raw: RawSearchReview): ReviewInboxReview {
     state: isReviewState(raw.state) ? raw.state : 'COMMENTED',
     submittedAt: raw.submittedAt,
     authorLogin: raw.author?.login ?? null,
+    authorAvatarUrl: raw.author?.avatarUrl ?? null,
     isHuman: isHumanAuthor(raw.author),
   };
 }
@@ -1101,7 +1106,7 @@ query($q: String!) {
           nodes {
             state
             submittedAt
-            author { __typename login }
+            author { __typename login avatarUrl }
           }
         }
       }

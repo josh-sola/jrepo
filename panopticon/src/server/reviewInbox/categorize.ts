@@ -22,7 +22,11 @@ function humanReviewers(
     if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') {
       continue;
     }
-    reviewers.push({ login: review.authorLogin, state: review.state });
+    reviewers.push({
+      login: review.authorLogin,
+      avatarUrl: review.authorAvatarUrl ?? '',
+      state: review.state,
+    });
   }
   return reviewers;
 }

@@ -9,6 +9,7 @@ function fakeReview(
     state: 'APPROVED',
     submittedAt: '2026-01-01T00:00:00Z',
     authorLogin: 'reviewer',
+    authorAvatarUrl: 'https://avatars.githubusercontent.com/u/9?v=4',
     isHuman: true,
     ...overrides,
   };
@@ -38,7 +39,13 @@ describe('categorizeReviewInbox', () => {
   test('puts a non-draft PR with a human CHANGES_REQUESTED in returned', () => {
     const pr = fakeCandidate({
       number: 1,
-      reviews: [fakeReview({ state: 'CHANGES_REQUESTED', authorLogin: 'ann' })],
+      reviews: [
+        fakeReview({
+          state: 'CHANGES_REQUESTED',
+          authorLogin: 'ann',
+          authorAvatarUrl: 'https://avatars.githubusercontent.com/u/4?v=4',
+        }),
+      ],
     });
 
     const sections = categorizeReviewInbox('josh', [pr], []);
@@ -48,7 +55,30 @@ describe('categorizeReviewInbox', () => {
     expect(sections.waiting).toEqual([]);
     expect(sections.drafts).toEqual([]);
     expect(sections.returned[0]?.reviewers).toEqual([
-      { login: 'ann', state: 'CHANGES_REQUESTED' },
+      {
+        login: 'ann',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/4?v=4',
+        state: 'CHANGES_REQUESTED',
+      },
+    ]);
+  });
+
+  test('falls back to an empty avatarUrl when the review author has none', () => {
+    const pr = fakeCandidate({
+      number: 12,
+      reviews: [
+        fakeReview({
+          state: 'APPROVED',
+          authorLogin: 'ann',
+          authorAvatarUrl: null,
+        }),
+      ],
+    });
+
+    const sections = categorizeReviewInbox('josh', [pr], []);
+
+    expect(sections.approved[0]?.reviewers).toEqual([
+      { login: 'ann', avatarUrl: '', state: 'APPROVED' },
     ]);
   });
 

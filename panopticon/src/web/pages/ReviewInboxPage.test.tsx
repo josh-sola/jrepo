@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryRouter, RouterProvider } from 'react-router';
+import { createMemoryRouter, Navigate, RouterProvider } from 'react-router';
 import type {
   ReviewInboxItem,
   ReviewInboxResponse,
@@ -72,8 +72,9 @@ async function renderAt(path: string): Promise<HTMLDivElement> {
   root = createRoot(container);
   const router = createMemoryRouter(
     [
-      { path: '/', Component: InboxPage },
-      { path: '/inbox', Component: ReviewInboxPage },
+      { path: '/', Component: ReviewInboxPage },
+      { path: '/stacks', Component: InboxPage },
+      { path: '/inbox', element: <Navigate to="/" replace /> },
     ],
     { initialEntries: [path] },
   );
@@ -117,7 +118,7 @@ describe('ReviewInboxPage', () => {
       fetchedAt: '2026-01-01T00:00:00Z',
     });
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
     await settle();
 
     expect(el.textContent).toContain('returned pr');
@@ -150,30 +151,50 @@ describe('ReviewInboxPage', () => {
       fetchedAt: '2026-01-01T00:00:00Z',
     });
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
     await settle();
 
     expect(el.textContent).toContain('ann-author');
   });
 
-  test('renders a "Nothing here" line for an empty section but keeps its heading', async () => {
-    stubFetch(emptyResponse());
+  test('hides a section entirely, heading included, when it has no PRs', async () => {
+    stubFetch({
+      sections: {
+        returned: [],
+        needsReview: [fakeItem({ number: 2, title: 'needs review pr' })],
+        approved: [],
+        waiting: [],
+        drafts: [],
+      },
+      fetchedAt: '2026-01-01T00:00:00Z',
+    });
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
     await settle();
 
-    expect(el.textContent).toContain('Returned to you');
     expect(el.textContent).toContain('Needs your review');
-    const nothingHereCount = (el.textContent?.match(/Nothing here/g) ?? [])
-      .length;
-    expect(nothingHereCount).toBe(5);
+    expect(el.textContent).not.toContain('Returned to you');
+    expect(el.textContent).not.toContain('Approved');
+    expect(el.textContent).not.toContain('Waiting for review');
+    expect(el.textContent).not.toContain('Drafts');
+  });
+
+  test('shows a muted line when every section is empty', async () => {
+    stubFetch(emptyResponse());
+
+    const el = await renderAt('/');
+    await settle();
+
+    expect(el.textContent).toContain('Nothing in your inbox.');
+    expect(el.textContent).not.toContain('Returned to you');
+    expect(el.textContent).not.toContain('Needs your review');
   });
 
   test('shows a loading skeleton before the response arrives', async () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch;
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
 
     expect(
       el.querySelectorAll('[data-slot="skeleton"]').length,
@@ -192,7 +213,7 @@ describe('ReviewInboxPage', () => {
       });
     }) as unknown as typeof fetch;
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
     await settle();
 
     expect(el.textContent).toContain('Could not load the review inbox.');
@@ -210,20 +231,20 @@ describe('ReviewInboxPage', () => {
     expect(calls).toBe(2);
   });
 
-  test('the toggle links to /inbox and / and marks the active view', async () => {
+  test('the toggle links to / and /stacks and marks the active view', async () => {
     stubFetch(emptyResponse());
 
-    const el = await renderAt('/inbox');
+    const el = await renderAt('/');
     await settle();
 
     const links = [...el.querySelectorAll('nav a')];
-    const inboxLink = links.find((a) => a.getAttribute('href') === '/inbox');
-    const stacksLink = links.find((a) => a.getAttribute('href') === '/');
+    const inboxLink = links.find((a) => a.getAttribute('href') === '/');
+    const stacksLink = links.find((a) => a.getAttribute('href') === '/stacks');
     expect(inboxLink?.getAttribute('aria-current')).toBe('page');
     expect(stacksLink?.getAttribute('aria-current')).toBeNull();
   });
 
-  test('the stacks page toggle marks / as active', async () => {
+  test('the stacks page toggle marks /stacks as active', async () => {
     const inboxResponse = {
       stacks: [],
       recent: [],
@@ -236,13 +257,22 @@ describe('ReviewInboxPage', () => {
         headers: { 'Content-Type': 'application/json' },
       })) as unknown as typeof fetch;
 
-    const el = await renderAt('/');
+    const el = await renderAt('/stacks');
     await settle();
 
     const links = [...el.querySelectorAll('nav a')];
-    const stacksLink = links.find((a) => a.getAttribute('href') === '/');
-    const inboxLink = links.find((a) => a.getAttribute('href') === '/inbox');
+    const stacksLink = links.find((a) => a.getAttribute('href') === '/stacks');
+    const inboxLink = links.find((a) => a.getAttribute('href') === '/');
     expect(stacksLink?.getAttribute('aria-current')).toBe('page');
     expect(inboxLink?.getAttribute('aria-current')).toBeNull();
+  });
+
+  test('/inbox redirects to /', async () => {
+    stubFetch(emptyResponse());
+
+    const el = await renderAt('/inbox');
+    await settle();
+
+    expect(el.textContent).toContain('Nothing in your inbox.');
   });
 });
