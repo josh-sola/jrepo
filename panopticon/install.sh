@@ -32,6 +32,10 @@ render_plist() {
   content="${content//__WORKDIR__/${REPO_ROOT}}"
   content="${content//__OUT_LOG__/${OUT_LOG}}"
   content="${content//__ERR_LOG__/${ERR_LOG}}"
+  # launchd starts agents with only /usr/bin:/bin:/usr/sbin:/sbin, which has
+  # none of gh, difft, wt, or the hover language servers. Freeze the
+  # installer's PATH into the plist instead.
+  content="${content//__PATH__/${PATH}}"
   printf '%s' "${content}"
 }
 

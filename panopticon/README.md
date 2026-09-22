@@ -17,6 +17,21 @@ bun run dev
 This starts the Bun server on port 7433 and the Vite dev server together.
 Vite proxies `/api` requests to the Bun server.
 
+## Run it as a service
+
+```sh
+./install.sh install
+```
+
+This builds the web app and loads a login LaunchAgent that keeps the server
+running. Run it from the main checkout, not a worktree: the agent runs from
+whatever directory you install it from. Set `"port": 80` in the config to
+reach it at `http://panopticon.localhost` with no port. macOS lets a normal
+user listen on port 80, and browsers send any `*.localhost` name to this Mac.
+
+The plist keeps the `PATH` you ran the installer with, so re-run the installer
+after moving `gh`, `difft`, or `wt`.
+
 ## Run the checks
 
 ```sh
