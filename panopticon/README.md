@@ -15,7 +15,10 @@ bun run dev
 ```
 
 This starts the Bun server on port 7433 and the Vite dev server together.
-Vite proxies `/api` requests to the Bun server.
+Vite proxies `/api` requests to the Bun server. The dev server reads the same
+config file as the installed service, but `PANOPTICON_PORT` and
+`PANOPTICON_DATA_DIR` give it its own port and its own database under
+`~/.local/share/panopticon-dev/`, so both can run at once.
 
 ## Run it as a service
 

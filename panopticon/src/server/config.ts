@@ -133,7 +133,20 @@ export function loadConfig(path: string = configPath()): Config {
     );
   }
 
-  const port = raw.port === undefined ? DEFAULT_PORT : raw.port;
+  // PANOPTICON_PORT and PANOPTICON_DATA_DIR let `bun run dev` share the
+  // installed service's config without taking its port or its database.
+  const envPort = process.env.PANOPTICON_PORT;
+  if (envPort !== undefined && !/^\d+$/.test(envPort)) {
+    throw new ConfigError(
+      `PANOPTICON_PORT must be a number, got "${envPort}".`,
+    );
+  }
+  const port =
+    envPort !== undefined
+      ? Number(envPort)
+      : raw.port === undefined
+        ? DEFAULT_PORT
+        : raw.port;
   if (!isFiniteNumber(port)) {
     throw new ConfigError(
       `panopticon config at ${path}: "port" must be a number.`,
@@ -151,7 +164,8 @@ export function loadConfig(path: string = configPath()): Config {
   }
 
   const dataDir = expandHome(
-    isString(raw.dataDir) ? raw.dataDir : DEFAULT_DATA_DIR,
+    process.env.PANOPTICON_DATA_DIR ??
+      (isString(raw.dataDir) ? raw.dataDir : DEFAULT_DATA_DIR),
   );
 
   let collapseRules = DEFAULT_COLLAPSE_RULES;

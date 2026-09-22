@@ -78,4 +78,31 @@ describe('loadConfig', () => {
       },
     );
   });
+
+  test('PANOPTICON_PORT and PANOPTICON_DATA_DIR override the file', () => {
+    withTempConfig({ port: 80 }, (path, dataDir) => {
+      const envDataDir = `${dataDir}-env`;
+      process.env.PANOPTICON_PORT = '7433';
+      process.env.PANOPTICON_DATA_DIR = envDataDir;
+      try {
+        const config = loadConfig(path);
+        expect(config.port).toBe(7433);
+        expect(config.dataDir).toBe(envDataDir);
+      } finally {
+        delete process.env.PANOPTICON_PORT;
+        delete process.env.PANOPTICON_DATA_DIR;
+      }
+    });
+  });
+
+  test('rejects a non-numeric PANOPTICON_PORT', () => {
+    withTempConfig({}, (path) => {
+      process.env.PANOPTICON_PORT = 'eighty';
+      try {
+        expect(() => loadConfig(path)).toThrow(/PANOPTICON_PORT/);
+      } finally {
+        delete process.env.PANOPTICON_PORT;
+      }
+    });
+  });
 });

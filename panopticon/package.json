@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"bun run dev:server\" \"bun run dev:web\"",
-    "dev:server": "bun --watch src/server/index.ts",
+    "dev:server": "PANOPTICON_PORT=7433 PANOPTICON_DATA_DIR=~/.local/share/panopticon-dev bun --watch src/server/index.ts",
     "dev:web": "vite",
     "build": "vite build",
     "start": "NODE_ENV=production bun src/server/index.ts",
