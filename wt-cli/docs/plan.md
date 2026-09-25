@@ -157,10 +157,10 @@ about that the registry does not.
 | Command | Does |
 |---|---|
 | `wt repo adopt <repo> <path>` | Register an existing clone as base; create the layout and symlink `base`. |
-| `wt tree new <repo> --name "short summary" [--branch <b>] [--profile node,python] [--pi\|--claude\|--codex] [-- <args>...]` | Fetch if stale, create the tree, wire symlinks, copy env files, start provisioning, and print the path. An agent flag opens that agent after provisioning; no flag only creates the tree. |
+| `wt tree new <repo> --name "short summary" [--branch <b>] [--profile node,python] [--pi\|--claude\|--codex\|--devin] [-- <args>...]` | Fetch if stale, create the tree, wire symlinks, copy env files, start provisioning, and print the path. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt tree ls [--repo <r>] [--json]` | Registry with name, branch, state, dirty flag, ahead/behind. |
 | `wt tree path <tree>` | Resolve a name, UUID prefix, or branch to a path. |
-| `wt go [tree] [--repo <repo>] [--pi\|--claude\|--codex] [-- <args>...]` | Open a tree or create it in the named repository. Pi is the default. |
+| `wt go [tree] [--repo <repo>] [--pi\|--claude\|--codex\|--devin] [-- <args>...]` | Open a tree or create it in the named repository. Pi is the default. Devin launches without Planter and without a session label. |
 | `wt cd <tree>` | Shell-function-backed directory change. |
 | `wt tree name [--path <p>]` | Print the nice name for a path, or nothing. |
 | `wt tree status [tree]` | Provisioning state and per-step results. |
@@ -168,10 +168,11 @@ about that the registry does not.
 | `wt llm pi [tree\|<repo>] [-- <args>...]` | Exec `pi` with cwd set and arguments unchanged; a bare repo name means base. |
 | `wt llm claude [tree\|<repo>] [-- <args>...]` | Exec `claude` with cwd set and arguments unchanged; a bare repo name means base. |
 | `wt llm codex [tree\|<repo>] [-- <args>...]` | Exec `codex` with cwd set and arguments unchanged; a bare repo name means base. |
+| `wt llm devin [tree\|<repo>] [-- <args>...]` | Exec `devin` with cwd set and arguments unchanged; a bare repo name means base. |
 | `wt tree rm <tree>` | Tear down, guarding dirty and unpushed work. `--force` to override. |
 | `wt upkeep gc [--repo <r>]` | Reap trees with no commits ahead of trunk and no dirty files. Replaces the auto-cleanup lost with decision 3. |
 | `wt repo sync [<repo>]` | Fetch and fast-forward base; refuse if base is dirty. |
-| `wt repo lift [<repo>] [--pi\|--claude\|--codex] [-- <args>...]` | Move uncommitted work out of base into a fresh tree. An agent flag opens that agent after provisioning; no flag only creates the tree. |
+| `wt repo lift [<repo>] [--pi\|--claude\|--codex\|--devin] [-- <args>...]` | Move uncommitted work out of base into a fresh tree. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt tree env <tree>` | Re-copy configured env files from base into a tree, overwriting what is there. |
 | `wt upkeep doctor` | Reconcile registry against `git worktree list`; report and offer to fix. |
 
@@ -291,15 +292,16 @@ pointing at `wt tree new`. Editing in base is recoverable; committing from base 
 actually costs you. See decision 15 for the leak this needed a second fix for.
 
 **Agent-facing skill. Built.** A `plugin/` directory symlinked into `~/.claude/skills/wt`,
-documenting the public command tree, Pi, Claude, Codex, selector rules, and the traps that
-matter. It stays short so an agent can create a working tree in one command.
+documenting the public command tree, Pi, Claude, Codex, Devin, selector rules, and the
+traps that matter. It stays short so an agent can create a working tree in one command.
 
 **Shell function and agent launch. Built.** `wt cd` needs a `wt()` wrapper in `.zshrc`,
 since no child process can change its parent's directory. Every other command is a plain
 binary call. The `wt llm` routes only set cwd and forward arguments. `wt go` defaults to
 Pi and adds `-n <label>` before Pi's passthrough arguments. Pi and Claude always use the
-optional Planter environment; Codex keeps its interactive-only bridge and direct fallback.
-Terminal background hooks apply to all three agents.
+optional Planter environment; Codex keeps its interactive-only bridge and direct fallback;
+Devin is never Planter-eligible and has no name flag, so it launches with raw passthrough
+arguments and no `PLANTER_*` env. Terminal background hooks apply to all four agents.
 
 **LaunchAgent. Built.** Every 5 minutes: `git -C base fetch --prune`, then fast-forward
 trunk only if base is clean and actually on trunk. Never `reset --hard`. Logs to

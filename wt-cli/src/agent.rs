@@ -46,26 +46,29 @@ const CODEX_ADMIN_COMMANDS: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Agent {
     Pi,
-    Codex,
     Claude,
+    Codex,
+    Devin,
 }
 
 impl Agent {
-    pub fn from_flags(pi: bool, codex: bool, claude: bool) -> Option<Self> {
-        match (pi, codex, claude) {
-            (true, false, false) => Some(Self::Pi),
-            (false, true, false) => Some(Self::Codex),
-            (false, false, true) => Some(Self::Claude),
-            (false, false, false) => None,
-            _ => unreachable!("clap rejects conflicting agent flags"),
-        }
+    pub const ALL: [Agent; 4] = [Self::Pi, Self::Claude, Self::Codex, Self::Devin];
+
+    /// clap's `agent` ArgGroup already guarantees at most one flag is set,
+    /// so the first (and only) `true` picks the agent.
+    pub fn from_flags(pi: bool, claude: bool, codex: bool, devin: bool) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .zip([pi, claude, codex, devin])
+            .find_map(|(agent, set)| set.then_some(agent))
     }
 
     pub fn executable(self) -> &'static str {
         match self {
             Self::Pi => "pi",
-            Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Devin => "devin",
         }
     }
 
@@ -73,6 +76,7 @@ impl Agent {
         match self {
             Self::Pi | Self::Claude => true,
             Self::Codex => interactive_codex_args(args),
+            Self::Devin => false,
         }
     }
 }
@@ -327,10 +331,23 @@ mod tests {
 
     #[test]
     fn from_flags_selects_each_agent_or_none() {
-        assert_eq!(Agent::from_flags(true, false, false), Some(Agent::Pi));
-        assert_eq!(Agent::from_flags(false, true, false), Some(Agent::Codex));
-        assert_eq!(Agent::from_flags(false, false, true), Some(Agent::Claude));
-        assert_eq!(Agent::from_flags(false, false, false), None);
+        assert_eq!(
+            Agent::from_flags(true, false, false, false),
+            Some(Agent::Pi)
+        );
+        assert_eq!(
+            Agent::from_flags(false, true, false, false),
+            Some(Agent::Claude)
+        );
+        assert_eq!(
+            Agent::from_flags(false, false, true, false),
+            Some(Agent::Codex)
+        );
+        assert_eq!(
+            Agent::from_flags(false, false, false, true),
+            Some(Agent::Devin)
+        );
+        assert_eq!(Agent::from_flags(false, false, false, false), None);
     }
 
     #[test]
@@ -339,6 +356,7 @@ mod tests {
         assert!(Agent::Pi.planter_eligible(&args));
         assert!(Agent::Claude.planter_eligible(&args));
         assert!(!Agent::Codex.planter_eligible(&args));
+        assert!(!Agent::Devin.planter_eligible(&args));
     }
 
     #[test]

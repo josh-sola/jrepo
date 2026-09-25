@@ -1,6 +1,6 @@
 ---
 name: wt
-description: Use when starting or resuming work in a large repository managed by wt (monorepo, helm, toy-apps): create a disposable worktree, find an existing tree, check background provisioning, or open a Pi, Claude, or Codex session. Read before creating a worktree by hand with `git worktree add`.
+description: Use when starting or resuming work in a large repository managed by wt (monorepo, helm, toy-apps): create a disposable worktree, find an existing tree, check background provisioning, or open a Pi, Claude, Codex, or Devin session. Read before creating a worktree by hand with `git worktree add`.
 ---
 
 # wt
@@ -15,9 +15,9 @@ commands only. Run `wt help -r` to inspect the full public hierarchy and
 |---|---|
 | `wt repo adopt <REPO> <PATH> [--branch-prefix <PREFIX>] [--redetect]` | Register an existing clone as a repository base. |
 | `wt repo sync [REPO]` | Fetch and fast-forward bases. With no repo, sync every registered base. |
-| `wt repo lift [REPO] --name "<SUMMARY>" [--branch <BRANCH>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Move tracked and untracked base edits into a fresh tree. An agent flag opens that agent after provisioning; no flag only creates the tree. |
+| `wt repo lift [REPO] --name "<SUMMARY>" [--branch <BRANCH>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex\|--devin] [-- <AGENT_ARGS>...]` | Move tracked and untracked base edits into a fresh tree. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt repo spare [--repo <REPO>] [--json]` | Show hot-spare status. Use `wt repo spare refresh` or `wt repo spare drop` for actions. |
-| `wt tree new <REPO> --name "<SUMMARY>" [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Create a tree from trunk, or from `--onto`. An agent flag opens that agent after provisioning; no flag only creates the tree. |
+| `wt tree new <REPO> --name "<SUMMARY>" [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex\|--devin] [-- <AGENT_ARGS>...]` | Create a tree from trunk, or from `--onto`. An agent flag opens that agent after provisioning; no flag only creates the tree. |
 | `wt tree ls [--repo <REPO>] [--all] [--json]` | List registered trees. |
 | `wt tree path <TREE>` | Print a tree's absolute path. |
 | `wt tree name [--path <PATH>]` | Print a tree name for a path, or nothing outside a registered tree. |
@@ -31,7 +31,8 @@ commands only. Run `wt help -r` to inspect the full public hierarchy and
 | `wt llm pi [TREE_OR_REPO] [-- <PI_ARGS>...]` | Run Pi with its working directory set and pass arguments through unchanged. |
 | `wt llm claude [TREE_OR_REPO] [-- <CLAUDE_ARGS>...]` | Run Claude with its working directory set and pass arguments through unchanged. |
 | `wt llm codex [TREE_OR_REPO] [-- <CODEX_ARGS>...]` | Run Codex with its working directory set and pass arguments through unchanged. |
-| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo` when no tree matches, or open the picker with no tree. Pi is the default. |
+| `wt llm devin [TREE_OR_REPO] [-- <DEVIN_ARGS>...]` | Run Devin with its working directory set and pass arguments through unchanged. |
+| `wt go [TREE] [--repo <REPO>] [--branch <BRANCH>] [--onto <TREE_OR_REF>] [--profile <PROFILE,...>] [--pi\|--claude\|--codex\|--devin] [-- <AGENT_ARGS>...]` | Open a tree, create a named tree with `--repo` when no tree matches, or open the picker with no tree. Pi is the default. Devin launches without Planter and without a session label. |
 | `wt cd <TREE>` | Change the interactive shell directory through the installed shell function. |
 
 `<TREE>` means a tree name, unique name substring, UUID or UUID prefix, or
@@ -62,6 +63,8 @@ before assuming dependencies are ready.
   shell function. It adds `-n <label>` before Pi arguments; a later `-n` from
   the caller takes precedence.
 - Arguments after `--` on `wt tree new` or `wt repo lift` require one of
-  `--pi`, `--claude`, or `--codex`.
+  `--pi`, `--claude`, `--codex`, or `--devin`.
 - `wt go` and `wt llm` perform the required Planter color preflight before
   launching an agent. A missing or failing `planter` command stops the launch.
+  Devin is not Planter-eligible, so it launches without `PLANTER_*` env and
+  without a session label.

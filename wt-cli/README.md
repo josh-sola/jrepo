@@ -49,7 +49,8 @@ wt
 ├── llm
 │   ├── pi
 │   ├── claude
-│   └── codex
+│   ├── codex
+│   └── devin
 ├── go
 ├── cd
 └── help
@@ -82,9 +83,10 @@ trunk:
 wt tree new monorepo --name "follow-up" --onto "fix login"
 ```
 
-Pass `--pi`, `--claude`, or `--codex` to `wt tree new` or `wt repo lift` to
-open an agent after provisioning. Without an agent flag, the command only
-creates the tree. Arguments after `--` require an agent flag.
+Pass `--pi`, `--claude`, `--codex`, or `--devin` to `wt tree new` or
+`wt repo lift` to open an agent after provisioning. Without an agent flag,
+the command only creates the tree. Arguments after `--` require an agent
+flag.
 
 Open an existing tree in Pi, or pick one in the launch screen:
 
@@ -93,14 +95,16 @@ wt go "fix login"
 wt go
 ```
 
-Pi is the default. Pass `--pi`, `--claude`, or `--codex` to select an agent
-explicitly. `wt go <name> --repo <repo>` creates a named tree when no existing
-tree matches. `--onto` works here too. A name beginning with `@` opens a
-scratch agent session in a base checkout without creating a tree.
+Pi is the default. Pass `--pi`, `--claude`, `--codex`, or `--devin` to select
+an agent explicitly. `wt go <name> --repo <repo>` creates a named tree when no
+existing tree matches. `--onto` works here too. A name beginning with `@`
+opens a scratch agent session in a base checkout without creating a tree.
+Devin launches without the Planter integration and without a session label —
+its passthrough arguments go straight through.
 
 ### The launch screen
 
-A bare `wt go`, or one narrowed only by `--pi`/`--claude`/`--codex`,
+A bare `wt go`, or one narrowed only by `--pi`/`--claude`/`--codex`/`--devin`,
 `--profile`, `--repo`, `--branch`, `--onto`, or trailing agent arguments,
 opens a full-screen picker instead of failing for want of a tree name. Any
 of those flags preselect the matching field. It needs a real terminal on
@@ -111,19 +115,20 @@ previews the highlighted tree — the same detail `wt tree status` shows.
 
 The first word of the filter is the name to search for. Any later word can
 also set the repo or agent: it resolves to an agent when it's a unique prefix
-of `pi`, `claude`, or `codex`, else to a repo when it's a unique prefix of a
-registered repo name, else it stays part of the search text. For example,
-`pr-12/feedback mono claude` searches for `pr-12/feedback`, narrows the list
-to the `monorepo` repo, and switches the agent to Claude. The resolved repo
-and agent, if any, show as dim text at the right of the filter box.
+of `pi`, `claude`, `codex`, or `devin`, else to a repo when it's a unique
+prefix of a registered repo name, else it stays part of the search text. For
+example, `pr-12/feedback mono claude` searches for `pr-12/feedback`, narrows
+the list to the `monorepo` repo, and switches the agent to Claude. The
+resolved repo and agent, if any, show as dim text at the right of the filter
+box.
 
 | Key | Effect |
 | --- | --- |
 | type | filter, or edit the focused field |
 | ↑ / ↓ | move the tree selection |
 | Tab | cycle focus forward: filter → profile → args |
-| Shift-Tab | toggle the agent between Pi and Claude |
-| Ctrl-P / Ctrl-L / Ctrl-X | select Pi / Claude / Codex |
+| Shift-Tab | cycle the agent: Pi → Claude → Codex → Devin → Pi |
+| Ctrl-P / Ctrl-L / Ctrl-X / Ctrl-D | select Pi / Claude / Codex / Devin |
 | Enter | launch the highlighted tree |
 | Esc / Ctrl-C | cancel |
 
@@ -162,12 +167,14 @@ Run an agent in a selected tree or base directly, bypassing `wt go`:
 wt llm pi "fix login" -- --model custom
 wt llm claude "fix login" -- --model opus
 wt llm codex monorepo -- --model gpt-5
+wt llm devin "fix login" -- -r some-session-id
 ```
 
 The `wt llm` commands only resolve the working directory and pass arguments
 through unchanged. `wt go` adds `-n <label>` before Pi arguments so the
 session has the tree or scratch label; a later `-n` from the caller takes
-precedence.
+precedence. Devin has no name flag, so `wt go` never adds one — its
+passthrough arguments reach Devin exactly as given.
 
 `<TREE>` consistently accepts a tree name, unique name substring, UUID or UUID
 prefix, or branch name. Ambiguous references fail with the candidates instead
