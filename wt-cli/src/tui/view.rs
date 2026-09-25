@@ -10,8 +10,8 @@ use super::state::{
     Focus, FormFocus, Mode, NewTreeForm, ParsedFilter, Row, State, column_widths, parse_filter,
 };
 
-const HINT: &str = "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Shift-Tab Pi/Claude  ·  Ctrl-P/L/X agent  ·  Enter launch  ·  Esc/Ctrl-C cancel";
-const FORM_HINT: &str = "Tab next field  ·  Shift-Tab Pi/Claude  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list  ·  Ctrl-C cancel";
+const HINT: &str = "type to filter  ·  ↑↓ move  ·  Tab focus  ·  Shift-Tab agent  ·  Ctrl-P/L/X/D agent  ·  Enter launch  ·  Esc/Ctrl-C cancel";
+const FORM_HINT: &str = "Tab next field  ·  Shift-Tab agent  ·  ↑↓ pick repo  ·  Enter create  ·  Esc back to list  ·  Ctrl-C cancel";
 
 pub fn draw(frame: &mut Frame, state: &State, preview: &str) {
     let area = frame.area();
@@ -90,6 +90,7 @@ fn agent_word(agent: Agent) -> &'static str {
         Agent::Pi => "pi",
         Agent::Claude => "claude",
         Agent::Codex => "codex",
+        Agent::Devin => "devin",
     }
 }
 
@@ -277,7 +278,7 @@ fn draw_launch_bar(frame: &mut Frame, area: Rect, state: &State) {
 
 fn agent_line(agent: Agent) -> Line<'static> {
     let mut spans = vec![Span::raw("Agent  ")];
-    for candidate in [Agent::Pi, Agent::Claude, Agent::Codex] {
+    for candidate in Agent::ALL {
         let label = agent_label(candidate);
         if candidate == agent {
             spans.push(Span::styled(
@@ -298,6 +299,7 @@ fn agent_label(agent: Agent) -> &'static str {
         Agent::Pi => "Pi",
         Agent::Claude => "Claude",
         Agent::Codex => "Codex",
+        Agent::Devin => "Devin",
     }
 }
 

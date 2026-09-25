@@ -266,10 +266,11 @@ pub struct ParsedFilter {
     pub agent: Option<Agent>,
 }
 
-const AGENT_WORDS: [(&str, Agent); 3] = [
+const AGENT_WORDS: [(&str, Agent); 4] = [
     ("pi", Agent::Pi),
     ("claude", Agent::Claude),
     ("codex", Agent::Codex),
+    ("devin", Agent::Devin),
 ];
 
 /// A word resolves only if it's a case-insensitive prefix of exactly one
@@ -355,18 +356,17 @@ fn agent_from_key(key: &KeyEvent) -> Option<Agent> {
         KeyCode::Char('p') => Some(Agent::Pi),
         KeyCode::Char('l') => Some(Agent::Claude),
         KeyCode::Char('x') => Some(Agent::Codex),
+        KeyCode::Char('d') => Some(Agent::Devin),
         _ => None,
     }
 }
 
-// Codex has no dedicated Shift-Tab slot; it folds to Pi rather than Claude
-// so the toggle stays a clean two-way flip once it's been reached from Codex.
-fn toggle_pi_claude(agent: Agent) -> Agent {
-    match agent {
-        Agent::Pi => Agent::Claude,
-        Agent::Claude => Agent::Pi,
-        Agent::Codex => Agent::Pi,
-    }
+fn cycle_agent(agent: Agent) -> Agent {
+    let idx = Agent::ALL
+        .iter()
+        .position(|&candidate| candidate == agent)
+        .unwrap_or(0);
+    Agent::ALL[(idx + 1) % Agent::ALL.len()]
 }
 
 fn reduce_list(state: &mut State, key: KeyEvent) -> Reaction {
@@ -399,7 +399,7 @@ fn reduce_list(state: &mut State, key: KeyEvent) -> Reaction {
             return Reaction::None;
         }
         KeyCode::BackTab => {
-            state.agent = toggle_pi_claude(state.agent);
+            state.agent = cycle_agent(state.agent);
             return Reaction::None;
         }
         KeyCode::Enter => return submit_list(state),
@@ -501,7 +501,7 @@ fn reduce_form(state: &mut State, key: KeyEvent) -> Reaction {
             return Reaction::None;
         }
         KeyCode::BackTab => {
-            state.agent = toggle_pi_claude(state.agent);
+            state.agent = cycle_agent(state.agent);
             return Reaction::None;
         }
         KeyCode::Up if form.focus == FormFocus::Repo => {
@@ -759,22 +759,26 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_toggles_pi_and_claude_in_the_list() {
+    fn shift_tab_cycles_through_every_agent_in_the_list() {
         let mut state = state_with(rows_for(&["a"]));
         assert_eq!(state.agent, Agent::Pi);
         reduce(&mut state, key(KeyCode::BackTab));
         assert_eq!(state.agent, Agent::Claude);
         reduce(&mut state, key(KeyCode::BackTab));
+        assert_eq!(state.agent, Agent::Codex);
+        reduce(&mut state, key(KeyCode::BackTab));
+        assert_eq!(state.agent, Agent::Devin);
+        reduce(&mut state, key(KeyCode::BackTab));
         assert_eq!(state.agent, Agent::Pi);
     }
 
     #[test]
-    fn shift_tab_from_codex_falls_to_pi() {
+    fn shift_tab_from_codex_advances_to_devin() {
         let mut state = state_with(rows_for(&["a"]));
         reduce(&mut state, ctrl('x'));
         assert_eq!(state.agent, Agent::Codex);
         reduce(&mut state, key(KeyCode::BackTab));
-        assert_eq!(state.agent, Agent::Pi);
+        assert_eq!(state.agent, Agent::Devin);
     }
 
     #[test]
@@ -806,6 +810,8 @@ mod tests {
         assert_eq!(state.agent, Agent::Claude);
         reduce(&mut state, ctrl('x'));
         assert_eq!(state.agent, Agent::Codex);
+        reduce(&mut state, ctrl('d'));
+        assert_eq!(state.agent, Agent::Devin);
         reduce(&mut state, ctrl('p'));
         assert_eq!(state.agent, Agent::Pi);
     }
@@ -887,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_in_the_form_toggles_agent_not_focus() {
+    fn shift_tab_in_the_form_cycles_agent_not_focus() {
         let mut state = state_with(rows_for(&["fix login"]));
         for c in "brand new tree".chars() {
             reduce(&mut state, key(KeyCode::Char(c)));

@@ -2104,6 +2104,76 @@ fn go_claude_keeps_its_decoration_and_planter() {
 }
 
 #[test]
+fn go_devin_forwards_raw_arguments_without_a_label_or_planter_environment() {
+    let tmp = unique_dir("launch-devin");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    assert_success(
+        &run_wt(&root, &["tree", "new", "myrepo", "--name", "devin target"]),
+        "new",
+    );
+    assert_success(&run_wt(&root, &["tree", "wait", "devin target"]), "wait");
+    let tree = PathBuf::from(
+        String::from_utf8_lossy(&run_wt(&root, &["tree", "path", "devin target"]).stdout).trim(),
+    );
+
+    let planter_sentinel = tmp.join("planter-ran");
+    let terminal_sentinel = tmp.join("terminal-ran");
+    std::fs::write(
+        config_path_for(&root),
+        go_features_config(&planter_sentinel, &terminal_sentinel),
+    )
+    .unwrap();
+    let record = tmp.join("devin-record");
+    let bin_dir = write_fake_agent(&tmp, "devin", &record);
+    write_fake_planter(&bin_dir, &tmp.join("resolver-record"), "printf 'red\\n'");
+
+    let out = run_wt_with_path(
+        &root,
+        &base,
+        &bin_dir,
+        &[
+            "go",
+            "devin target",
+            "--repo",
+            "myrepo",
+            "--devin",
+            "--",
+            "-r",
+            "some-id",
+        ],
+    );
+    assert_success(&out, "go with Devin");
+
+    let record = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record.contains(&format!("cwd={}", tree.display())),
+        "{record}"
+    );
+    assert_eq!(
+        record
+            .lines()
+            .filter(|l| l.starts_with("arg="))
+            .collect::<Vec<_>>(),
+        vec!["arg=-r", "arg=some-id"],
+        "Devin gets raw passthrough args with no -n label: {record}"
+    );
+    assert!(
+        record.contains("PLANTER_COLOR=\nPLANTER_LABEL=\nPLANTER_TAB_INDEX="),
+        "{record}"
+    );
+    assert!(
+        !planter_sentinel.exists(),
+        "Devin is not planter-eligible and should skip planter hooks"
+    );
+    assert!(
+        terminal_sentinel.exists(),
+        "Devin should still get the terminal background hook"
+    );
+}
+
+#[test]
 fn go_fails_before_any_hook_or_agent_when_planter_is_not_on_path() {
     let tmp = unique_dir("go-no-planter");
     let base = fixture_repo(&tmp);
@@ -3460,6 +3530,71 @@ fn codex_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
 }
 
 #[test]
+fn devin_resolves_a_tree_or_current_tree_like_claude() {
+    let tmp = unique_dir("devin-target");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+    let new = run_wt(&root, &["tree", "new", "myrepo", "--name", "devin target"]);
+    assert_success(&new, "new");
+    assert_success(&run_wt(&root, &["tree", "wait", "devin target"]), "wait");
+    let tree = PathBuf::from(
+        String::from_utf8_lossy(&new.stdout)
+            .lines()
+            .last()
+            .unwrap()
+            .trim(),
+    );
+
+    let record = tmp.join("devin-record");
+    let bin_dir = write_fake_agent(&tmp, "devin", &record);
+    assert_success(
+        &run_wt_with_path(
+            &root,
+            &base,
+            &bin_dir,
+            &["llm", "devin", "devin target", "--", "-r", "some-id"],
+        ),
+        "devin selector",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(record_text.contains("arg=-r\narg=some-id"), "{record_text}");
+
+    assert_success(
+        &run_wt_with_path(&root, &tree, &bin_dir, &["llm", "devin", "--", "-c"]),
+        "devin current tree",
+    );
+    let record_text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        record_text.contains(&format!("cwd={}", tree.display())),
+        "{record_text}"
+    );
+    assert!(record_text.contains("arg=-c"), "{record_text}");
+}
+
+#[test]
+fn devin_on_a_bare_repo_name_warns_then_names_the_missing_executable() {
+    let tmp = unique_dir("devin-base");
+    let base = fixture_repo(&tmp);
+    let root = tmp.join("wt-root");
+    init_repo(&root, "myrepo", &base);
+
+    let out = run_wt_without_agents_on_path(&root, &["llm", "devin", "myrepo"]);
+    assert!(
+        !out.status.success(),
+        "expected failure with devin off PATH"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("base is for reading"), "{stderr}");
+    assert!(stderr.contains("`devin` is not on PATH"), "{stderr}");
+    assert!(stderr.contains("`wt llm devin`"), "{stderr}");
+}
+
+#[test]
 fn go_new_and_lift_reject_every_agent_flag_conflict() {
     let tmp = unique_dir("agent-flag-conflict");
     let root = tmp.join("wt-root");
@@ -3467,6 +3602,9 @@ fn go_new_and_lift_reject_every_agent_flag_conflict() {
         vec!["go", "--pi", "--codex"],
         vec!["go", "--pi", "--claude"],
         vec!["go", "--codex", "--claude"],
+        vec!["go", "--pi", "--devin"],
+        vec!["go", "--codex", "--devin"],
+        vec!["go", "--claude", "--devin"],
         vec![
             "tree", "new", "myrepo", "--name", "target", "--pi", "--codex",
         ],
@@ -3476,9 +3614,21 @@ fn go_new_and_lift_reject_every_agent_flag_conflict() {
         vec![
             "tree", "new", "myrepo", "--name", "target", "--codex", "--claude",
         ],
+        vec![
+            "tree", "new", "myrepo", "--name", "target", "--pi", "--devin",
+        ],
+        vec![
+            "tree", "new", "myrepo", "--name", "target", "--codex", "--devin",
+        ],
+        vec![
+            "tree", "new", "myrepo", "--name", "target", "--claude", "--devin",
+        ],
         vec!["repo", "lift", "--name", "target", "--pi", "--codex"],
         vec!["repo", "lift", "--name", "target", "--pi", "--claude"],
         vec!["repo", "lift", "--name", "target", "--codex", "--claude"],
+        vec!["repo", "lift", "--name", "target", "--pi", "--devin"],
+        vec!["repo", "lift", "--name", "target", "--codex", "--devin"],
+        vec!["repo", "lift", "--name", "target", "--claude", "--devin"],
     ];
 
     for args in cases {

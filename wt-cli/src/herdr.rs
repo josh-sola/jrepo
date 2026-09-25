@@ -739,6 +739,22 @@ mod tests {
     }
 
     #[test]
+    fn inner_argv_for_devin_uses_the_devin_flag() {
+        let argv = inner_argv(
+            "/usr/local/bin/wt",
+            "0199-uuid",
+            None,
+            Agent::Devin,
+            None,
+            &[],
+        );
+        assert_eq!(
+            argv,
+            vec!["/usr/local/bin/wt", "go", "0199-uuid", "--here", "--devin"]
+        );
+    }
+
+    #[test]
     fn shell_join_quotes_each_token() {
         let argv = vec!["wt".to_string(), "go".to_string(), "it's".to_string()];
         assert_eq!(shell_join(&argv), "'wt' 'go' 'it'\\''s'");

@@ -67,7 +67,7 @@ enum Command {
     },
     /// Open a session in a tree, creating it when requested.
     #[command(
-        long_about = "Open Pi in an existing tree or create one when no match is found with --repo. Select another agent with --claude or --codex.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository. Examples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go --codex -- --model gpt-5"
+        long_about = "Open Pi in an existing tree or create one when no match is found with --repo. Select another agent with --claude, --codex, or --devin.\n\nWith no TREE, open the existing tree picker. A TREE starting with @ opens a labeled scratch session in a repository base and creates nothing; use --repo or run from that repository. Examples:\n  wt go fix-login --repo monorepo\n  wt go @poking-around --repo monorepo\n  wt go --codex -- --model gpt-5"
     )]
     Go(GoArgs),
     /// Change directory to a tree through installed shell integration.
@@ -149,7 +149,7 @@ enum RepoCommand {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude", "devin"])))]
 struct LiftArgs {
     #[arg(long, help = "Open Pi after provisioning.")]
     pi: bool,
@@ -189,6 +189,12 @@ struct LiftArgs {
         help = "Open Claude after provisioning."
     )]
     claude: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["codex", "claude"],
+        help = "Open Devin after provisioning."
+    )]
+    devin: bool,
     #[arg(
         last = true,
         requires = "agent",
@@ -289,7 +295,7 @@ enum TreeCommand {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude", "devin"])))]
 struct NewArgs {
     #[arg(long, help = "Open Pi after provisioning.")]
     pi: bool,
@@ -335,6 +341,12 @@ struct NewArgs {
         help = "Open Claude after provisioning."
     )]
     claude: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["codex", "claude"],
+        help = "Open Devin after provisioning."
+    )]
+    devin: bool,
     #[arg(
         last = true,
         requires = "agent",
@@ -421,6 +433,8 @@ enum LlmCommand {
     Claude(AgentArgs),
     /// Run Codex with its working directory set.
     Codex(AgentArgs),
+    /// Run Devin with its working directory set.
+    Devin(AgentArgs),
 }
 
 #[derive(Args)]
@@ -439,7 +453,7 @@ struct AgentArgs {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude"])))]
+#[command(group(ArgGroup::new("agent").args(["pi", "codex", "claude", "devin"])))]
 struct GoArgs {
     #[arg(
         value_name = "TREE",
@@ -477,6 +491,8 @@ struct GoArgs {
     codex: bool,
     #[arg(long, help = "Open Claude instead of Pi.")]
     claude: bool,
+    #[arg(long, help = "Open Devin instead of Pi.")]
+    devin: bool,
     #[arg(
         long,
         help = "Run the agent in this terminal instead of placing it in a herdr workspace."
@@ -586,7 +602,13 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             ),
             RepoCommand::Sync { repo } => cmd_sync(root, config_path, repo),
             RepoCommand::Lift(args) => {
-                reject_unselected_agent_args(args.pi, args.codex, args.claude, &args.args)?;
+                reject_unselected_agent_args(
+                    args.pi,
+                    args.claude,
+                    args.codex,
+                    args.devin,
+                    &args.args,
+                )?;
                 let path = tree::adopt(
                     root,
                     config_path,
@@ -600,7 +622,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 open_if_requested(
                     root,
                     &path,
-                    Agent::from_flags(args.pi, args.codex, args.claude),
+                    Agent::from_flags(args.pi, args.claude, args.codex, args.devin),
                     &args.args,
                 )
             }
@@ -623,7 +645,13 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
         },
         Command::Tree { command } => match command {
             TreeCommand::New(args) => {
-                reject_unselected_agent_args(args.pi, args.codex, args.claude, &args.args)?;
+                reject_unselected_agent_args(
+                    args.pi,
+                    args.claude,
+                    args.codex,
+                    args.devin,
+                    &args.args,
+                )?;
                 let path = tree::new_tree(
                     root,
                     config_path,
@@ -638,7 +666,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 open_if_requested(
                     root,
                     &path,
-                    Agent::from_flags(args.pi, args.codex, args.claude),
+                    Agent::from_flags(args.pi, args.claude, args.codex, args.devin),
                     &args.args,
                 )
             }
@@ -684,6 +712,9 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
             LlmCommand::Codex(args) => {
                 agent::exec_target(root, Agent::Codex, args.target, &args.args)
             }
+            LlmCommand::Devin(args) => {
+                agent::exec_target(root, Agent::Devin, args.target, &args.args)
+            }
         },
         Command::Go(args) => cmd_launch(
             root,
@@ -696,7 +727,7 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
                 profile: args.profile,
                 here: args.here,
             },
-            Agent::from_flags(args.pi, args.codex, args.claude).unwrap_or(Agent::Pi),
+            Agent::from_flags(args.pi, args.claude, args.codex, args.devin).unwrap_or(Agent::Pi),
             &args.args,
         ),
         Command::Cd { tree } => bail!(
@@ -722,12 +753,13 @@ fn run(root: &Path, config_path: &Path, command: Command) -> Result<()> {
 
 fn reject_unselected_agent_args(
     pi: bool,
-    codex: bool,
     claude: bool,
+    codex: bool,
+    devin: bool,
     args: &[String],
 ) -> Result<()> {
-    if !args.is_empty() && !pi && !codex && !claude {
-        bail!("arguments after -- require --pi, --codex, or --claude");
+    if !args.is_empty() && !pi && !claude && !codex && !devin {
+        bail!("arguments after -- require --pi, --claude, --codex, or --devin");
     }
     Ok(())
 }
@@ -1306,6 +1338,7 @@ fn cmd_launch(
         Agent::Codex => {
             agent::exec_launch_codex(&tree_path, args, &env, planter_enabled && planter_eligible)
         }
+        Agent::Devin => agent::exec_at_without_planter_color(agent, &tree_path, args, &[]),
     }
 }
 
