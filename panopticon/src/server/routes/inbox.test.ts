@@ -8,6 +8,7 @@ import type { PrSummary } from '../../shared/github.ts';
 import { openDb } from '../db.ts';
 import { PrRepository } from '../poller/prs.ts';
 import type { GraphiteSnapshot } from '../stack/graphiteLocal.ts';
+import { testGit } from '../git/__fixtures__/testGit.ts';
 import { GraphiteLocal } from '../stack/graphiteLocal.ts';
 import type { InboxDeps } from './inbox.ts';
 import { groupIntoStacks, inboxRouter } from './inbox.ts';
@@ -210,7 +211,8 @@ describe('groupIntoStacks', () => {
 function mount(
   prs: PrRepository,
   repos: string[],
-  graphiteFor: InboxDeps['graphiteFor'] = () => new GraphiteLocal(null),
+  graphiteFor: InboxDeps['graphiteFor'] = () =>
+    new GraphiteLocal(null, testGit),
 ): Hono {
   return new Hono().route(
     '/api/inbox',

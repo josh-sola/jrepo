@@ -1,0 +1,27 @@
+# Releases for the personal apps that run on the local OrbStack cluster.
+# Pinned so a release can never land on another cluster.
+helmDefaults:
+  kubeContext: orbstack
+
+repositories:
+  - name: traefik
+    url: https://traefik.github.io/charts
+
+releases:
+  - name: traefik
+    namespace: traefik
+    createNamespace: true
+    chart: traefik/traefik
+    version: 41.7.1
+    values:
+      - k8s/traefik-values.yaml
+
+  - name: panopticon
+    namespace: panopticon
+    createNamespace: true
+    chart: ./panopticon/deploy/chart
+    needs:
+      - traefik/traefik
+    values:
+      - image:
+          tag: {{ requiredEnv "PANOPTICON_IMAGE_TAG" | quote }}

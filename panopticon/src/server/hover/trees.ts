@@ -1,46 +1,56 @@
+import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs';
+import { readdir, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import type { HoverLanguage } from '../../shared/hover.ts';
-import type { RepoConfig } from '../config.ts';
-import { ensureSchema } from '../db.ts';
-import type { WtRunner } from './wt.ts';
-import { treeNew, treePath, treeRm, treeStatus } from './wt.ts';
+import type { HoverProfile, RepoConfig } from '../config.ts';
+import type { Git } from '../git/git.ts';
 
 export const HOVER_TREES_SCHEMA = `
 CREATE TABLE IF NOT EXISTS hover_trees (
   owner TEXT NOT NULL,
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
-  tree_name TEXT NOT NULL,
   head_sha TEXT NOT NULL,
-  profiles TEXT NOT NULL,
+  path TEXT NOT NULL,
+  state TEXT NOT NULL,
+  error TEXT,
   created_at TEXT NOT NULL,
   last_used_at TEXT NOT NULL,
   PRIMARY KEY (owner, repo, number)
 );
 `;
 
+export const PROVISION_LOG_FILE = '.panopticon-provision.log';
+
+type StoredState = 'provisioning' | 'ready' | 'failed';
+
 interface HoverTreeRow {
   owner: string;
   repo: string;
   number: number;
-  tree_name: string;
   head_sha: string;
-  profiles: string;
+  path: string;
+  state: StoredState;
+  error: string | null;
   created_at: string;
   last_used_at: string;
+}
+
+interface PrRef {
+  owner: string;
+  repo: string;
+  number: number;
 }
 
 export type HoverTreeState =
   | { state: 'unsupported' }
   | { state: 'none' }
-  | { state: 'provisioning' }
-  | { state: 'ready'; path: string }
-  | { state: 'failed'; error: string };
+  | { state: 'provisioning'; headSha: string }
+  | { state: 'ready'; headSha: string; path: string }
+  | { state: 'failed'; headSha: string; error: string };
 
-export interface EnsureTreeParams {
-  owner: string;
-  repo: string;
-  number: number;
+export interface EnsureTreeParams extends PrRef {
   headSha: string;
   languages: HoverLanguage[];
   // Every path the diff touches; used only to decide whether a moved head
@@ -48,39 +58,27 @@ export interface EnsureTreeParams {
   changedPaths: string[];
 }
 
-export interface GitOps {
-  fetch(cwd: string, ref: string): Promise<void>;
-  checkoutDetached(cwd: string, sha: string): Promise<void>;
+export interface ProvisionStep {
+  run: string;
+  cwd: string;
+  logPath: string;
 }
 
-async function runGit(
-  args: string[],
-  cwd: string,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(['git', ...args], {
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, code };
-}
+export type StepRunner = (step: ProvisionStep) => Promise<number>;
 
-async function runGitOrThrow(args: string[], cwd: string): Promise<void> {
-  const { stderr, code } = await runGit(args, cwd);
-  if (code !== 0) {
-    throw new Error(`git ${args.join(' ')} failed: ${stderr.trim()}`);
+export const runStepInShell: StepRunner = async ({ run, cwd, logPath }) => {
+  const fd = openSync(logPath, 'a');
+  try {
+    writeSync(fd, `$ ${run}\n`);
+    const proc = Bun.spawn(['sh', '-c', run], {
+      cwd,
+      stdout: fd,
+      stderr: fd,
+    });
+    return await proc.exited;
+  } finally {
+    closeSync(fd);
   }
-}
-
-export const bunGitOps: GitOps = {
-  fetch: (cwd, ref) => runGitOrThrow(['fetch', 'origin', ref], cwd),
-  checkoutDetached: (cwd, sha) =>
-    runGitOrThrow(['checkout', '--detach', sha], cwd),
 };
 
 // A changed lockfile or `pyproject.toml` can move dependency resolution
@@ -93,132 +91,196 @@ function touchesLockfileOrPyproject(paths: string[]): boolean {
   return paths.some((path) => REPROVISION_TRIGGER.test(path));
 }
 
-function profilesForLanguages(languages: HoverLanguage[]): string[] {
-  const profiles = new Set<string>();
+function profilesForLanguages(languages: HoverLanguage[]): HoverProfile[] {
+  const profiles = new Set<HoverProfile>();
   for (const language of languages) {
     profiles.add(language === 'typescript' ? 'node' : 'python');
   }
-  return [...profiles].sort();
+  return [...profiles];
 }
 
-function prKey(owner: string, repo: string, number: number): string {
+function prKey({ owner, repo, number }: PrRef): string {
   return `${owner}/${repo}#${number}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface TreeManagerDeps {
   db: Database;
-  runner: WtRunner;
+  dataDir: string;
   repos: Record<string, RepoConfig>;
+  maxTrees: number;
+  git: Git;
+  // Resolves to the repo's bare clone, cloning it first if needed.
+  bareClone(owner: string, repo: string): Promise<string>;
+  // Like `bareClone`, but never clones: null when there is no clone yet.
+  existingBareClone(owner: string, repo: string): string | null;
   stopServers(owner: string, repo: string, number: number): Promise<void>;
-  git?: GitOps;
+  runStep?: StepRunner;
   clock?: () => number;
 }
 
-// Owns the lifecycle of the wt worktrees hover needs, one per PR under
-// review. `wt` itself is the source of truth for whether a tree exists;
-// `hover_trees` only remembers which wt tree name and head SHA belong to
-// which PR.
+// Owns the git worktrees hover needs, one per PR under review, under
+// `<dataDir>/trees`. `hover_trees` is the source of truth for which trees
+// exist and what state they are in.
 export class TreeManager {
   private readonly db: Database;
-  private readonly runner: WtRunner;
+  private readonly dataDir: string;
   private readonly repos: Record<string, RepoConfig>;
-  private readonly stopServers: (
-    owner: string,
-    repo: string,
-    number: number,
-  ) => Promise<void>;
-  private readonly git: GitOps;
+  private readonly maxTrees: number;
+  private readonly git: Git;
+  private readonly bareClone: TreeManagerDeps['bareClone'];
+  private readonly existingBareClone: TreeManagerDeps['existingBareClone'];
+  private readonly stopServers: TreeManagerDeps['stopServers'];
+  private readonly runStep: StepRunner;
   private readonly clock: () => number;
   private readonly pending = new Map<string, Promise<void>>();
-
-  private readonly selectStmt;
-  private readonly upsertStmt;
-  private readonly updateHeadStmt;
-  private readonly touchStmt;
-  private readonly deleteStmt;
-  private readonly selectIdleStmt;
+  // Provisions run one at a time: installs are heavy, and the machine is
+  // shared with the language servers.
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(deps: TreeManagerDeps) {
-    ensureSchema(deps.db, HOVER_TREES_SCHEMA);
     this.db = deps.db;
-    this.runner = deps.runner;
+    this.dataDir = deps.dataDir;
     this.repos = deps.repos;
+    this.maxTrees = deps.maxTrees;
+    this.git = deps.git;
+    this.bareClone = deps.bareClone;
+    this.existingBareClone = deps.existingBareClone;
     this.stopServers = deps.stopServers;
-    this.git = deps.git ?? bunGitOps;
+    this.runStep = deps.runStep ?? runStepInShell;
     this.clock = deps.clock ?? Date.now;
 
-    this.selectStmt = this.db.query<
-      HoverTreeRow,
-      { $owner: string; $repo: string; $number: number }
-    >(
-      'SELECT * FROM hover_trees WHERE owner = $owner AND repo = $repo AND number = $number',
-    );
-    this.upsertStmt = this.db.query<
-      unknown,
-      {
-        $owner: string;
-        $repo: string;
-        $number: number;
-        $treeName: string;
-        $headSha: string;
-        $profiles: string;
-        $createdAt: string;
-        $lastUsedAt: string;
-      }
-    >(
-      `INSERT INTO hover_trees (owner, repo, number, tree_name, head_sha, profiles, created_at, last_used_at)
-       VALUES ($owner, $repo, $number, $treeName, $headSha, $profiles, $createdAt, $lastUsedAt)
-       ON CONFLICT(owner, repo, number) DO UPDATE SET
-         tree_name = $treeName, head_sha = $headSha, profiles = $profiles, last_used_at = $lastUsedAt`,
-    );
-    this.updateHeadStmt = this.db.query<
-      unknown,
-      {
-        $owner: string;
-        $repo: string;
-        $number: number;
-        $headSha: string;
-        $lastUsedAt: string;
-      }
-    >(
-      `UPDATE hover_trees SET head_sha = $headSha, last_used_at = $lastUsedAt
-       WHERE owner = $owner AND repo = $repo AND number = $number`,
-    );
-    this.touchStmt = this.db.query<
-      unknown,
-      { $owner: string; $repo: string; $number: number; $lastUsedAt: string }
-    >(
-      `UPDATE hover_trees SET last_used_at = $lastUsedAt
-       WHERE owner = $owner AND repo = $repo AND number = $number`,
-    );
-    this.deleteStmt = this.db.query<
-      unknown,
-      { $owner: string; $repo: string; $number: number }
-    >(
-      'DELETE FROM hover_trees WHERE owner = $owner AND repo = $repo AND number = $number',
-    );
-    this.selectIdleStmt = this.db.query<
-      { owner: string; repo: string; number: number },
-      { $cutoff: string }
-    >(
-      'SELECT owner, repo, number FROM hover_trees WHERE last_used_at < $cutoff',
-    );
+    this.migrate();
   }
 
-  private repoConfig(owner: string, repo: string): RepoConfig | null {
-    return this.repos[`${owner}/${repo}`] ?? null;
+  // Failed trees are removed so a restart, often onto a new image, retries
+  // their builds. Symlinks are removed as links, never followed.
+  async recover(): Promise<{ removedBroken: number; removedOrphans: number }> {
+    const affected = new Set<string>();
+    const broken = this.db
+      .query<HoverTreeRow, []>(
+        "SELECT * FROM hover_trees WHERE state != 'ready'",
+      )
+      .all();
+    for (const row of broken) {
+      await rm(row.path, { recursive: true, force: true });
+      this.db
+        .query(
+          'DELETE FROM hover_trees WHERE owner = ? AND repo = ? AND number = ?',
+        )
+        .run(row.owner, row.repo, row.number);
+      affected.add(`${row.owner}/${row.repo}`);
+    }
+
+    const known = new Set(
+      this.db
+        .query<{ path: string }, []>('SELECT path FROM hover_trees')
+        .all()
+        .map((row) => row.path),
+    );
+    const removedOrphans = await this.sweepOrphans(known, affected);
+
+    for (const key of affected) {
+      const [owner, repo] = key.split('/') as [string, string];
+      const bare = this.existingBareClone(owner, repo);
+      if (bare === null) continue;
+      // A prune failure only leaves stale worktree entries; it must not
+      // block boot.
+      const { exitCode, stderr } = await this.git.run(['worktree', 'prune'], {
+        cwd: bare,
+      });
+      if (exitCode !== 0) {
+        console.error(
+          `panopticon: git worktree prune failed for ${key}: ${stderr.trim()}`,
+        );
+      }
+    }
+    return { removedBroken: broken.length, removedOrphans };
+  }
+
+  private async sweepOrphans(
+    known: Set<string>,
+    affected: Set<string>,
+  ): Promise<number> {
+    const root = join(this.dataDir, 'trees');
+    let removed = 0;
+    const children = async (dir: string) =>
+      readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const owner of await children(root)) {
+      const ownerPath = join(root, owner.name);
+      if (!owner.isDirectory()) {
+        await rm(ownerPath, { recursive: true, force: true });
+        continue;
+      }
+      for (const repo of await children(ownerPath)) {
+        const repoPath = join(ownerPath, repo.name);
+        if (!repo.isDirectory()) {
+          await rm(repoPath, { recursive: true, force: true });
+          continue;
+        }
+        for (const tree of await children(repoPath)) {
+          const treePath = join(repoPath, tree.name);
+          if (tree.isDirectory() && known.has(treePath)) continue;
+          await rm(treePath, { recursive: true, force: true });
+          affected.add(`${owner.name}/${repo.name}`);
+          removed += 1;
+        }
+      }
+    }
+    return removed;
+  }
+
+  private migrate(): void {
+    const columns = this.db
+      .query<{ name: string }, []>('PRAGMA table_info(hover_trees)')
+      .all();
+    if (columns.some((column) => column.name === 'tree_name')) {
+      this.db.exec('DROP TABLE hover_trees');
+    }
+    this.db.exec(HOVER_TREES_SCHEMA);
   }
 
   private now(): string {
     return new Date(this.clock()).toISOString();
   }
 
-  // Kicks off whatever the tree needs (nothing, a fresh provision, or an
-  // in-place checkout) and returns once that step has happened. Concurrent
-  // calls for the same PR share one in-flight attempt instead of racing
-  // `wt tree new`.
-  async ensureTree(params: EnsureTreeParams): Promise<void> {
-    const key = prKey(params.owner, params.repo, params.number);
+  private hoverConfig({ owner, repo }: PrRef): RepoConfig['hover'] {
+    return this.repos[`${owner}/${repo}`]?.hover;
+  }
+
+  private row({ owner, repo, number }: PrRef): HoverTreeRow | null {
+    return this.db
+      .query<HoverTreeRow, [string, string, number]>(
+        'SELECT * FROM hover_trees WHERE owner = ? AND repo = ? AND number = ?',
+      )
+      .get(owner, repo, number);
+  }
+
+  private setState(
+    pr: PrRef,
+    state: StoredState,
+    error: string | null,
+    headSha?: string,
+  ): void {
+    this.db
+      .query(
+        `UPDATE hover_trees SET state = ?, error = ?, head_sha = COALESCE(?, head_sha)
+         WHERE owner = ? AND repo = ? AND number = ?`,
+      )
+      .run(state, error, headSha ?? null, pr.owner, pr.repo, pr.number);
+  }
+
+  private treePath({ owner, repo, number }: PrRef): string {
+    return join(this.dataDir, 'trees', owner, repo, `pr-${number}`);
+  }
+
+  // A provision or checkout failure is recorded on the tree, not thrown.
+  // Concurrent calls for the same PR share one attempt.
+  ensureTree(params: EnsureTreeParams): Promise<void> {
+    const key = prKey(params);
     const inFlight = this.pending.get(key);
     if (inFlight !== undefined) return inFlight;
 
@@ -230,170 +292,176 @@ export class TreeManager {
   }
 
   private async doEnsureTree(params: EnsureTreeParams): Promise<void> {
-    const repoConfig = this.repoConfig(params.owner, params.repo);
-    if (repoConfig === null || repoConfig.wtRepo === undefined) return;
+    const hover = this.hoverConfig(params);
+    if (hover === undefined) return;
 
-    const row = this.selectStmt.get({
-      $owner: params.owner,
-      $repo: params.repo,
-      $number: params.number,
-    });
-
+    const row = this.row(params);
     if (row !== null) {
       if (row.head_sha === params.headSha) {
         this.touch(params.owner, params.repo, params.number);
         return;
       }
-      if (!touchesLockfileOrPyproject(params.changedPaths)) {
-        const existingPath = await treePath(this.runner, row.tree_name);
-        if (existingPath !== null) {
-          await this.git.fetch(existingPath, params.headSha);
-          await this.git.checkoutDetached(existingPath, params.headSha);
-          this.updateHeadStmt.run({
-            $owner: params.owner,
-            $repo: params.repo,
-            $number: params.number,
-            $headSha: params.headSha,
-            $lastUsedAt: this.now(),
-          });
-          return;
-        }
-        // wt has forgotten a tree we still had a row for; fall through and
-        // reprovision instead of failing the hover request.
-      } else {
-        await this.teardown(params.owner, params.repo, params.number);
+      if (row.state === 'provisioning') return;
+      if (
+        row.state === 'ready' &&
+        !touchesLockfileOrPyproject(params.changedPaths)
+      ) {
+        await this.checkoutInPlace(row, params.headSha);
+        return;
       }
+      await this.removeTree(row);
     }
 
-    await this.provision(params, repoConfig.wtRepo, repoConfig.referenceClone);
+    await this.evictForRoom();
+
+    const path = this.treePath(params);
+    const now = this.now();
+    this.db
+      .query(
+        `INSERT INTO hover_trees (owner, repo, number, head_sha, path, state, error, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, 'provisioning', NULL, ?, ?)`,
+      )
+      .run(
+        params.owner,
+        params.repo,
+        params.number,
+        params.headSha,
+        path,
+        now,
+        now,
+      );
+
+    const profiles = profilesForLanguages(params.languages);
+    const steps = hover.steps.filter((step) => profiles.includes(step.profile));
+    await this.enqueue(() => this.provision(params, path, steps));
+  }
+
+  private enqueue(task: () => Promise<void>): Promise<void> {
+    const run = this.queue.then(task);
+    this.queue = run.catch(() => {});
+    return run;
   }
 
   private async provision(
-    params: EnsureTreeParams,
-    wtRepo: string,
-    referenceClone: string | undefined,
+    pr: EnsureTreeParams,
+    path: string,
+    steps: NonNullable<RepoConfig['hover']>['steps'],
   ): Promise<void> {
-    if (referenceClone !== undefined) {
-      await this.git.fetch(referenceClone, params.headSha);
+    try {
+      const bare = await this.bareClone(pr.owner, pr.repo);
+      await this.git.runOrThrow(['fetch', 'origin', pr.headSha], { cwd: bare });
+      await rm(path, { recursive: true, force: true });
+      await this.git.runOrThrow(['worktree', 'prune'], { cwd: bare });
+      mkdirSync(dirname(path), { recursive: true });
+      await this.git.runOrThrow(
+        ['worktree', 'add', '--detach', path, pr.headSha],
+        { cwd: bare },
+      );
+
+      const logPath = join(path, PROVISION_LOG_FILE);
+      for (const step of steps) {
+        const cwd = join(path, step.cwd ?? '.');
+        const exitCode = await this.runStep({ run: step.run, cwd, logPath });
+        if (exitCode !== 0) {
+          throw new Error(
+            `"${step.run}" in ${step.cwd ?? '.'} exited with code ${exitCode}; see ${PROVISION_LOG_FILE}`,
+          );
+        }
+      }
+      this.setState(pr, 'ready', null);
+    } catch (error) {
+      this.setState(pr, 'failed', errorMessage(error));
     }
-    const profiles = profilesForLanguages(params.languages);
-    const name = `panopticon-pr-${params.number}`;
-    const branch = `panopticon/pr-${params.number}`;
-
-    await treeNew(this.runner, {
-      repo: wtRepo,
-      name,
-      branch,
-      onto: params.headSha,
-      profiles,
-    });
-
-    const now = this.now();
-    this.upsertStmt.run({
-      $owner: params.owner,
-      $repo: params.repo,
-      $number: params.number,
-      $treeName: name,
-      $headSha: params.headSha,
-      $profiles: profiles.join(','),
-      $createdAt: now,
-      $lastUsedAt: now,
-    });
   }
 
-  async status(
-    owner: string,
-    repo: string,
-    number: number,
-  ): Promise<HoverTreeState> {
-    const repoConfig = this.repoConfig(owner, repo);
-    if (repoConfig === null || repoConfig.wtRepo === undefined) {
-      return { state: 'unsupported' };
+  private async checkoutInPlace(
+    row: HoverTreeRow,
+    headSha: string,
+  ): Promise<void> {
+    try {
+      await this.git.runOrThrow(['fetch', 'origin', headSha], {
+        cwd: row.path,
+      });
+      await this.git.runOrThrow(['checkout', '--detach', headSha], {
+        cwd: row.path,
+      });
+      this.setState(row, 'ready', null, headSha);
+      this.touch(row.owner, row.repo, row.number);
+    } catch (error) {
+      this.setState(row, 'failed', errorMessage(error), headSha);
     }
+  }
 
-    const row = this.selectStmt.get({
-      $owner: owner,
-      $repo: repo,
-      $number: number,
-    });
-    if (row === null) {
-      const stillProvisioning = this.pending.has(prKey(owner, repo, number));
-      return stillProvisioning ? { state: 'provisioning' } : { state: 'none' };
+  // Trees still provisioning are never evicted.
+  private async evictForRoom(): Promise<void> {
+    const rows = this.db
+      .query<HoverTreeRow, []>(
+        'SELECT * FROM hover_trees ORDER BY last_used_at',
+      )
+      .all();
+    const excess = rows.length - (this.maxTrees - 1);
+    const evictable = rows.filter((row) => row.state !== 'provisioning');
+    for (const row of evictable.slice(0, Math.max(0, excess))) {
+      await this.removeTree(row);
     }
+  }
 
-    const wtStatus = await treeStatus(this.runner, row.tree_name);
-    if (wtStatus === null) {
-      this.deleteStmt.run({ $owner: owner, $repo: repo, $number: number });
-      return { state: 'none' };
-    }
+  status(owner: string, repo: string, number: number): HoverTreeState {
+    const pr = { owner, repo, number };
+    if (this.hoverConfig(pr) === undefined) return { state: 'unsupported' };
 
-    switch (wtStatus.state) {
+    const row = this.row(pr);
+    if (row === null) return { state: 'none' };
+    switch (row.state) {
       case 'provisioning':
-        return { state: 'provisioning' };
+        return { state: 'provisioning', headSha: row.head_sha };
       case 'ready':
-        return { state: 'ready', path: wtStatus.path };
+        return { state: 'ready', headSha: row.head_sha, path: row.path };
       case 'failed':
         return {
           state: 'failed',
-          error: `wt tree provisioning failed; see ${wtStatus.logPath}`,
+          headSha: row.head_sha,
+          error: row.error ?? 'Provisioning failed',
         };
     }
   }
 
-  async path(
-    owner: string,
-    repo: string,
-    number: number,
-  ): Promise<string | null> {
-    const row = this.selectStmt.get({
-      $owner: owner,
-      $repo: repo,
-      $number: number,
-    });
-    if (row === null) return null;
-    return treePath(this.runner, row.tree_name);
-  }
-
   touch(owner: string, repo: string, number: number): void {
-    this.touchStmt.run({
-      $owner: owner,
-      $repo: repo,
-      $number: number,
-      $lastUsedAt: this.now(),
-    });
+    this.db
+      .query(
+        'UPDATE hover_trees SET last_used_at = ? WHERE owner = ? AND repo = ? AND number = ?',
+      )
+      .run(this.now(), owner, repo, number);
   }
 
+  private async removeTree(row: HoverTreeRow): Promise<void> {
+    await this.stopServers(row.owner, row.repo, row.number);
+    await rm(row.path, { recursive: true, force: true });
+    const bare = await this.bareClone(row.owner, row.repo);
+    await this.git.runOrThrow(['worktree', 'prune'], { cwd: bare });
+    this.db
+      .query(
+        'DELETE FROM hover_trees WHERE owner = ? AND repo = ? AND number = ?',
+      )
+      .run(row.owner, row.repo, row.number);
+  }
+
+  // Waits for any provision in flight for the PR before removing its tree.
   async teardown(owner: string, repo: string, number: number): Promise<void> {
-    const row = this.selectStmt.get({
-      $owner: owner,
-      $repo: repo,
-      $number: number,
-    });
-    if (row !== null) {
-      const wtStatus = await treeStatus(this.runner, row.tree_name);
-      if (wtStatus !== null) {
-        await treeRm(this.runner, row.tree_name, {
-          force: true,
-          deleteBranch: true,
-        });
-      }
-    }
-    await this.stopServers(owner, repo, number);
-    this.deleteStmt.run({ $owner: owner, $repo: repo, $number: number });
+    const pr = { owner, repo, number };
+    await this.pending.get(prKey(pr))?.catch(() => {});
+    const row = this.row(pr);
+    if (row !== null) await this.removeTree(row);
   }
 
-  // For a later poller: tears down every tree whose hover has been idle
-  // longer than `olderThanMs` and reports which PRs it reaped.
-  async reapIdle(
-    olderThanMs: number,
-  ): Promise<{ owner: string; repo: string; number: number }[]> {
+  async reapIdle(olderThanMs: number): Promise<PrRef[]> {
     const cutoff = new Date(this.clock() - olderThanMs).toISOString();
-    const idle = this.selectIdleStmt.all({ $cutoff: cutoff });
-    const reaped: { owner: string; repo: string; number: number }[] = [];
-    for (const row of idle) {
-      await this.teardown(row.owner, row.repo, row.number);
-      reaped.push({ owner: row.owner, repo: row.repo, number: row.number });
-    }
-    return reaped;
+    const idle = this.db
+      .query<HoverTreeRow, [string]>(
+        "SELECT * FROM hover_trees WHERE last_used_at < ? AND state != 'provisioning'",
+      )
+      .all(cutoff);
+    for (const row of idle) await this.removeTree(row);
+    return idle.map(({ owner, repo, number }) => ({ owner, repo, number }));
   }
 }

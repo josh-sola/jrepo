@@ -245,8 +245,8 @@ async function defaultCreateClient(
   const pythonSettings = { pythonPath, analysis: {} };
 
   return new LspClient({
-    command: 'uvx',
-    args: ['--from', 'basedpyright', 'basedpyright-langserver', '--stdio'],
+    command: 'basedpyright-langserver',
+    args: ['--stdio'],
     cwd: treePath,
     initializationOptions: { python: pythonSettings },
     onWorkspaceConfiguration: (params) =>

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { StackResponse } from '../../shared/stack.ts';
 import { createStackCache } from '../stack/cache.ts';
+import { testGit } from '../git/__fixtures__/testGit.ts';
 import { GraphiteLocal } from '../stack/graphiteLocal.ts';
 import { StackError } from '../stack/resolve.ts';
 import type { StackSource } from '../stack/source.ts';
@@ -11,7 +12,7 @@ import { stackRouter } from './stack.ts';
 // No referenceClone, so snapshot() always resolves null without spawning
 // git; every test here exercises the GitHub fallback path.
 function noGraphiteLocal(): GraphiteLocal {
-  return new GraphiteLocal(null);
+  return new GraphiteLocal(null, testGit);
 }
 
 function mountStackRouter(deps: StackRouterDeps): Hono {

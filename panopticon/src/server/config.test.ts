@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { HoverStep } from './config.ts';
 import { loadConfig } from './config.ts';
 
 // Every fixture sets dataDir to a path under the scratch dir this test
@@ -103,6 +104,63 @@ describe('loadConfig', () => {
       } finally {
         delete process.env.PANOPTICON_PORT;
       }
+    });
+  });
+
+  const STEPS: HoverStep[] = [
+    { profile: 'node', run: 'pnpm install --frozen-lockfile' },
+    { profile: 'python', cwd: 'python', run: 'uv sync' },
+  ];
+
+  test('accepts hover steps for a repo and defaults maxTrees to 3', () => {
+    withTempConfig(
+      { repos: { 'owner/name': { trunk: 'main', hover: { steps: STEPS } } } },
+      (path) => {
+        const config = loadConfig(path);
+        expect(config.repos['owner/name']?.hover).toEqual({ steps: STEPS });
+        expect(config.hover.maxTrees).toBe(3);
+      },
+    );
+  });
+
+  test('rejects a hover step with an unknown profile', () => {
+    withTempConfig(
+      {
+        repos: {
+          'owner/name': {
+            trunk: 'main',
+            hover: { steps: [{ profile: 'ruby', run: 'bundle' }] },
+          },
+        },
+      },
+      (path) => {
+        expect(() => loadConfig(path)).toThrow(/hover/);
+      },
+    );
+  });
+
+  test('rejects a hover step without a run command', () => {
+    withTempConfig(
+      {
+        repos: {
+          'owner/name': {
+            trunk: 'main',
+            hover: { steps: [{ profile: 'node' }] },
+          },
+        },
+      },
+      (path) => {
+        expect(() => loadConfig(path)).toThrow(/hover/);
+      },
+    );
+  });
+
+  test('reads hover.maxTrees and rejects a non-positive one', () => {
+    withTempConfig({ hover: { maxTrees: 5 } }, (path) => {
+      expect(loadConfig(path).hover.maxTrees).toBe(5);
+    });
+    withTempConfig({ hover: { maxTrees: 0 } }, (path) => {
+      expect(() => loadConfig(path)).toThrow(/maxTrees/);
     });
   });
 });

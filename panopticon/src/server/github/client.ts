@@ -3,11 +3,11 @@ import { Octokit } from '@octokit/rest';
 import { createOctokitGitHubApi } from './api.ts';
 import type { GitHubApi } from './api.ts';
 
-// Reads the OAuth token `gh` already holds, so panopticon needs no
-// credentials of its own. Boot code calls this once; wrappers take the
-// token or the built clients as constructor parameters instead of reading
-// it again.
+// Uses `GITHUB_TOKEN` when set, and otherwise the OAuth token `gh` already
+// holds, so panopticon needs no credentials of its own.
 export async function readGhToken(): Promise<string> {
+  const envToken = process.env.GITHUB_TOKEN;
+  if (envToken) return envToken;
   const proc = Bun.spawn(['gh', 'auth', 'token'], {
     stdout: 'pipe',
     stderr: 'pipe',

@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Git } from '../git/git.ts';
 
 export interface GraphiteBranch {
   name: string;
@@ -189,14 +190,16 @@ function sameMtimes(a: FileMtimes, b: FileMtimes): boolean {
 // observe, so file mtimes are the only change signal.
 export class GraphiteLocal {
   private readonly repoPath: string | null;
+  private readonly git: Git;
   private gitDirPromise: Promise<string | null> | null = null;
   private cache: {
     snapshot: GraphiteSnapshot | null;
     mtimes: FileMtimes;
   } | null = null;
 
-  constructor(repoPath: string | null) {
+  constructor(repoPath: string | null, git: Git) {
     this.repoPath = repoPath;
+    this.git = git;
   }
 
   async snapshot(): Promise<GraphiteSnapshot | null> {
@@ -232,20 +235,12 @@ export class GraphiteLocal {
   }
 
   private async doResolveGitDir(repoPath: string): Promise<string | null> {
-    const proc = Bun.spawn(
-      [
-        'git',
-        '-C',
-        repoPath,
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-common-dir',
-      ],
-      { stdout: 'pipe', stderr: 'pipe' },
-    );
-    const [stdout, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      proc.exited,
+    const { stdout, exitCode } = await this.git.run([
+      '-C',
+      repoPath,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
     ]);
     if (exitCode !== 0) {
       console.error(
@@ -253,6 +248,6 @@ export class GraphiteLocal {
       );
       return null;
     }
-    return stdout.trim();
+    return new TextDecoder().decode(stdout).trim();
   }
 }

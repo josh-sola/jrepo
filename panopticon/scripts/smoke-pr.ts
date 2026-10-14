@@ -9,6 +9,7 @@
 
 import { join } from 'node:path';
 import { expandHome } from '../src/server/config.ts';
+import { createGit } from '../src/server/git/git.ts';
 import { RepoStores } from '../src/server/git/stores.ts';
 import { createGitHubApi, readGhToken } from '../src/server/github/client.ts';
 import { loadPr } from '../src/server/routes/pr.ts';
@@ -33,16 +34,11 @@ async function main(): Promise<void> {
   const dataDir = process.env.PANOPTICON_SMOKE_DATA_DIR
     ? expandHome(process.env.PANOPTICON_SMOKE_DATA_DIR)
     : join(process.cwd(), '.smoke-data');
-  const referenceClone = process.env.PANOPTICON_SMOKE_REFERENCE_CLONE
-    ? expandHome(process.env.PANOPTICON_SMOKE_REFERENCE_CLONE)
-    : null;
   const trunk = process.env.PANOPTICON_SMOKE_TRUNK ?? 'master';
-  const stores = new RepoStores(dataDir, {
-    [`${owner}/${repo}`]: {
-      trunk,
-      ...(referenceClone ? { referenceClone } : {}),
-    },
-  });
+  const stores = new RepoStores(
+    dataDir,
+    createGit({ token, safeDirectories: [] }),
+  );
 
   const [{ pr, files }, threads] = await Promise.all([
     loadPr({ github, stores, trunkFor: () => trunk }, owner, repo, number),

@@ -1,36 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PrFile, PrFileStatus } from '../../shared/github.ts';
-
-async function runGit(
-  args: string[],
-  cwd?: string,
-  stdin?: string,
-): Promise<{ stdout: Uint8Array; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(['git', ...args], {
-    cwd,
-    stdin: 'pipe',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  if (stdin !== undefined) proc.stdin.write(stdin);
-  proc.stdin.end();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout)
-      .arrayBuffer()
-      .then((buffer) => new Uint8Array(buffer)),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
-}
-
-async function runGitOrThrow(args: string[], cwd?: string): Promise<void> {
-  const { stderr, exitCode } = await runGit(args, cwd);
-  if (exitCode !== 0) {
-    throw new Error(`git ${args.join(' ')} failed: ${stderr.trim()}`);
-  }
-}
+import type { Git } from './git.ts';
 
 // git diff --name-status -z separates every field with NUL instead of tab
 // and newline. A rename or copy carries a similarity-scored status like
@@ -113,63 +84,73 @@ function parseCheckAttrZ(stdout: string): Set<string> {
 export interface RepoStoreOptions {
   dir: string;
   remoteUrl: string;
-  referenceClone: string | null;
+  git: Git;
 }
 
 // One GitHub repo's bare clone on disk. Every method shells out to `git`
 // against `dir`; nothing here talks to GitHub directly.
 export class RepoStore {
-  private readonly dir: string;
+  readonly dir: string;
   private readonly remoteUrl: string;
-  private readonly referenceClone: string | null;
+  private readonly git: Git;
 
   // Serializes every `git fetch` against this store so two concurrent
   // callers never race into the same bare repo (fetch can collide on ref
   // locks and throw). Each fetch appends itself to this chain and the chain
   // itself never rejects, so one failed fetch does not wedge the next.
   private fetchQueue: Promise<void> = Promise.resolve();
-  private ensureInFlight: Promise<void> | null = null;
+  private ensured: Promise<void> | null = null;
   private readonly fetchPullInFlight = new Map<string, Promise<void>>();
 
   constructor(options: RepoStoreOptions) {
     this.dir = options.dir;
     this.remoteUrl = options.remoteUrl;
-    this.referenceClone = options.referenceClone;
+    this.git = options.git;
   }
 
-  async ensure(): Promise<void> {
-    if (existsSync(this.dir)) return;
-    if (this.ensureInFlight) return this.ensureInFlight;
-    const promise = this.doEnsure().finally(() => {
-      this.ensureInFlight = null;
+  // Clones the bare repo on first use. An existing clone keeps working when
+  // the configured remote URL changes, because its stored URL is rewritten.
+  ensure(): Promise<void> {
+    this.ensured ??= this.doEnsure().catch((error: unknown) => {
+      this.ensured = null;
+      throw error;
     });
-    this.ensureInFlight = promise;
-    return promise;
+    return this.ensured;
   }
 
   private async doEnsure(): Promise<void> {
-    if (existsSync(this.dir)) return;
-    mkdirSync(dirname(this.dir), { recursive: true });
-    const args = ['clone', '--bare'];
-    if (this.referenceClone) {
-      args.push('--reference-if-able', this.referenceClone);
+    if (!existsSync(this.dir)) {
+      mkdirSync(dirname(this.dir), { recursive: true });
+      await this.git.runOrThrow(['clone', '--bare', this.remoteUrl, this.dir]);
+      return;
     }
-    args.push(this.remoteUrl, this.dir);
-    await runGitOrThrow(args);
+    const { stdout, exitCode } = await this.git.run(
+      ['config', '--get', 'remote.origin.url'],
+      { cwd: this.dir },
+    );
+    if (
+      exitCode === 0 &&
+      new TextDecoder().decode(stdout).trim() === this.remoteUrl
+    ) {
+      return;
+    }
+    await this.git.runOrThrow(['remote', 'set-url', 'origin', this.remoteUrl], {
+      cwd: this.dir,
+    });
   }
 
   private runFetch(args: string[]): Promise<void> {
     const run = this.fetchQueue
       .catch(() => {})
-      .then(() => runGitOrThrow(args, this.dir));
+      .then(() => this.git.runOrThrow(args, { cwd: this.dir }));
     this.fetchQueue = run.catch(() => {});
     return run;
   }
 
   async hasCommit(sha: string): Promise<boolean> {
-    const { exitCode } = await runGit(
+    const { exitCode } = await this.git.run(
       ['cat-file', '-e', `${sha}^{commit}`],
-      this.dir,
+      { cwd: this.dir },
     );
     return exitCode === 0;
   }
@@ -227,7 +208,7 @@ export class RepoStore {
     number: number,
     since: string,
   ): Promise<string | null> {
-    const { stdout, stderr, exitCode } = await runGit(
+    const { stdout, stderr, exitCode } = await this.git.run(
       [
         'log',
         `refs/remotes/origin/${trunk}`,
@@ -238,7 +219,7 @@ export class RepoStore {
         '1',
         `--since=${since}`,
       ],
-      this.dir,
+      { cwd: this.dir },
     );
     if (exitCode !== 0) {
       throw new Error(`git log failed: ${stderr.trim()}`);
@@ -248,9 +229,9 @@ export class RepoStore {
   }
 
   async blobOid(treeSha: string, path: string): Promise<string | null> {
-    const { stdout, exitCode } = await runGit(
+    const { stdout, exitCode } = await this.git.run(
       ['rev-parse', '--verify', `${treeSha}:${path}`],
-      this.dir,
+      { cwd: this.dir },
     );
     if (exitCode !== 0) return null;
     return new TextDecoder().decode(stdout).trim();
@@ -262,10 +243,9 @@ export class RepoStore {
   async blobOids(treeSha: string, paths: string[]): Promise<(string | null)[]> {
     if (paths.length === 0) return [];
     const input = paths.map((path) => `${treeSha}:${path}\n`).join('');
-    const { stdout, stderr, exitCode } = await runGit(
+    const { stdout, stderr, exitCode } = await this.git.run(
       ['cat-file', '--batch-check=%(objectname)'],
-      this.dir,
-      input,
+      { cwd: this.dir, stdin: input },
     );
     if (exitCode !== 0) {
       throw new Error(`git cat-file --batch-check failed: ${stderr.trim()}`);
@@ -279,17 +259,16 @@ export class RepoStore {
   }
 
   async readBlob(oid: string): Promise<Uint8Array | null> {
-    const { stdout, exitCode } = await runGit(
-      ['cat-file', 'blob', oid],
-      this.dir,
-    );
+    const { stdout, exitCode } = await this.git.run(['cat-file', 'blob', oid], {
+      cwd: this.dir,
+    });
     return exitCode === 0 ? stdout : null;
   }
 
   async nameStatus(baseSha: string, headSha: string): Promise<PrFile[]> {
-    const { stdout, stderr, exitCode } = await runGit(
+    const { stdout, stderr, exitCode } = await this.git.run(
       ['diff', '--name-status', '-M', '-z', baseSha, headSha],
-      this.dir,
+      { cwd: this.dir },
     );
     if (exitCode !== 0) {
       throw new Error(`git diff --name-status failed: ${stderr.trim()}`);
@@ -300,7 +279,7 @@ export class RepoStore {
   async generatedPaths(treeSha: string, paths: string[]): Promise<Set<string>> {
     if (paths.length === 0) return new Set();
     const input = paths.map((path) => `${path}\0`).join('');
-    const { stdout, stderr, exitCode } = await runGit(
+    const { stdout, stderr, exitCode } = await this.git.run(
       [
         'check-attr',
         `--source=${treeSha}`,
@@ -308,8 +287,7 @@ export class RepoStore {
         '--stdin',
         'linguist-generated',
       ],
-      this.dir,
-      input,
+      { cwd: this.dir, stdin: input },
     );
     if (exitCode !== 0) {
       throw new Error(`git check-attr failed: ${stderr.trim()}`);

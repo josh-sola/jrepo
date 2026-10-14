@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RepoConfig } from '../config.ts';
 import { openDb } from '../db.ts';
-import type { GitOps } from './trees.ts';
-import { TreeManager } from './trees.ts';
-import type { WtRunResult, WtRunner } from './wt.ts';
+import type { Git } from '../git/git.ts';
+import type { EnsureTreeParams, ProvisionStep, StepRunner } from './trees.ts';
+import { PROVISION_LOG_FILE, TreeManager } from './trees.ts';
 
 let dir: string | undefined;
 
@@ -15,545 +22,473 @@ afterEach(() => {
   dir = undefined;
 });
 
-function fakeRunner(
-  handler: (args: string[]) => WtRunResult,
-): WtRunner & { calls: string[][] } {
-  const calls: string[][] = [];
-  return {
-    calls,
-    run: (args) => {
-      calls.push(args);
-      return Promise.resolve(handler(args));
-    },
-  };
-}
-
-function fakeGit(): GitOps & {
-  calls: { op: string; cwd: string; ref: string }[];
-} {
-  const calls: { op: string; cwd: string; ref: string }[] = [];
-  return {
-    calls,
-    fetch: (cwd, ref) => {
-      calls.push({ op: 'fetch', cwd, ref });
-      return Promise.resolve();
-    },
-    checkoutDetached: (cwd, sha) => {
-      calls.push({ op: 'checkout', cwd, ref: sha });
-      return Promise.resolve();
-    },
-  };
-}
-
 const REPOS: Record<string, RepoConfig> = {
   'acme/widgets': {
-    wtRepo: 'widgets',
-    referenceClone: '/repos/widgets',
     trunk: 'main',
+    hover: {
+      steps: [
+        { profile: 'node', run: 'pnpm install' },
+        { profile: 'python', cwd: 'py', run: 'uv sync' },
+      ],
+    },
   },
   'acme/unsupported': { trunk: 'main' },
 };
 
-function openTestDb() {
-  dir = mkdtempSync(join(tmpdir(), 'panopticon-trees-test-'));
-  return openDb(join(dir, 'test.sqlite'));
+const BARE = '/bare/acme/widgets.git';
+
+interface GitCall {
+  args: string[];
+  cwd?: string;
 }
 
-function statusResponse(
-  state: 'provisioning' | 'ready' | 'failed',
-  overrides: Partial<{ path: string; logPath: string }> = {},
-): string {
-  return JSON.stringify([
-    {
-      id: 'tree-id',
-      name: 'panopticon-pr-1',
-      branch: 'panopticon/pr-1',
-      repo: 'widgets',
-      path: overrides.path ?? '/repos/wt/widgets/trees/panopticon-pr-1',
-      state,
-      stale: false,
-      logPath:
-        overrides.logPath ??
-        '/repos/wt/widgets/trees/panopticon-pr-1/.wt-provision.log',
+function harness(
+  options: {
+    maxTrees?: number;
+    runStep?: StepRunner;
+    db?: ReturnType<typeof openDb>;
+    runOrThrow?: Git['runOrThrow'];
+    bareExists?: boolean;
+  } = {},
+) {
+  dir ??= mkdtempSync(join(tmpdir(), 'panopticon-trees-test-'));
+  const db = options.db ?? openDb(join(dir, 'test.sqlite'));
+  const gitCalls: GitCall[] = [];
+  const stopped: number[] = [];
+  const steps: ProvisionStep[] = [];
+  const clock = { now: Date.parse('2026-01-01T00:00:00Z') };
+
+  const git: Git = {
+    run: (args, runOptions) => {
+      gitCalls.push({ args, cwd: runOptions?.cwd });
+      return Promise.resolve({
+        stdout: new Uint8Array(),
+        stderr: '',
+        exitCode: 0,
+      });
     },
-  ]);
+    runOrThrow:
+      options.runOrThrow ??
+      ((args, runOptions) => {
+        gitCalls.push({ args, cwd: runOptions?.cwd });
+        return Promise.resolve();
+      }),
+  };
+  const runStep: StepRunner =
+    options.runStep ??
+    ((step) => {
+      steps.push(step);
+      return Promise.resolve(0);
+    });
+
+  const manager = new TreeManager({
+    db,
+    dataDir: dir,
+    repos: REPOS,
+    maxTrees: options.maxTrees ?? 3,
+    git,
+    bareClone: () => Promise.resolve(BARE),
+    existingBareClone: () => (options.bareExists === false ? null : BARE),
+    stopServers: (_owner, _repo, number) => {
+      stopped.push(number);
+      return Promise.resolve();
+    },
+    runStep,
+    clock: () => clock.now,
+  });
+  return { manager, db, gitCalls, stopped, steps, clock, dataDir: dir };
+}
+
+function params(overrides: Partial<EnsureTreeParams> = {}): EnsureTreeParams {
+  return {
+    owner: 'acme',
+    repo: 'widgets',
+    number: 1,
+    headSha: 'sha1',
+    languages: ['typescript'],
+    changedPaths: ['src/a.ts'],
+    ...overrides,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 describe('TreeManager.ensureTree', () => {
-  test('reports unsupported and does nothing for a repo without wtRepo', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner(() => ({ code: 0, stdout: '[]', stderr: '' }));
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({ db, runner, repos: REPOS, stopServers });
+  test('does nothing for a repo without hover config', async () => {
+    const { manager, gitCalls } = harness();
 
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'unsupported',
-      number: 1,
-      headSha: 'sha1',
-      languages: ['typescript'],
-      changedPaths: [],
-    });
+    await manager.ensureTree(params({ repo: 'unsupported' }));
 
-    expect(runner.calls).toEqual([]);
-    expect(await manager.status('acme', 'unsupported', 1)).toEqual({
+    expect(gitCalls).toEqual([]);
+    expect(manager.status('acme', 'unsupported', 1)).toEqual({
       state: 'unsupported',
     });
-    db.close();
   });
 
-  test('fetches the base checkout and runs wt tree new for a fresh PR', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-1\n',
-          stderr: '',
-        };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
-    });
-    const git = fakeGit();
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git,
-    });
+  test('fetches the head, adds a worktree, and runs only the steps for the needed profiles', async () => {
+    const { manager, gitCalls, steps, dataDir } = harness();
 
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'headsha',
-      languages: ['typescript', 'python'],
-      changedPaths: ['src/a.ts'],
-    });
+    await manager.ensureTree(params());
 
-    expect(git.calls).toEqual([
-      { op: 'fetch', cwd: '/repos/widgets', ref: 'headsha' },
+    const path = join(dataDir, 'trees', 'acme', 'widgets', 'pr-1');
+    expect(gitCalls).toEqual([
+      { args: ['fetch', 'origin', 'sha1'], cwd: BARE },
+      { args: ['worktree', 'prune'], cwd: BARE },
+      { args: ['worktree', 'add', '--detach', path, 'sha1'], cwd: BARE },
     ]);
-    expect(runner.calls).toEqual([
-      [
-        'tree',
-        'new',
-        '--name',
-        'panopticon-pr-7',
-        '--branch',
-        'panopticon/pr-7',
-        '--onto',
-        'headsha',
-        '--profile',
-        'node,python',
-        'widgets',
-      ],
+    expect(steps).toEqual([
+      {
+        run: 'pnpm install',
+        cwd: path,
+        logPath: join(path, PROVISION_LOG_FILE),
+      },
     ]);
+    expect(manager.status('acme', 'widgets', 1)).toEqual({
+      state: 'ready',
+      headSha: 'sha1',
+      path,
+    });
+  });
 
+  test('runs steps for every profile in order, from their own cwd', async () => {
+    const { manager, steps, dataDir } = harness();
+
+    await manager.ensureTree(params({ languages: ['python', 'typescript'] }));
+
+    const path = join(dataDir, 'trees', 'acme', 'widgets', 'pr-1');
+    expect(steps.map((step) => [step.run, step.cwd])).toEqual([
+      ['pnpm install', path],
+      ['uv sync', join(path, 'py')],
+    ]);
+  });
+
+  test('reports provisioning until the steps finish', async () => {
+    const gate = deferred<number>();
+    const { manager } = harness({ runStep: () => gate.promise });
+
+    const attempt = manager.ensureTree(params());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(manager.status('acme', 'widgets', 1)).toMatchObject({
+      state: 'provisioning',
+      headSha: 'sha1',
+    });
+
+    gate.resolve(0);
+    await attempt;
+    expect(manager.status('acme', 'widgets', 1).state).toBe('ready');
+  });
+
+  test('marks the tree failed with the step and exit code when a step fails', async () => {
+    const { manager } = harness({ runStep: () => Promise.resolve(2) });
+
+    await manager.ensureTree(params());
+
+    const state = manager.status('acme', 'widgets', 1);
+    expect(state).toMatchObject({ state: 'failed', headSha: 'sha1' });
+    expect(state.state === 'failed' && state.error).toContain('pnpm install');
+    expect(state.state === 'failed' && state.error).toContain('code 2');
+  });
+
+  test('marks the tree failed when a git command fails', async () => {
+    const { manager } = harness({
+      runOrThrow: () => Promise.reject(new Error('git fetch failed: nope')),
+    });
+
+    await manager.ensureTree(params());
+
+    expect(manager.status('acme', 'widgets', 1)).toEqual({
+      state: 'failed',
+      headSha: 'sha1',
+      error: 'git fetch failed: nope',
+    });
+  });
+
+  test('a failed tree stays failed for the same head and retries for a new one', async () => {
+    let exitCode = 1;
+    const calls: string[] = [];
+    const { manager } = harness({
+      runStep: (step) => {
+        calls.push(step.run);
+        return Promise.resolve(exitCode);
+      },
+    });
+
+    await manager.ensureTree(params());
+    await manager.ensureTree(params());
+    await manager.ensureTree(params());
+    expect(calls).toHaveLength(1);
+
+    exitCode = 0;
+    await manager.ensureTree(params({ headSha: 'sha2' }));
+    expect(calls).toHaveLength(2);
+    expect(manager.status('acme', 'widgets', 1)).toMatchObject({
+      state: 'ready',
+      headSha: 'sha2',
+    });
+  });
+
+  test('reuses a ready tree for the same head and bumps last use', async () => {
+    const { manager, gitCalls, steps, clock, db } = harness();
+    await manager.ensureTree(params());
+    const calls = gitCalls.length;
+    const stepCount = steps.length;
+
+    clock.now += 60_000;
+    await manager.ensureTree(params());
+
+    expect(gitCalls).toHaveLength(calls);
+    expect(steps).toHaveLength(stepCount);
     const row = db
-      .query<{ tree_name: string; head_sha: string; profiles: string }, []>(
-        'SELECT tree_name, head_sha, profiles FROM hover_trees',
+      .query<{ last_used_at: string }, []>(
+        'SELECT last_used_at FROM hover_trees',
       )
       .get();
-    expect(row).toEqual({
-      tree_name: 'panopticon-pr-7',
-      head_sha: 'headsha',
-      profiles: 'node,python',
-    });
-    db.close();
+    expect(row?.last_used_at).toBe(new Date(clock.now).toISOString());
   });
 
-  test('does nothing when the recorded head SHA already matches', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner(() => ({ code: 0, stdout: '[]', stderr: '' }));
-    const git = fakeGit();
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git,
-    });
+  test('checks out a moved head in place when no lockfile changed', async () => {
+    const { manager, gitCalls, steps, dataDir } = harness();
+    await manager.ensureTree(params());
+    gitCalls.length = 0;
+    const stepCount = steps.length;
 
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-a',
-      languages: [],
-      changedPaths: [],
-    });
-    runner.calls.length = 0;
-    git.calls.length = 0;
+    await manager.ensureTree(params({ headSha: 'sha2' }));
 
-    // Re-inserted with the same head SHA below, then ensureTree again with
-    // the identical SHA should be a no-op besides touching last_used_at.
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-a',
-      languages: [],
-      changedPaths: [],
-    });
-
-    expect(runner.calls).toEqual([]);
-    expect(git.calls).toEqual([]);
-    db.close();
-  });
-
-  test('checks out the new head in place when no lockfile changed', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-7\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'path') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-7\n',
-          stderr: '',
-        };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
-    });
-    const git = fakeGit();
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git,
-    });
-
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-a',
-      languages: ['typescript'],
-      changedPaths: ['src/a.ts'],
-    });
-    git.calls.length = 0;
-    runner.calls.length = 0;
-
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-b',
-      languages: ['typescript'],
-      changedPaths: ['src/a.ts'],
-    });
-
-    expect(runner.calls).toEqual([['tree', 'path', 'panopticon-pr-7']]);
-    expect(git.calls).toEqual([
-      {
-        op: 'fetch',
-        cwd: '/repos/wt/widgets/trees/panopticon-pr-7',
-        ref: 'sha-b',
-      },
-      {
-        op: 'checkout',
-        cwd: '/repos/wt/widgets/trees/panopticon-pr-7',
-        ref: 'sha-b',
-      },
+    const path = join(dataDir, 'trees', 'acme', 'widgets', 'pr-1');
+    expect(gitCalls).toEqual([
+      { args: ['fetch', 'origin', 'sha2'], cwd: path },
+      { args: ['checkout', '--detach', 'sha2'], cwd: path },
     ]);
-
-    const row = db
-      .query<{ head_sha: string }, []>('SELECT head_sha FROM hover_trees')
-      .get();
-    expect(row).toEqual({ head_sha: 'sha-b' });
-    db.close();
-  });
-
-  test('tears down and reprovisions when the diff touches a lockfile', async () => {
-    const db = openTestDb();
-    let treeRmCalled = false;
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-7\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'status') {
-        return { code: 0, stdout: statusResponse('ready'), stderr: '' };
-      }
-      if (args[0] === 'tree' && args[1] === 'rm') {
-        treeRmCalled = true;
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
-    });
-    const git = fakeGit();
-    let stopped = false;
-    const stopServers = () => {
-      stopped = true;
-      return Promise.resolve();
-    };
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git,
-    });
-
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-a',
-      languages: ['typescript'],
-      changedPaths: ['src/a.ts'],
-    });
-    runner.calls.length = 0;
-    git.calls.length = 0;
-
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 7,
-      headSha: 'sha-b',
-      languages: ['typescript'],
-      changedPaths: ['pnpm-lock.yaml'],
-    });
-
-    expect(treeRmCalled).toBe(true);
-    expect(stopped).toBe(true);
-    // reprovision fetches the new head into the base checkout again, then
-    // runs wt tree new with the new SHA.
-    expect(git.calls).toEqual([
-      { op: 'fetch', cwd: '/repos/widgets', ref: 'sha-b' },
-    ]);
-    expect(
-      runner.calls.some(
-        (call) =>
-          call[0] === 'tree' && call[1] === 'new' && call.includes('sha-b'),
-      ),
-    ).toBe(true);
-    db.close();
-  });
-});
-
-describe('TreeManager.status', () => {
-  test('maps wt status to the hover contract', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-1\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'status') {
-        return { code: 0, stdout: statusResponse('ready'), stderr: '' };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
-    });
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git: fakeGit(),
-    });
-
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 1,
-      headSha: 'sha1',
-      languages: [],
-      changedPaths: [],
-    });
-
-    expect(await manager.status('acme', 'widgets', 1)).toEqual({
+    expect(steps).toHaveLength(stepCount);
+    expect(manager.status('acme', 'widgets', 1)).toEqual({
       state: 'ready',
-      path: '/repos/wt/widgets/trees/panopticon-pr-1',
+      headSha: 'sha2',
+      path,
     });
-    db.close();
   });
 
-  test('reports none and drops the row when wt no longer knows the tree', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-1\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'status') {
-        return {
-          code: 1,
-          stdout: '',
-          stderr: 'error: no tree matches selector',
-        };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
+  test('rebuilds the tree when the PR touches a lockfile', async () => {
+    const { manager, gitCalls, steps, stopped, dataDir } = harness();
+    await manager.ensureTree(params());
+    gitCalls.length = 0;
+    const stepCount = steps.length;
+
+    await manager.ensureTree(
+      params({ headSha: 'sha2', changedPaths: ['pnpm-lock.yaml'] }),
+    );
+
+    const path = join(dataDir, 'trees', 'acme', 'widgets', 'pr-1');
+    expect(stopped).toEqual([1]);
+    expect(gitCalls.map((call) => call.args)).toContainEqual([
+      'worktree',
+      'add',
+      '--detach',
+      path,
+      'sha2',
+    ]);
+    expect(steps).toHaveLength(stepCount + 1);
+    expect(manager.status('acme', 'widgets', 1)).toMatchObject({
+      state: 'ready',
+      headSha: 'sha2',
     });
-    const stopServers = () => Promise.resolve();
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git: fakeGit(),
+  });
+
+  test('runs one provision at a time, in arrival order', async () => {
+    const gates = [deferred<number>(), deferred<number>()];
+    const started: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const { manager } = harness({
+      runStep: async () => {
+        const index = started.length;
+        started.push(index);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        const code = await gates[index]!.promise;
+        active -= 1;
+        return code;
+      },
     });
 
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 1,
-      headSha: 'sha1',
-      languages: [],
-      changedPaths: [],
-    });
+    const first = manager.ensureTree(params({ number: 1 }));
+    const second = manager.ensureTree(params({ number: 2 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toEqual([0]);
+    expect(manager.status('acme', 'widgets', 2).state).toBe('provisioning');
 
-    expect(await manager.status('acme', 'widgets', 1)).toEqual({
-      state: 'none',
-    });
-    const row = db.query('SELECT * FROM hover_trees').get();
-    expect(row).toBeNull();
-    db.close();
+    gates[0]!.resolve(0);
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toEqual([0, 1]);
+
+    gates[1]!.resolve(0);
+    await second;
+    expect(maxActive).toBe(1);
+  });
+
+  test('shares one attempt between concurrent calls for the same PR', async () => {
+    const { manager, steps } = harness();
+
+    await Promise.all([
+      manager.ensureTree(params()),
+      manager.ensureTree(params()),
+    ]);
+
+    expect(steps).toHaveLength(1);
+  });
+
+  test('evicts the least recently used tree when over the cap', async () => {
+    const { manager, stopped, clock } = harness({ maxTrees: 2 });
+    await manager.ensureTree(params({ number: 1 }));
+    clock.now += 1000;
+    await manager.ensureTree(params({ number: 2 }));
+    clock.now += 1000;
+    manager.touch('acme', 'widgets', 1);
+    clock.now += 1000;
+
+    await manager.ensureTree(params({ number: 3 }));
+
+    expect(stopped).toEqual([2]);
+    expect(manager.status('acme', 'widgets', 2).state).toBe('none');
+    expect(manager.status('acme', 'widgets', 1).state).toBe('ready');
+    expect(manager.status('acme', 'widgets', 3).state).toBe('ready');
+  });
+
+  test('replaces a table from the previous schema', () => {
+    dir = mkdtempSync(join(tmpdir(), 'panopticon-trees-test-'));
+    const db = openDb(join(dir, 'test.sqlite'));
+    db.exec(
+      'CREATE TABLE hover_trees (owner TEXT, repo TEXT, number INTEGER, tree_name TEXT, head_sha TEXT)',
+    );
+
+    const { manager } = harness({ db });
+
+    expect(manager.status('acme', 'widgets', 1)).toEqual({ state: 'none' });
   });
 });
 
-describe('TreeManager.teardown', () => {
-  test('removes the wt tree, stops servers, and deletes the row', async () => {
-    const db = openTestDb();
-    const removeCalls: string[][] = [];
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-1\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'status') {
-        return { code: 0, stdout: statusResponse('ready'), stderr: '' };
-      }
-      if (args[0] === 'tree' && args[1] === 'rm') {
-        removeCalls.push(args);
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
-    });
-    const stoppedFor: string[] = [];
-    const stopServers = (
-      owner: string,
-      repo: string,
-      number: number,
-    ): Promise<void> => {
-      stoppedFor.push(`${owner}/${repo}#${number}`);
-      return Promise.resolve();
-    };
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git: fakeGit(),
-    });
+describe('TreeManager teardown and reaping', () => {
+  test('teardown stops servers, prunes worktrees, and drops the row', async () => {
+    const { manager, gitCalls, stopped } = harness();
+    await manager.ensureTree(params());
+    gitCalls.length = 0;
 
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 9,
-      headSha: 'sha1',
-      languages: [],
-      changedPaths: [],
-    });
+    await manager.teardown('acme', 'widgets', 1);
+
+    expect(stopped).toEqual([1]);
+    expect(gitCalls).toEqual([{ args: ['worktree', 'prune'], cwd: BARE }]);
+    expect(manager.status('acme', 'widgets', 1)).toEqual({ state: 'none' });
+  });
+
+  test('teardown of an unknown tree does nothing', async () => {
+    const { manager, stopped } = harness();
 
     await manager.teardown('acme', 'widgets', 9);
 
-    expect(removeCalls).toEqual([
-      ['tree', 'rm', 'panopticon-pr-9', '--force', '--delete-branch'],
-    ]);
-    expect(stoppedFor).toEqual(['acme/widgets#9']);
-    const row = db.query('SELECT * FROM hover_trees').get();
-    expect(row).toBeNull();
-    db.close();
+    expect(stopped).toEqual([]);
   });
 
-  test('is a no-op besides stopping servers when there is no row', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner(() => ({ code: 0, stdout: '[]', stderr: '' }));
-    let stopCount = 0;
-    const stopServers = () => {
-      stopCount += 1;
-      return Promise.resolve();
-    };
-    const manager = new TreeManager({ db, runner, repos: REPOS, stopServers });
+  test('reapIdle removes only trees idle past the cutoff', async () => {
+    const { manager, clock } = harness();
+    await manager.ensureTree(params({ number: 1 }));
+    clock.now += 2 * 60 * 60 * 1000;
+    await manager.ensureTree(params({ number: 2 }));
 
-    await manager.teardown('acme', 'widgets', 999);
+    const reaped = await manager.reapIdle(60 * 60 * 1000);
 
-    expect(runner.calls).toEqual([]);
-    expect(stopCount).toBe(1);
-    db.close();
+    expect(reaped).toEqual([{ owner: 'acme', repo: 'widgets', number: 1 }]);
+    expect(manager.status('acme', 'widgets', 1).state).toBe('none');
+    expect(manager.status('acme', 'widgets', 2).state).toBe('ready');
   });
 });
 
-describe('TreeManager.reapIdle', () => {
-  test('tears down every tree whose last_used_at is older than the cutoff', async () => {
-    const db = openTestDb();
-    const runner = fakeRunner((args) => {
-      if (args[0] === 'tree' && args[1] === 'new') {
-        return {
-          code: 0,
-          stdout: '/repos/wt/widgets/trees/panopticon-pr-1\n',
-          stderr: '',
-        };
-      }
-      if (args[0] === 'tree' && args[1] === 'status') {
-        return { code: 0, stdout: statusResponse('ready'), stderr: '' };
-      }
-      return { code: 0, stdout: '[]', stderr: '' };
+describe('TreeManager.recover', () => {
+  function addRow(
+    db: ReturnType<typeof openDb>,
+    dataDir: string,
+    number: number,
+    state: string,
+  ): string {
+    const path = join(dataDir, 'trees', 'acme', 'widgets', `pr-${number}`);
+    mkdirSync(path, { recursive: true });
+    db.query(
+      `INSERT INTO hover_trees (owner, repo, number, head_sha, path, state, error, created_at, last_used_at)
+       VALUES ('acme', 'widgets', ?, 'sha', ?, ?, NULL, 'now', 'now')`,
+    ).run(number, path, state);
+    return path;
+  }
+
+  test('removes failed and interrupted trees and keeps ready ones', async () => {
+    const { manager, db, dataDir, gitCalls } = harness();
+    const ready = addRow(db, dataDir, 1, 'ready');
+    const failed = addRow(db, dataDir, 2, 'failed');
+    const interrupted = addRow(db, dataDir, 3, 'provisioning');
+
+    const result = await manager.recover();
+
+    expect(result).toEqual({ removedBroken: 2, removedOrphans: 0 });
+    expect(existsSync(ready)).toBe(true);
+    expect(existsSync(failed)).toBe(false);
+    expect(existsSync(interrupted)).toBe(false);
+    expect(manager.status('acme', 'widgets', 1).state).toBe('ready');
+    expect(manager.status('acme', 'widgets', 2).state).toBe('none');
+    expect(manager.status('acme', 'widgets', 3).state).toBe('none');
+    expect(gitCalls).toEqual([{ args: ['worktree', 'prune'], cwd: BARE }]);
+  });
+
+  test('removes a tree directory that has no row', async () => {
+    const { manager, db, dataDir } = harness();
+    const ready = addRow(db, dataDir, 1, 'ready');
+    const orphan = join(dataDir, 'trees', 'acme', 'widgets', 'pr-9');
+    mkdirSync(orphan, { recursive: true });
+
+    const result = await manager.recover();
+
+    expect(result).toEqual({ removedBroken: 0, removedOrphans: 1 });
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(ready)).toBe(true);
+  });
+
+  test('prunes only bare clones that already exist', async () => {
+    const { manager, dataDir, gitCalls } = harness({ bareExists: false });
+    mkdirSync(join(dataDir, 'trees', 'acme', 'widgets', 'pr-9'), {
+      recursive: true,
     });
-    const stopServers = () => Promise.resolve();
 
-    let now = 0;
-    const clock = () => now;
-    const manager = new TreeManager({
-      db,
-      runner,
-      repos: REPOS,
-      stopServers,
-      git: fakeGit(),
-      clock,
-    });
+    await manager.recover();
 
-    now = 1_000;
-    await manager.ensureTree({
-      owner: 'acme',
-      repo: 'widgets',
-      number: 1,
-      headSha: 'sha1',
-      languages: [],
-      changedPaths: [],
-    });
+    expect(gitCalls).toEqual([]);
+  });
 
-    now = 1_000 + 20 * 60 * 1000;
-    const reaped = await manager.reapIdle(15 * 60 * 1000);
+  test('does not prune when nothing was removed', async () => {
+    const { manager, db, dataDir, gitCalls } = harness();
+    addRow(db, dataDir, 1, 'ready');
 
-    expect(reaped).toEqual([{ owner: 'acme', repo: 'widgets', number: 1 }]);
-    const row = db.query('SELECT * FROM hover_trees').get();
-    expect(row).toBeNull();
-    db.close();
+    await manager.recover();
+
+    expect(gitCalls).toEqual([]);
+  });
+
+  test('removes a symlink as a link without touching its target', async () => {
+    const { manager, dataDir } = harness();
+    const outside = join(dataDir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    const repoDir = join(dataDir, 'trees', 'acme', 'widgets');
+    mkdirSync(repoDir, { recursive: true });
+    const link = join(repoDir, 'pr-7');
+    symlinkSync(outside, link);
+
+    await manager.recover();
+
+    expect(existsSync(link)).toBe(false);
+    expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
   });
 });

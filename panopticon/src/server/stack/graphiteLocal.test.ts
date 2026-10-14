@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { testGit } from '../git/__fixtures__/testGit.ts';
 import { GraphiteLocal, readGraphiteSnapshot } from './graphiteLocal.ts';
 
 let dir: string | undefined;
@@ -154,7 +155,7 @@ describe('readGraphiteSnapshot', () => {
 
 describe('GraphiteLocal', () => {
   test('resolves to null without spawning when the repo has no reference clone', async () => {
-    const local = new GraphiteLocal(null);
+    const local = new GraphiteLocal(null, testGit);
     expect(await local.snapshot()).toBeNull();
   });
 
@@ -171,7 +172,7 @@ describe('GraphiteLocal', () => {
     ]);
     writePrInfo(gitDir, [prInfo({ prNumber: 1, headRefName: 'branch-1' })]);
 
-    const local = new GraphiteLocal(repoDir);
+    const local = new GraphiteLocal(repoDir, testGit);
     const first = await local.snapshot();
     expect(first?.trunk).toBe('master');
     expect(first?.prsByNumber.has(1)).toBe(true);
@@ -207,7 +208,7 @@ describe('GraphiteLocal', () => {
     utimesSync(dbPath, fixedMtime, fixedMtime);
     writePrInfo(gitDir, []);
 
-    const local = new GraphiteLocal(repoDir);
+    const local = new GraphiteLocal(repoDir, testGit);
     expect(await local.snapshot()).toBeNull();
 
     // Valid content under the same mtime must still read as cached null.

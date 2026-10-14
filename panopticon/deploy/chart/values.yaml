@@ -1,0 +1,48 @@
+# Image tag has no default; helmfile passes it in.
+image:
+  repository: panopticon
+  tag: ""
+
+service:
+  port: 80
+
+ingress:
+  host: panopticon.k8s.orb.local
+
+containerPort: 7433
+
+persistence:
+  size: 50Gi
+  storageClass: local-path
+
+# Host path of the monorepo clone, mounted read-only as the reference clone.
+referenceClone:
+  hostPath: /Users/joshbassin/Library/wrk/repos/monorepo
+
+# Existing Secret holding the GitHub token under the key "token".
+githubTokenSecret: panopticon-github
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    memory: 8Gi
+
+config:
+  githubLogin: josh-sola
+  port: 7433
+  dataDir: /data
+  repos:
+    Sola-Solutions/monorepo:
+      trunk: master
+      referenceClone: /graphite/monorepo
+      hover:
+        steps:
+          - { profile: node, run: pnpm install --frozen-lockfile }
+          - { profile: node, run: pnpm build:packages }
+          - { profile: python, cwd: python, run: uv sync --all-packages }
+          - { profile: python, cwd: python/datahub, run: uv sync }
+          - { profile: python, cwd: python/dspy-worker, run: uv sync }
+          - { profile: python, cwd: python/data-processing-worker, run: uv sync }
+          - { profile: python, cwd: python/scripts, run: uv sync }

@@ -44,10 +44,34 @@ swift:
 # Install dependencies and run panopticon's checks.
 panopticon:
     cd panopticon && bun install --frozen-lockfile && bun run check
+    helm lint panopticon/deploy/chart --set image.tag=lint
 
 install:
     ./ghostty/install.sh
     ./wt-cli/install.sh
     ./claude-planter/install.sh
     ./claude-planter/login-item.sh install
-    ./panopticon/install.sh install
+
+# Image tag for the current commit; refuses to build from uncommitted panopticon changes.
+[private]
+panopticon-tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$(git status --porcelain -- panopticon)" ]]; then
+        echo "error: commit or stash panopticon changes before building an image" >&2
+        exit 1
+    fi
+    git rev-parse --short HEAD
+
+# Build the panopticon image for the local cluster, tagged with the git short sha.
+panopticon-image:
+    docker build -t "panopticon:$(just panopticon-tag)" panopticon/
+
+# Create or update the GitHub token Secret that panopticon reads.
+panopticon-secret:
+    kubectl --context orbstack create namespace panopticon --dry-run=client -o yaml | kubectl --context orbstack apply -f -
+    gh auth token | kubectl --context orbstack -n panopticon create secret generic panopticon-github --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl --context orbstack apply -f -
+
+# Build the panopticon image and apply every release to the local cluster.
+k8s-deploy: panopticon-image
+    PANOPTICON_IMAGE_TAG="$(just panopticon-tag)" helmfile apply

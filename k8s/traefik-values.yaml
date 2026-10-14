@@ -1,0 +1,17 @@
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+ports:
+  web:
+    exposedPort: 80
+  websecure:
+    expose:
+      default: false
+
+service:
+  type: LoadBalancer
+
+ingressRoute:
+  dashboard:
+    enabled: false

@@ -17,15 +17,16 @@ const MOUNT = '/api/pr/acme/widgets/1/hover';
 
 function fakeTrees(overrides: Partial<TreeManager> = {}): TreeManager {
   const base = {
-    status: () => Promise.reject(new Error('status not stubbed')),
+    status: () => {
+      throw new Error('status not stubbed');
+    },
     ensureTree: () => Promise.resolve(),
     touch: () => {},
-    path: () => Promise.reject(new Error('path not stubbed')),
     teardown: () => Promise.reject(new Error('teardown not stubbed')),
     reapIdle: () => Promise.reject(new Error('reapIdle not stubbed')),
   };
   const stub = { ...base, ...overrides };
-  return stub as TreeManager;
+  return stub as unknown as TreeManager;
 }
 
 function fakeServers(overrides: Partial<HoverServers> = {}): HoverServers {
@@ -69,6 +70,7 @@ describe('hoverRouter GET /', () => {
     const app = mountHoverRouter({
       trees: fakeTrees(),
       servers: fakeServers(),
+      headShaFor: () => null,
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -81,6 +83,7 @@ describe('hoverRouter GET /', () => {
     const app = mountHoverRouter({
       trees: fakeTrees(),
       servers: fakeServers(),
+      headShaFor: () => null,
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -95,7 +98,7 @@ describe('hoverRouter GET /', () => {
   test('starts provisioning and answers preparing when there is no tree yet', async () => {
     let ensureTreeCalled: unknown = null;
     const trees = fakeTrees({
-      status: () => Promise.resolve<HoverTreeState>({ state: 'none' }),
+      status: (): HoverTreeState => ({ state: 'none' }),
       ensureTree: (params) => {
         ensureTreeCalled = params;
         return Promise.resolve();
@@ -104,6 +107,7 @@ describe('hoverRouter GET /', () => {
     const app = mountHoverRouter({
       trees,
       servers: fakeServers(),
+      headShaFor: () => null,
       loadPr: () =>
         Promise.resolve(
           fakePr([
@@ -141,11 +145,15 @@ describe('hoverRouter GET /', () => {
 
   test('answers preparing while the tree is still provisioning', async () => {
     const trees = fakeTrees({
-      status: () => Promise.resolve<HoverTreeState>({ state: 'provisioning' }),
+      status: (): HoverTreeState => ({
+        state: 'provisioning',
+        headSha: 'head-sha',
+      }),
     });
     const app = mountHoverRouter({
       trees,
       servers: fakeServers(),
+      headShaFor: () => null,
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -162,8 +170,11 @@ describe('hoverRouter GET /', () => {
     let touched = false;
     let startedWith: unknown = null;
     const trees = fakeTrees({
-      status: () =>
-        Promise.resolve<HoverTreeState>({ state: 'ready', path: '/tree' }),
+      status: (): HoverTreeState => ({
+        state: 'ready',
+        headSha: 'head-sha',
+        path: '/tree',
+      }),
       touch: () => {
         touched = true;
       },
@@ -178,6 +189,7 @@ describe('hoverRouter GET /', () => {
     const app = mountHoverRouter({
       trees,
       servers,
+      headShaFor: () => 'head-sha',
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -200,8 +212,11 @@ describe('hoverRouter GET /', () => {
 
   test('returns the hover markdown when the tree and server are both ready', async () => {
     const trees = fakeTrees({
-      status: () =>
-        Promise.resolve<HoverTreeState>({ state: 'ready', path: '/tree' }),
+      status: (): HoverTreeState => ({
+        state: 'ready',
+        headSha: 'head-sha',
+        path: '/tree',
+      }),
     });
     const servers = fakeServers({
       status: () => ({ typescript: 'ready', python: 'stopped' }) as const,
@@ -210,6 +225,7 @@ describe('hoverRouter GET /', () => {
     const app = mountHoverRouter({
       trees,
       servers,
+      headShaFor: () => 'head-sha',
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -222,14 +238,116 @@ describe('hoverRouter GET /', () => {
   });
 });
 
+describe('hoverRouter GET / tree freshness', () => {
+  const tsFile: PrFile = {
+    path: 'src/a.ts',
+    previousPath: null,
+    status: 'modified',
+    additions: 1,
+    deletions: 0,
+    oldOid: 'a',
+    newOid: 'b',
+  };
+
+  function mountWith(
+    treeState: HoverTreeState,
+    knownHead: string | null = null,
+  ) {
+    const ensured: unknown[] = [];
+    const app = mountHoverRouter({
+      trees: fakeTrees({
+        status: () => treeState,
+        ensureTree: (params) => {
+          ensured.push(params);
+          return Promise.resolve();
+        },
+      }),
+      servers: fakeServers(),
+      headShaFor: () => knownHead,
+      loadPr: () => Promise.resolve(fakePr([tsFile])),
+    });
+    return { app, ensured };
+  }
+
+  test('asks for a refresh and answers preparing when a ready tree is behind the PR head', async () => {
+    const { app, ensured } = mountWith({
+      state: 'ready',
+      headSha: 'old-sha',
+      path: '/tree',
+    });
+
+    const res = await app.request(`${MOUNT}?path=src/a.ts&line=0&character=0`);
+
+    expect(await res.json()).toEqual({
+      status: 'preparing',
+      tree: 'provisioning',
+      server: 'stopped',
+    } satisfies HoverResponse);
+    expect(ensured).toMatchObject([{ headSha: 'head-sha' }]);
+  });
+
+  test('skips loading the PR when the poller head matches the tree', async () => {
+    let loaded = false;
+    const app = mountHoverRouter({
+      trees: fakeTrees({
+        status: (): HoverTreeState => ({
+          state: 'failed',
+          headSha: 'head-sha',
+          error: 'boom',
+        }),
+      }),
+      servers: fakeServers(),
+      headShaFor: () => 'head-sha',
+      loadPr: () => {
+        loaded = true;
+        return Promise.resolve(fakePr());
+      },
+    });
+
+    await app.request(`${MOUNT}?path=src/a.ts&line=0&character=0`);
+
+    expect(loaded).toBe(false);
+  });
+
+  test('keeps reporting failed, without retrying, for the same head', async () => {
+    const { app, ensured } = mountWith({
+      state: 'failed',
+      headSha: 'head-sha',
+      error: 'boom',
+    });
+
+    const res = await app.request(`${MOUNT}?path=src/a.ts&line=0&character=0`);
+
+    expect(await res.json()).toEqual({
+      status: 'preparing',
+      tree: 'failed',
+      server: 'stopped',
+    } satisfies HoverResponse);
+    expect(ensured).toEqual([]);
+  });
+
+  test('retries a failed tree once the PR head moves', async () => {
+    const { app, ensured } = mountWith({
+      state: 'failed',
+      headSha: 'old-sha',
+      error: 'boom',
+    });
+
+    await app.request(`${MOUNT}?path=src/a.ts&line=0&character=0`);
+
+    expect(ensured).toMatchObject([{ headSha: 'head-sha' }]);
+  });
+});
+
 describe('hoverRouter GET /status', () => {
-  test('reports unsupported for a repo without a wt tree', async () => {
+  test('reports unsupported for a repo without hover config', async () => {
     const trees = fakeTrees({
-      status: () => Promise.resolve<HoverTreeState>({ state: 'unsupported' }),
+      status: (): HoverTreeState => ({ state: 'unsupported' }),
     });
     const app = mountHoverRouter({
       trees,
       servers: fakeServers(),
+      headShaFor: () => null,
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
@@ -244,8 +362,11 @@ describe('hoverRouter GET /status', () => {
 
   test('passes through a ready tree and server state', async () => {
     const trees = fakeTrees({
-      status: () =>
-        Promise.resolve<HoverTreeState>({ state: 'ready', path: '/tree' }),
+      status: (): HoverTreeState => ({
+        state: 'ready',
+        headSha: 'head-sha',
+        path: '/tree',
+      }),
     });
     const servers = fakeServers({
       status: () => ({ typescript: 'ready', python: 'stopped' }) as const,
@@ -253,6 +374,7 @@ describe('hoverRouter GET /status', () => {
     const app = mountHoverRouter({
       trees,
       servers,
+      headShaFor: () => 'head-sha',
       loadPr: () => Promise.reject(new Error('not used')),
     });
 
