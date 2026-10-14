@@ -16,12 +16,23 @@ releases:
     values:
       - k8s/traefik-values.yaml
 
+  - name: gt-api
+    namespace: gt-api
+    createNamespace: true
+    chart: ./gt-api/deploy/chart
+    needs:
+      - traefik/traefik
+    values:
+      - image:
+          tag: {{ requiredEnv "GT_API_IMAGE_TAG" | quote }}
+
   - name: panopticon
     namespace: panopticon
     createNamespace: true
     chart: ./panopticon/deploy/chart
     needs:
       - traefik/traefik
+      - gt-api/gt-api
     values:
       - image:
           tag: {{ requiredEnv "PANOPTICON_IMAGE_TAG" | quote }}

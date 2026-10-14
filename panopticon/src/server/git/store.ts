@@ -191,43 +191,6 @@ export class RepoStore {
     }
   }
 
-  async fetchTrunk(trunk: string): Promise<void> {
-    await this.runFetch([
-      'fetch',
-      'origin',
-      `+refs/heads/${trunk}:refs/remotes/origin/${trunk}`,
-    ]);
-  }
-
-  // Graphite's merge queue closes a PR instead of merging it through
-  // GitHub, and squashes it onto trunk with a subject ending in "(#N)".
-  // `since` bounds the log walk to roughly when the PR was opened, since
-  // scanning all of trunk's history for every closed PR would not scale.
-  async landedCommit(
-    trunk: string,
-    number: number,
-    since: string,
-  ): Promise<string | null> {
-    const { stdout, stderr, exitCode } = await this.git.run(
-      [
-        'log',
-        `refs/remotes/origin/${trunk}`,
-        '--fixed-strings',
-        `--grep=(#${number})`,
-        '--format=%H',
-        '-n',
-        '1',
-        `--since=${since}`,
-      ],
-      { cwd: this.dir },
-    );
-    if (exitCode !== 0) {
-      throw new Error(`git log failed: ${stderr.trim()}`);
-    }
-    const sha = new TextDecoder().decode(stdout).trim();
-    return sha.length > 0 ? sha : null;
-  }
-
   async blobOid(treeSha: string, path: string): Promise<string | null> {
     const { stdout, exitCode } = await this.git.run(
       ['rev-parse', '--verify', `${treeSha}:${path}`],

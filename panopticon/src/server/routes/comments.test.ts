@@ -55,12 +55,6 @@ function fakeGitHub(options: FakeGitHubOptions = {}): GitHubApi {
     listOpenPulls: () => {
       throw new Error('not used');
     },
-    findPullByHead: () => {
-      throw new Error('not used');
-    },
-    listBaseRefChanges: () => {
-      throw new Error('not used');
-    },
     listReviewThreads: async () => options.threads ?? [fakeThread()],
     listIssueComments: async () => [],
     listReviews: async () => [],

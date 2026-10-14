@@ -388,48 +388,6 @@ describe('listOpenPulls', () => {
   });
 });
 
-describe('findPullByHead', () => {
-  test('returns null when no PR matches the head branch', async () => {
-    const rest = stubRest({
-      pulls: { list: async () => ok([]) },
-    });
-    const api = createOctokitGitHubApi(rest, noGraphql);
-    expect(await api.findPullByHead('o', 'r', 'no-such-branch')).toBeNull();
-  });
-
-  test('returns the newest match when several PRs share a head', async () => {
-    const rest = stubRest({
-      pulls: {
-        list: async () =>
-          ok([
-            { ...pull20731, number: 1, created_at: '2026-01-01T00:00:00Z' },
-            { ...pull20731, number: 2, created_at: '2026-06-01T00:00:00Z' },
-          ]),
-      },
-    });
-    const api = createOctokitGitHubApi(rest, noGraphql);
-    const found = await api.findPullByHead('o', 'r', 'some-branch');
-    expect(found?.number).toBe(2);
-  });
-
-  test('maps a real head-filtered list item, which also omits the counts', async () => {
-    const [singleMatch] = pullsOpen as unknown[];
-    const rest = stubRest({
-      pulls: { list: async () => ok([singleMatch]) },
-    });
-    const api = createOctokitGitHubApi(rest, noGraphql);
-    const found = await api.findPullByHead(
-      'Sola-Solutions',
-      'monorepo',
-      'helmsync/helm-08e8a63',
-    );
-    expect(found?.number).toBe(20924);
-    expect(found?.additions).toBe(0);
-    expect(found?.deletions).toBe(0);
-    expect(found?.changedFiles).toBe(0);
-  });
-});
-
 describe('listIssueComments and listReviews', () => {
   test('marks vercel[bot] and greptile-apps[bot] issue comment authors as bots', async () => {
     const rest = stubRest({

@@ -1,4 +1,4 @@
-import type { PrSummary } from '../../shared/github.ts';
+import type { PrSummary } from '../shared/github.ts';
 import type { BaseRefChange, StackSource } from './source.ts';
 
 const GRAPHITE_PLACEHOLDER_PATTERN = /^graphite-base\/\d+$/;

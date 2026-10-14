@@ -35,9 +35,10 @@ just k8s-deploy
 uncommitted changes. The in-cluster config lives under `config` in
 `deploy/chart/values.yaml`.
 
-The pod mounts the monorepo checkout read-only to read Graphite's stack
-files. Everything else, including the database, clones, hover trees, and
-package caches, lives on the `panopticon-data` volume.
+panopticon gets Graphite stacks and landed-PR checks from gt-api, a separate
+service in the `gt-api` namespace. The pod reaches it at
+`http://gt-api.gt-api.svc.cluster.local`. The database, clones, hover trees,
+and package caches live on the `panopticon-data` volume.
 
 ## Run the checks
 
@@ -47,6 +48,12 @@ bun run check
 
 This runs lint, format check, typecheck, and tests, in that order.
 
+The gt-api types in `src/server/gtapi/schema.d.ts` are generated from
+`gt-api/openapi.json`. After gt-api's API changes, run `bun run gen:gtapi` and
+commit the result. `bun run gen:gtapi:check` fails when the file is stale. It
+skips itself when `gt-api/` is absent, as in the Docker build. `just panopticon`
+runs it.
+
 ## Config
 
 The server reads `~/.config/panopticon/config.json` on start. Point it at a
@@ -54,12 +61,14 @@ different file with the `PANOPTICON_CONFIG` environment variable. See
 `config.example.json` for the shape. The only required field is
 `githubLogin`; everything else has a default.
 
+`gtApiUrl` is the base URL of gt-api, the service that reads Graphite's
+stack state. It defaults to `http://gt-api.k8s.orb.local`. If gt-api is down,
+the stack view shows an error and the inbox falls back to each PR's GitHub
+base branch.
+
 Each entry under `repos` takes:
 
 - `trunk`: the repo's trunk branch. Required.
-- `referenceClone`: a local checkout of the repo. Panopticon reads only its
-  Graphite files, to show your stacks. It never fetches into it or clones
-  from it, so it can be mounted read-only.
 - `hover`: turns on hover types for the repo. `hover.steps` is a list of
   `{ "profile": "node" | "python", "run": "<shell command>", "cwd": "<dir>" }`.
   `cwd` is relative to the tree's root and defaults to the root.

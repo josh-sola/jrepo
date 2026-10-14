@@ -1,0 +1,10 @@
+{
+  "repos": [
+    {
+      "owner": "Sola-Solutions",
+      "repo": "monorepo",
+      "trunk": "master",
+      "checkout": "~/Library/wrk/repos/monorepo"
+    }
+  ]
+}

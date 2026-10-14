@@ -8,7 +8,7 @@ import type { PrRepository } from './poller/prs.ts';
 import { viewRecorder } from './poller/prs.ts';
 import type { GitHubApi } from './github/api.ts';
 import type { RepoStores } from './git/stores.ts';
-import type { GraphiteLocals } from './stack/graphiteLocals.ts';
+import type { GtApiClient } from './gtapi/client.ts';
 import type { HoverServers } from './hover/servers.ts';
 import type { TreeManager } from './hover/trees.ts';
 import { commentsRouter } from './routes/comments.ts';
@@ -22,15 +22,13 @@ import { loadPr, prRouter } from './routes/pr.ts';
 import { prefsRouter } from './routes/prefs.ts';
 import { stackRouter } from './routes/stack.ts';
 import { viewedRouter } from './routes/viewed.ts';
-import { createStackCache } from './stack/cache.ts';
-import { githubStackSource } from './stack/githubSource.ts';
 
 export interface AppDeps {
   db: Database;
   config: Config;
   github: GitHubApi;
   stores: RepoStores;
-  graphiteLocals: GraphiteLocals;
+  gtApi: GtApiClient;
   tmpDir: string;
   trees: TreeManager;
   servers: HoverServers;
@@ -44,17 +42,13 @@ export function buildApp(deps: AppDeps): Hono {
     config,
     github,
     stores,
-    graphiteLocals,
+    gtApi,
     tmpDir,
     trees,
     servers,
     prs,
     bus,
   } = deps;
-  const trunkFor = (owner: string, repo: string): string =>
-    config.repos[`${owner}/${repo}`]?.trunk ?? 'main';
-  const graphiteFor = (owner: string, repo: string) =>
-    graphiteLocals.for(owner, repo);
   const app = new Hono();
 
   app.onError((err, c) => {
@@ -80,7 +74,7 @@ export function buildApp(deps: AppDeps): Hono {
   app.route('/api/prefs', prefsRouter(db));
   app.route(
     '/api/inbox',
-    inboxRouter({ prs, repos: Object.keys(config.repos), graphiteFor }),
+    inboxRouter({ prs, repos: Object.keys(config.repos), gtApi }),
   );
   app.route(
     '/api/review-inbox',
@@ -94,14 +88,14 @@ export function buildApp(deps: AppDeps): Hono {
   app.use('/api/pr/:owner/:repo/:number', viewRecorder(prs));
   app.route(
     '/api/pr/:owner/:repo/:number',
-    prRouter({ github, stores, trunkFor }),
+    prRouter({ github, stores, gtApi }),
   );
   app.route('/api/pr/:owner/:repo/:number', commentsRouter({ github }));
   app.route(
     '/api/pr/:owner/:repo/:number/diff',
     diffRouter({
       loadPr: (owner, repo, number) =>
-        loadPr({ github, stores, trunkFor }, owner, repo, number),
+        loadPr({ github, stores, gtApi }, owner, repo, number),
       storeFor: async (owner, repo) => stores.for(owner, repo),
       db,
       tmpDir,
@@ -118,25 +112,10 @@ export function buildApp(deps: AppDeps): Hono {
       headShaFor: (owner, repo, number) =>
         prs.get(owner, repo, number)?.headSha ?? null,
       loadPr: (owner, repo, number) =>
-        loadPr({ github, stores, trunkFor }, owner, repo, number),
+        loadPr({ github, stores, gtApi }, owner, repo, number),
     }),
   );
-  app.route(
-    '/api/pr/:owner/:repo/:number/stack',
-    stackRouter({
-      sourceFor: (owner, repo) =>
-        githubStackSource(
-          github,
-          stores.for(owner, repo),
-          trunkFor(owner, repo),
-          owner,
-          repo,
-        ),
-      trunkFor,
-      graphiteFor,
-      cache: createStackCache(),
-    }),
-  );
+  app.route('/api/pr/:owner/:repo/:number/stack', stackRouter({ gtApi }));
 
   if (process.env.NODE_ENV === 'production') {
     const webRoot = new URL('../../dist/web', import.meta.url).pathname;

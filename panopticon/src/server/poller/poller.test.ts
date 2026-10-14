@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PrSummary, ReviewThread } from '../../shared/github.ts';
-import type { BaseRefChange, GitHubApi } from '../github/api.ts';
+import type { GitHubApi } from '../github/api.ts';
 import { GitHubError } from '../github/api.ts';
-import type { RepoStores } from '../git/stores.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 import { openDb } from '../db.ts';
 import { PrEventBus } from '../events.ts';
 import type { PrEvent } from '../../shared/events.ts';
@@ -66,8 +66,6 @@ function fakeGitHub(options: FakeGitHubOptions = {}): GitHubApi {
       if (options.listOpenPullsError) throw options.listOpenPullsError;
       return options.openPulls ?? [];
     },
-    findPullByHead: async () => null,
-    listBaseRefChanges: async (): Promise<BaseRefChange[]> => [],
     listReviewThreads: async () =>
       options.reviewThreads ? options.reviewThreads() : [],
     listIssueComments: async () => [],
@@ -79,22 +77,12 @@ function fakeGitHub(options: FakeGitHubOptions = {}): GitHubApi {
   };
 }
 
-function fakeStores(landedCommit: string | null = null): RepoStores {
-  const store = {
-    ensure: async () => {},
-    fetchPull: async () => {},
-    fetchTrunk: async () => {},
-    landedCommit: async () => landedCommit,
-    blobOid: async () => null,
-    readBlob: async () => null,
-    nameStatus: async () => [],
-    generatedPaths: async () => new Set<string>(),
+function fakeGtApi(landedCommit: string | null = null): GtApiClient {
+  return {
+    snapshot: async () => null,
+    stack: async () => ({ status: 200, body: null }),
+    landed: async () => landedCommit,
   };
-  return { for: () => store } as unknown as RepoStores;
-}
-
-function trunkFor(): string {
-  return 'master';
 }
 
 function noopCleanup(): Cleanup {
@@ -115,8 +103,7 @@ function basePollerDeps(
   const clock = overrides.clock ?? (() => FIXED_NOW);
   return {
     github: fakeGitHub(),
-    stores: fakeStores(),
-    trunkFor,
+    gtApi: fakeGtApi(),
     prs: new PrRepository(db, clock),
     bus: new PrEventBus(),
     db,
@@ -317,7 +304,7 @@ describe('Poller.tick', () => {
         getPull: async (number) =>
           fakePr({ number, state: 'closed', mergeCommitSha: null }),
       }),
-      stores: fakeStores('landed-sha'),
+      gtApi: fakeGtApi('landed-sha'),
       cleanup,
     });
     deps.prs.upsertSummary(fakePr(), true);
@@ -402,8 +389,7 @@ describe('Poller.tick', () => {
             return githubB.listOpenPulls(owner, repo);
           },
         },
-        stores: fakeStores(),
-        trunkFor,
+        gtApi: fakeGtApi(),
         prs: prsA,
         bus: new PrEventBus(),
         db: dbA,

@@ -1,0 +1,37 @@
+# Image tag has no default; helmfile passes it in.
+image:
+  repository: gt-api
+  tag: ""
+
+service:
+  port: 80
+
+ingress:
+  host: gt-api.k8s.orb.local
+
+containerPort: 7434
+
+persistence:
+  size: 5Gi
+  storageClass: local-path
+
+# Host path of the monorepo clone, mounted read-only to read Graphite's files.
+checkout:
+  hostPath: /Users/joshbassin/Library/wrk/repos/monorepo
+
+# Existing Secret holding the GitHub token under the key "token".
+githubTokenSecret: gt-api-github
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+config:
+  repos:
+    - owner: Sola-Solutions
+      repo: monorepo
+      trunk: master
+      checkout: /graphite/monorepo

@@ -6,11 +6,12 @@ import type { GitHubApi } from '../github/api.ts';
 import { withLandedState } from '../github/landed.ts';
 import type { RepoStore } from '../git/store.ts';
 import type { RepoStores } from '../git/stores.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 
 export interface PrDeps {
   github: GitHubApi;
   stores: RepoStores;
-  trunkFor(owner: string, repo: string): string;
+  gtApi: GtApiClient;
 }
 
 async function fillBlobOids(
@@ -77,7 +78,7 @@ async function loadPrUncached(
   const store = deps.stores.for(owner, repo);
   const ensurePromise = store.ensure();
   const rawPr = await deps.github.getPull(owner, repo, number);
-  const pr = await withLandedState(rawPr, store, deps.trunkFor(owner, repo));
+  const pr = await withLandedState(rawPr, deps.gtApi);
 
   const [fileList] = await Promise.all([
     fileListPromise,

@@ -1,4 +1,4 @@
-import type { PrSummary } from '../../shared/github.ts';
+import type { PrSummary } from '../shared/github.ts';
 
 // One GitHub BaseRefChangedEvent, trimmed to the fields the stack resolver
 // needs. Graphite's app writes these when it retargets a PR after the PR

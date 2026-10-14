@@ -29,7 +29,8 @@
     "**/coverage/**",
     "**/*.generated.ts",
     "**/*.generated.tsx",
-    "**/generated/**"
+    "**/generated/**",
+    "src/server/gtapi/schema.d.ts"
   ],
   "rules": {
     "react/globals": "off",
