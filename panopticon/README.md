@@ -15,25 +15,29 @@ bun run dev
 ```
 
 This starts the Bun server on port 7433 and the Vite dev server together.
-Vite proxies `/api` requests to the Bun server. The dev server reads the same
-config file as the installed service, but `PANOPTICON_PORT` and
+Vite proxies `/api` requests to the Bun server. The dev server reads
+`~/.config/panopticon/config.json`, and `PANOPTICON_PORT` and
 `PANOPTICON_DATA_DIR` give it its own port and its own database under
-`~/.local/share/panopticon-dev/`, so both can run at once.
+`~/.local/share/panopticon-dev/`.
 
-## Run it as a service
+## Run it on the local cluster
+
+panopticon runs on OrbStack's Kubernetes cluster, behind Traefik, at
+`http://panopticon.k8s.orb.local`. From the repo root:
 
 ```sh
-./install.sh install
+just panopticon-secret   # once, and again after `gh auth refresh`
+just k8s-deploy
 ```
 
-This builds the web app and loads a login LaunchAgent that keeps the server
-running. Run it from the main checkout, not a worktree: the agent runs from
-whatever directory you install it from. Set `"port": 80` in the config to
-reach it at `http://panopticon.localhost` with no port. macOS lets a normal
-user listen on port 80, and browsers send any `*.localhost` name to this Mac.
+`k8s-deploy` builds an image tagged with the current commit and applies
+`helmfile.yaml.gotmpl`. It refuses to build while `panopticon/` has
+uncommitted changes. The in-cluster config lives under `config` in
+`deploy/chart/values.yaml`.
 
-The plist keeps the `PATH` you ran the installer with, so re-run the installer
-after moving `gh` or `difft`.
+The pod mounts the monorepo checkout read-only to read Graphite's stack
+files. Everything else, including the database, clones, hover trees, and
+package caches, lives on the `panopticon-data` volume.
 
 ## Run the checks
 
