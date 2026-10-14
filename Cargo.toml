@@ -1,3 +1,0 @@
-[workspace]
-members = ["wt-cli"]
-resolver = "3"
