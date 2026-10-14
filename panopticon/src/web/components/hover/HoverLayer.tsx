@@ -23,6 +23,8 @@ export interface HoverLayerProps {
   enabled: boolean;
   // Swaps out `caretPositionFromPoint` for a deterministic stub in tests.
   hitTest?: (x: number, y: number) => HitTestResult | null;
+  // How long to wait before asking again while types are still preparing.
+  preparingRetryMs?: number;
 }
 
 interface TargetState {
@@ -49,6 +51,7 @@ function defaultHitTest(x: number, y: number): HitTestResult | null {
 // The popover's own width guess for keeping it inside the viewport; matches
 // the `max-w-xl` class below.
 const POPOVER_WIDTH = 576;
+const PREPARING_RETRY_MS = 1500;
 const VIEWPORT_MARGIN = 8;
 
 function popoverPosition(rect: DOMRect): { left: number; top: number } {
@@ -74,6 +77,7 @@ export function HoverLayer({
   headSha,
   enabled,
   hitTest,
+  preparingRetryMs = PREPARING_RETRY_MS,
 }: HoverLayerProps) {
   const { lookup } = useHoverQuery(params, headSha);
   const [target, setTarget] = useState<TargetState | null>(null);
@@ -159,6 +163,22 @@ export function HoverLayer({
       window.removeEventListener('scroll', handleLeave, true);
     };
   }, [containerRef, enabled, hide, hitTest, lookup, path]);
+
+  // Keep asking while the pointer rests on a word whose types are still
+  // preparing, so the spinner turns into the hover once the server is up.
+  useEffect(() => {
+    if (!target || response?.status !== 'preparing') return;
+    if (response.tree === 'failed') return;
+    const timer = setTimeout(() => {
+      lookup({ path, line: target.line, character: target.word.start }).then(
+        (result) => {
+          if (targetKeyRef.current === target.key) setResponse(result);
+        },
+        () => {},
+      );
+    }, preparingRetryMs);
+    return () => clearTimeout(timer);
+  }, [lookup, path, preparingRetryMs, response, target]);
 
   if (!target || !response) return null;
   const isPreparing = response.status === 'preparing';

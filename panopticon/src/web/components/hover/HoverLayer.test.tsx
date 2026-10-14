@@ -122,6 +122,40 @@ describe('HoverLayer', () => {
     expect(mountEl.textContent).toContain('Preparing types');
   });
 
+  it('swaps the preparing pill for the hover once the server is ready', async () => {
+    const responses: HoverResponse[] = [
+      { status: 'preparing', tree: 'ready', server: 'starting' },
+      { status: 'ready', contents: 'Greets someone by name.' },
+    ];
+    globalThis.fetch = mock(async () =>
+      jsonResponse(responses.shift() ?? responses[0]!),
+    ) as unknown as typeof fetch;
+    act(() => {
+      root.render(
+        createElement(HoverLayer, {
+          containerRef: { current: diffContainer },
+          path: PATH,
+          params: PARAMS,
+          headSha: 'sha-1',
+          enabled: true,
+          hitTest,
+          preparingRetryMs: 10,
+        }),
+      );
+    });
+    hoverTheWord();
+
+    await act(async () => {
+      await wait(PAST_DEBOUNCE_MS);
+    });
+    expect(mountEl.textContent).toContain('Preparing types');
+
+    await act(async () => {
+      await wait(PAST_DEBOUNCE_MS);
+    });
+    expect(mountEl.textContent).toContain('Greets someone by name.');
+  });
+
   it('says the types failed when the tree could not be prepared', async () => {
     mount({ status: 'preparing', tree: 'failed', server: 'stopped' });
     hoverTheWord();

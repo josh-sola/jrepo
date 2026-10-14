@@ -115,7 +115,11 @@ export function useHoverQuery(params: PrParams, headSha: string): HoverQuery {
           fetchHover(params, req, controller.signal).then(
             (response) => {
               if (pendingRef.current !== pending) return;
-              cacheRef.current.set(key, response);
+              // A preparing answer goes stale as soon as the server is up,
+              // so only final answers are cached.
+              if (response.status !== 'preparing') {
+                cacheRef.current.set(key, response);
+              }
               pendingRef.current = null;
               resolve(response);
             },
