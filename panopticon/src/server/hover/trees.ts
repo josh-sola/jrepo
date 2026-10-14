@@ -156,10 +156,8 @@ export class TreeManager {
     this.migrate();
   }
 
-  // Run once at boot, before serving. Failed and interrupted trees are
-  // removed so a new build gets another try, and directories with no row are
-  // swept. Only `<dataDir>/trees` is touched, and symlinks are removed as
-  // links, never followed.
+  // Failed trees are removed so a restart, often onto a new image, retries
+  // their builds. Symlinks are removed as links, never followed.
   async recover(): Promise<{ removedBroken: number; removedOrphans: number }> {
     const affected = new Set<string>();
     const broken = this.db
@@ -188,8 +186,16 @@ export class TreeManager {
     for (const key of affected) {
       const [owner, repo] = key.split('/') as [string, string];
       const bare = this.existingBareClone(owner, repo);
-      if (bare !== null) {
-        await this.git.runOrThrow(['worktree', 'prune'], { cwd: bare });
+      if (bare === null) continue;
+      // A prune failure only leaves stale worktree entries; it must not
+      // block boot.
+      const { exitCode, stderr } = await this.git.run(['worktree', 'prune'], {
+        cwd: bare,
+      });
+      if (exitCode !== 0) {
+        console.error(
+          `panopticon: git worktree prune failed for ${key}: ${stderr.trim()}`,
+        );
       }
     }
     return { removedBroken: broken.length, removedOrphans };

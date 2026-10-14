@@ -59,7 +59,14 @@ function harness(
   const clock = { now: Date.parse('2026-01-01T00:00:00Z') };
 
   const git: Git = {
-    run: () => Promise.reject(new Error('run not used')),
+    run: (args, runOptions) => {
+      gitCalls.push({ args, cwd: runOptions?.cwd });
+      return Promise.resolve({
+        stdout: new Uint8Array(),
+        stderr: '',
+        exitCode: 0,
+      });
+    },
     runOrThrow:
       options.runOrThrow ??
       ((args, runOptions) => {
