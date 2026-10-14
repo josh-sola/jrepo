@@ -5,3 +5,5 @@ launchd
 .git
 *.md
 !README.md
+**/node_modules
+tools

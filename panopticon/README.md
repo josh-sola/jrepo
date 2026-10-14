@@ -48,6 +48,12 @@ bun run check
 
 This runs lint, format check, typecheck, and tests, in that order.
 
+The gt-api types in `src/server/gtapi/schema.d.ts` are generated from
+`gt-api/openapi.json`. After gt-api's API changes, run `bun run gen:gtapi` and
+commit the result. `bun run gen:gtapi:check` fails when the file is stale. It
+skips itself when `gt-api/` is absent, as in the Docker build. `just panopticon`
+runs it.
+
 ## Config
 
 The server reads `~/.config/panopticon/config.json` on start. Point it at a

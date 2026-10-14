@@ -4,8 +4,32 @@ A local REST service that knows Graphite stacks. It reads Graphite's files
 from a repo checkout and asks GitHub for the rest. Other services call it
 instead of each learning how Graphite works.
 
-All responses are JSON. The request and response types live in
-`src/api.ts`.
+All responses are JSON. The request and response shapes are zod schemas in
+`src/api.ts`. The routes, the types, and the OpenAPI spec all come from them.
+
+## API reference
+
+- `GET /openapi.json` serves the OpenAPI 3.1 spec.
+- `GET /docs` serves a browsable reference built from that spec.
+- `openapi.json` in this directory is a committed copy of the spec.
+
+Run `bun run openapi` after you change a route or a schema. It rewrites
+`openapi.json` without starting a server. `bun run openapi:check` fails when
+the file is stale, and `bun run check` runs it.
+
+## Write a client
+
+Generate types from `openapi.json` instead of copying them by hand. For a
+TypeScript client, use
+[openapi-typescript](https://openapi-ts.dev/):
+
+```sh
+bunx openapi-typescript ../gt-api/openapi.json -o src/gtapi/schema.d.ts
+```
+
+Then import `components['schemas']['StackResponse']` and its siblings. See
+`panopticon/src/server/gtapi/client.ts` for an example. Commit the generated
+file, and add a check that fails when it is stale.
 
 ## Endpoints
 
@@ -45,7 +69,8 @@ would.
 bun run check
 ```
 
-This runs lint, format check, typecheck, and tests, in that order.
+This runs lint, format check, typecheck, tests, and the spec check, in that
+order.
 
 ## Config
 

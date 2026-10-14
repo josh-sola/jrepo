@@ -1,5 +1,5 @@
 import type { PrState, PrSummary } from '../shared/github.ts';
-import type { StackEntry, StackResponse } from '../shared/stack.ts';
+import type { StackEntry, StackResponse } from '../api.ts';
 import { isGraphitePlaceholder, resolveStackBase } from './graphiteBase.ts';
 import type {
   GraphitePr,

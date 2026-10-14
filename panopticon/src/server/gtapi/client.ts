@@ -1,13 +1,14 @@
-export interface GtBranch {
-  name: string;
-  parent: string | null;
-  children: string[];
-}
+import type { components } from './schema.d.ts';
 
-export interface GtSnapshot {
-  trunk: string;
-  branches: GtBranch[];
-}
+type Schemas = components['schemas'];
+
+export type GtBranch = Schemas['SnapshotBranch'];
+// The client reads only the trunk and the branches from a snapshot.
+export type GtSnapshot = Pick<
+  Schemas['SnapshotResponse'],
+  'trunk' | 'branches'
+>;
+type GtLanded = Schemas['LandedResponse'];
 
 // A gt-api answer passed through as is, so the stack route can hand its
 // status and body straight to the browser.
@@ -51,6 +52,13 @@ function isGtBranch(value: unknown): value is GtBranch {
     typeof value.name === 'string' &&
     (value.parent === null || typeof value.parent === 'string') &&
     Array.isArray(value.children)
+  );
+}
+
+function isGtLanded(value: unknown): value is GtLanded {
+  return (
+    isRecord(value) &&
+    (value.mergeCommitSha === null || typeof value.mergeCommitSha === 'string')
   );
 }
 
@@ -108,14 +116,7 @@ export function createGtApiClient(options: GtApiClientOptions): GtApiClient {
       const { status, body } = await get(
         `${repoPath(owner, repo)}/prs/${number}/landed?createdAt=${encodeURIComponent(createdAt)}`,
       );
-      if (
-        status !== 200 ||
-        !isRecord(body) ||
-        !(
-          body.mergeCommitSha === null ||
-          typeof body.mergeCommitSha === 'string'
-        )
-      ) {
+      if (status !== 200 || !isGtLanded(body)) {
         throw new GtApiError(`gt-api landed answered ${status}`);
       }
       return body.mergeCommitSha;

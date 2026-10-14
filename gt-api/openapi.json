@@ -1,0 +1,462 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "gt-api",
+    "version": "1.0.0",
+    "description": "gt-api knows Graphite stacks. It reads Graphite's local files from a repo checkout and asks GitHub for the rest, so other services do not each need to learn how Graphite works. Every response is JSON. A repo that is not in gt-api's config gets 404 with the error `unknown-repo`."
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "SnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "trunk": {
+            "type": "string"
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotBranch"
+            }
+          },
+          "prs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotPr"
+            }
+          }
+        },
+        "required": [
+          "trunk",
+          "branches",
+          "prs"
+        ],
+        "description": "Graphite's view of the repo's stacks, read from the repo's local checkout."
+      },
+      "SnapshotBranch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null for a branch Graphite does not track under any parent."
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of the branches Graphite tracks on top of this one."
+          }
+        },
+        "required": [
+          "name",
+          "parent",
+          "children"
+        ]
+      },
+      "SnapshotPr": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "headRef": {
+            "type": "string"
+          },
+          "baseRef": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "MERGED",
+              "CLOSED"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "draft": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "number",
+          "headRef",
+          "baseRef",
+          "state",
+          "title",
+          "draft"
+        ],
+        "description": "A PR that Graphite has recorded locally. Graphite refreshes these only when `gt` runs, so they can lag GitHub."
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "A short message, or a code such as unknown-repo."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "StackResponse": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StackEntry"
+            },
+            "description": "Entries form a tree through `parent`: one chain below the current PR down to trunk, and every open PR stacked above it, including forks where two PRs share a base. Parents come before their children, so the list reads bottom (nearest trunk) to top. An empty list means the PR is standalone."
+          },
+          "truncatedBelow": {
+            "type": "boolean",
+            "description": "True when the walk down ended at trunk with no recorded earlier base, so merged PRs below may be missing."
+          }
+        },
+        "required": [
+          "entries",
+          "truncatedBelow"
+        ]
+      },
+      "StackEntry": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "merged"
+            ],
+            "description": "A PR that Graphite closed and squashed onto trunk counts as merged."
+          },
+          "draft": {
+            "type": "boolean"
+          },
+          "headRef": {
+            "type": "string"
+          },
+          "baseRef": {
+            "type": "string"
+          },
+          "isCurrent": {
+            "type": "boolean",
+            "description": "True for the PR the request asked about."
+          },
+          "parent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The PR this one is stacked on, or null at the bottom of the stack (its base is trunk, or the walk down could not resolve further)."
+          },
+          "additions": {
+            "type": "integer"
+          },
+          "deletions": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "title",
+          "state",
+          "draft",
+          "headRef",
+          "baseRef",
+          "isCurrent",
+          "parent",
+          "additions",
+          "deletions"
+        ]
+      },
+      "LandedResponse": {
+        "type": "object",
+        "properties": {
+          "mergeCommitSha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when no commit on trunk landed the PR."
+          }
+        },
+        "required": [
+          "mergeCommitSha"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness check",
+        "responses": {
+          "200": {
+            "description": "The service is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/snapshot": {
+      "get": {
+        "summary": "Graphite's local view of the repo",
+        "description": "Reads Graphite's files from the repo's checkout. Answers 404 with `no-graphite-state` when the repo has no checkout or the Graphite files are missing.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub owner. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub owner. Matched without regard to case.",
+            "name": "owner",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub repo name. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub repo name. Matched without regard to case.",
+            "name": "repo",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Graphite's branches and PRs for the repo.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repo is not in the config (`unknown-repo`), or it has no Graphite state (`no-graphite-state`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/prs/{number}/stack": {
+      "get": {
+        "summary": "A PR's whole stack",
+        "description": "Returns the stack that holds the PR. Results are cached for 60 seconds per PR.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub owner. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub owner. Matched without regard to case.",
+            "name": "owner",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub repo name. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub repo name. Matched without regard to case.",
+            "name": "repo",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The PR number."
+            },
+            "required": true,
+            "description": "The PR number.",
+            "name": "number",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stack, from the bottom up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The PR number is not an integer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repo is not in the config, or the PR does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Any other failure, including a GitHub error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/prs/{number}/landed": {
+      "get": {
+        "summary": "The commit that landed a PR on trunk",
+        "description": "Searches trunk for the squash commit whose subject ends in \"(#<number>)\".",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub owner. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub owner. Matched without regard to case.",
+            "name": "owner",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The GitHub repo name. Matched without regard to case."
+            },
+            "required": true,
+            "description": "The GitHub repo name. Matched without regard to case.",
+            "name": "repo",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The PR number."
+            },
+            "required": true,
+            "description": "The PR number.",
+            "name": "number",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "When the PR was opened, as an ISO timestamp. The search starts there."
+            },
+            "required": true,
+            "description": "When the PR was opened, as an ISO timestamp. The search starts there.",
+            "name": "createdAt",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The squash commit, or null when none landed the PR.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LandedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The PR number or `createdAt` is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repo is not in the config (`unknown-repo`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The search failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

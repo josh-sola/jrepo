@@ -12,6 +12,8 @@
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json",
+    "gen:gtapi": "bun install --frozen-lockfile --cwd tools/gen-gtapi && bun tools/gen-gtapi/gen-gtapi.ts",
+    "gen:gtapi:check": "bun install --frozen-lockfile --cwd tools/gen-gtapi && bun tools/gen-gtapi/gen-gtapi.ts --check",
     "test": "bun test src/server src/shared && bun test src/web",
     "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test"
   },

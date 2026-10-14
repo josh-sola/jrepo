@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { StackResponse } from '../shared/stack.ts';
+import type { StackResponse } from '../api.ts';
 import { createStackCache, stackCacheKey } from './cache.ts';
 
 function makeStack(): StackResponse {

@@ -48,7 +48,7 @@ gt-api:
 
 # Install dependencies and run panopticon's checks.
 panopticon:
-    cd panopticon && bun install --frozen-lockfile && bun run check
+    cd panopticon && bun install --frozen-lockfile && bun run check && bun run gen:gtapi:check
     helm lint panopticon/deploy/chart --set image.tag=lint
 
 install:

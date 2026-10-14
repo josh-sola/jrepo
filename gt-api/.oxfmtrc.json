@@ -25,6 +25,7 @@
     "**/__generated__/**",
     "**/*.generated.ts",
     "**/*.generated.tsx",
-    "dist/**"
+    "dist/**",
+    "openapi.json"
   ]
 }
