@@ -25,7 +25,7 @@ ARG PNPM_VERSION=12.4.1
 ARG BASEDPYRIGHT_VERSION=1.40.2
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates curl git python3 xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL -o /tmp/difft.tgz "https://github.com/Wilfred/difftastic/releases/download/${DIFFT_VERSION}/difft-aarch64-unknown-linux-gnu.tar.gz" \
