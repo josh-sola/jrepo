@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RepoConfig } from '../config.ts';
@@ -41,6 +48,7 @@ function harness(
     runStep?: StepRunner;
     db?: ReturnType<typeof openDb>;
     runOrThrow?: Git['runOrThrow'];
+    bareExists?: boolean;
   } = {},
 ) {
   dir ??= mkdtempSync(join(tmpdir(), 'panopticon-trees-test-'));
@@ -73,6 +81,7 @@ function harness(
     maxTrees: options.maxTrees ?? 3,
     git,
     bareClone: () => Promise.resolve(BARE),
+    existingBareClone: () => (options.bareExists === false ? null : BARE),
     stopServers: (_owner, _repo, number) => {
       stopped.push(number);
       return Promise.resolve();
@@ -345,22 +354,6 @@ describe('TreeManager.ensureTree', () => {
     expect(manager.status('acme', 'widgets', 3).state).toBe('ready');
   });
 
-  test('fails trees left provisioning by a previous process on boot', async () => {
-    const gate = deferred<number>();
-    const { manager, db } = harness({ runStep: () => gate.promise });
-    void manager.ensureTree(params());
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(manager.status('acme', 'widgets', 1).state).toBe('provisioning');
-
-    const rebooted = harness({ db }).manager;
-
-    expect(rebooted.status('acme', 'widgets', 1)).toMatchObject({
-      state: 'failed',
-      error: expect.stringContaining('restart'),
-    });
-    gate.resolve(0);
-  });
-
   test('replaces a table from the previous schema', () => {
     dir = mkdtempSync(join(tmpdir(), 'panopticon-trees-test-'));
     const db = openDb(join(dir, 'test.sqlite'));
@@ -406,5 +399,89 @@ describe('TreeManager teardown and reaping', () => {
     expect(reaped).toEqual([{ owner: 'acme', repo: 'widgets', number: 1 }]);
     expect(manager.status('acme', 'widgets', 1).state).toBe('none');
     expect(manager.status('acme', 'widgets', 2).state).toBe('ready');
+  });
+});
+
+describe('TreeManager.recover', () => {
+  function addRow(
+    db: ReturnType<typeof openDb>,
+    dataDir: string,
+    number: number,
+    state: string,
+  ): string {
+    const path = join(dataDir, 'trees', 'acme', 'widgets', `pr-${number}`);
+    mkdirSync(path, { recursive: true });
+    db.query(
+      `INSERT INTO hover_trees (owner, repo, number, head_sha, path, state, error, created_at, last_used_at)
+       VALUES ('acme', 'widgets', ?, 'sha', ?, ?, NULL, 'now', 'now')`,
+    ).run(number, path, state);
+    return path;
+  }
+
+  test('removes failed and interrupted trees and keeps ready ones', async () => {
+    const { manager, db, dataDir, gitCalls } = harness();
+    const ready = addRow(db, dataDir, 1, 'ready');
+    const failed = addRow(db, dataDir, 2, 'failed');
+    const interrupted = addRow(db, dataDir, 3, 'provisioning');
+
+    const result = await manager.recover();
+
+    expect(result).toEqual({ removedBroken: 2, removedOrphans: 0 });
+    expect(existsSync(ready)).toBe(true);
+    expect(existsSync(failed)).toBe(false);
+    expect(existsSync(interrupted)).toBe(false);
+    expect(manager.status('acme', 'widgets', 1).state).toBe('ready');
+    expect(manager.status('acme', 'widgets', 2).state).toBe('none');
+    expect(manager.status('acme', 'widgets', 3).state).toBe('none');
+    expect(gitCalls).toEqual([{ args: ['worktree', 'prune'], cwd: BARE }]);
+  });
+
+  test('removes a tree directory that has no row', async () => {
+    const { manager, db, dataDir } = harness();
+    const ready = addRow(db, dataDir, 1, 'ready');
+    const orphan = join(dataDir, 'trees', 'acme', 'widgets', 'pr-9');
+    mkdirSync(orphan, { recursive: true });
+
+    const result = await manager.recover();
+
+    expect(result).toEqual({ removedBroken: 0, removedOrphans: 1 });
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(ready)).toBe(true);
+  });
+
+  test('prunes only bare clones that already exist', async () => {
+    const { manager, dataDir, gitCalls } = harness({ bareExists: false });
+    mkdirSync(join(dataDir, 'trees', 'acme', 'widgets', 'pr-9'), {
+      recursive: true,
+    });
+
+    await manager.recover();
+
+    expect(gitCalls).toEqual([]);
+  });
+
+  test('does not prune when nothing was removed', async () => {
+    const { manager, db, dataDir, gitCalls } = harness();
+    addRow(db, dataDir, 1, 'ready');
+
+    await manager.recover();
+
+    expect(gitCalls).toEqual([]);
+  });
+
+  test('removes a symlink as a link without touching its target', async () => {
+    const { manager, dataDir } = harness();
+    const outside = join(dataDir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    const repoDir = join(dataDir, 'trees', 'acme', 'widgets');
+    mkdirSync(repoDir, { recursive: true });
+    const link = join(repoDir, 'pr-7');
+    symlinkSync(outside, link);
+
+    await manager.recover();
+
+    expect(existsSync(link)).toBe(false);
+    expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
   });
 });

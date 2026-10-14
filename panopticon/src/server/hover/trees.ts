@@ -1,5 +1,5 @@
 import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import type { HoverLanguage } from '../../shared/hover.ts';
@@ -115,6 +115,8 @@ export interface TreeManagerDeps {
   git: Git;
   // Resolves to the repo's bare clone, cloning it first if needed.
   bareClone(owner: string, repo: string): Promise<string>;
+  // Like `bareClone`, but never clones: null when there is no clone yet.
+  existingBareClone(owner: string, repo: string): string | null;
   stopServers(owner: string, repo: string, number: number): Promise<void>;
   runStep?: StepRunner;
   clock?: () => number;
@@ -130,6 +132,7 @@ export class TreeManager {
   private readonly maxTrees: number;
   private readonly git: Git;
   private readonly bareClone: TreeManagerDeps['bareClone'];
+  private readonly existingBareClone: TreeManagerDeps['existingBareClone'];
   private readonly stopServers: TreeManagerDeps['stopServers'];
   private readonly runStep: StepRunner;
   private readonly clock: () => number;
@@ -145,18 +148,83 @@ export class TreeManager {
     this.maxTrees = deps.maxTrees;
     this.git = deps.git;
     this.bareClone = deps.bareClone;
+    this.existingBareClone = deps.existingBareClone;
     this.stopServers = deps.stopServers;
     this.runStep = deps.runStep ?? runStepInShell;
     this.clock = deps.clock ?? Date.now;
 
     this.migrate();
-    // A tree still provisioning at boot lost the process that was building it.
-    this.db
-      .query(
-        `UPDATE hover_trees SET state = 'failed', error = 'Interrupted by a restart'
-         WHERE state = 'provisioning'`,
+  }
+
+  // Run once at boot, before serving. Failed and interrupted trees are
+  // removed so a new build gets another try, and directories with no row are
+  // swept. Only `<dataDir>/trees` is touched, and symlinks are removed as
+  // links, never followed.
+  async recover(): Promise<{ removedBroken: number; removedOrphans: number }> {
+    const affected = new Set<string>();
+    const broken = this.db
+      .query<HoverTreeRow, []>(
+        "SELECT * FROM hover_trees WHERE state != 'ready'",
       )
-      .run();
+      .all();
+    for (const row of broken) {
+      await rm(row.path, { recursive: true, force: true });
+      this.db
+        .query(
+          'DELETE FROM hover_trees WHERE owner = ? AND repo = ? AND number = ?',
+        )
+        .run(row.owner, row.repo, row.number);
+      affected.add(`${row.owner}/${row.repo}`);
+    }
+
+    const known = new Set(
+      this.db
+        .query<{ path: string }, []>('SELECT path FROM hover_trees')
+        .all()
+        .map((row) => row.path),
+    );
+    const removedOrphans = await this.sweepOrphans(known, affected);
+
+    for (const key of affected) {
+      const [owner, repo] = key.split('/') as [string, string];
+      const bare = this.existingBareClone(owner, repo);
+      if (bare !== null) {
+        await this.git.runOrThrow(['worktree', 'prune'], { cwd: bare });
+      }
+    }
+    return { removedBroken: broken.length, removedOrphans };
+  }
+
+  private async sweepOrphans(
+    known: Set<string>,
+    affected: Set<string>,
+  ): Promise<number> {
+    const root = join(this.dataDir, 'trees');
+    let removed = 0;
+    const children = async (dir: string) =>
+      readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const owner of await children(root)) {
+      const ownerPath = join(root, owner.name);
+      if (!owner.isDirectory()) {
+        await rm(ownerPath, { recursive: true, force: true });
+        continue;
+      }
+      for (const repo of await children(ownerPath)) {
+        const repoPath = join(ownerPath, repo.name);
+        if (!repo.isDirectory()) {
+          await rm(repoPath, { recursive: true, force: true });
+          continue;
+        }
+        for (const tree of await children(repoPath)) {
+          const treePath = join(repoPath, tree.name);
+          if (tree.isDirectory() && known.has(treePath)) continue;
+          await rm(treePath, { recursive: true, force: true });
+          affected.add(`${owner.name}/${repo.name}`);
+          removed += 1;
+        }
+      }
+    }
+    return removed;
   }
 
   private migrate(): void {

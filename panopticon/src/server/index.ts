@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
@@ -49,9 +49,17 @@ const trees = new TreeManager({
     await store.ensure();
     return store.dir;
   },
+  existingBareClone: (owner, repo) => {
+    const { dir } = stores.for(owner, repo);
+    return existsSync(dir) ? dir : null;
+  },
   stopServers: (owner, repo, number) =>
     servers.stopAll({ owner, repo, number }),
 });
+const recovered = await trees.recover();
+console.log(
+  `panopticon: removed ${recovered.removedBroken} failed or interrupted hover trees and ${recovered.removedOrphans} orphaned directories`,
+);
 const bus = new PrEventBus();
 const prs = new PrRepository(db);
 const trunkFor = (owner: string, repo: string): string =>

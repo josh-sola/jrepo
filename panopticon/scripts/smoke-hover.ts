@@ -91,6 +91,7 @@ async function main(): Promise<void> {
       await store.ensure();
       return store.dir;
     },
+    existingBareClone: () => null,
     stopServers: (o, r, n) => servers.stopAll({ owner: o, repo: r, number: n }),
   });
 

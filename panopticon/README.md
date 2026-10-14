@@ -83,7 +83,8 @@ with `git worktree add`, then runs the repo's `hover.steps` for the languages
 in the diff, one at a time and in the background. Output goes to
 `.panopticon-provision.log` in the tree. If a step fails, the tree stays
 failed for that head commit and the hover badge shows the error. A new head
-commit tries again. Trees idle for 24 hours are removed, as are the trees of
+commit tries again, and so does a restart: at boot, panopticon removes
+failed and interrupted trees and any tree directory with no record. Trees idle for 24 hours are removed, as are the trees of
 closed and merged PRs.
 
 The TypeScript server is `node_modules/.bin/tsc --lsp` from the tree. The
