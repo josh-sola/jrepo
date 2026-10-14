@@ -1,7 +1,6 @@
 // Paint-swirl background. The effect is localthunk's Balatro shader
 // (https://www.playbalatro.com), rewritten to composite behind terminal text
-// and to take its colours from the background each pixel sits on: the
-// terminal's own default background, or one of wt's per-window tints.
+// and to take its colours from the terminal's default background.
 
 #define SPIN_ROTATION -2.0
 #define SPIN_SPEED 0.5
@@ -33,31 +32,11 @@ const float MIN_USABLE_SATURATION = 0.15;
 const float FALLBACK_HUE_1 = 0.009;
 const float FALLBACK_HUE_2 = 0.568;
 
-// How close a pixel must sit to a background colour to count as background.
+// How close a pixel must sit to the background colour to count as background.
 // Glyphs are antialiased toward that colour, so the outer bound feathers their
 // edges rather than leaving a hard fringe around every character.
 const float KEY_EXACT = 0.02;
 const float KEY_FEATHER = 0.10;
-
-// wt's worktree tints (wt-cli/src/color.rs PALETTE). Inside tmux wt paints a
-// window's cells with one of these via tmux's `window-style` option, which
-// the default-background uniform never reflects — so each tint is keyed per
-// pixel, and the swirl takes its hue from whichever background that pixel
-// sits on. A test in color.rs keeps this list in sync with the palette.
-const vec3 WT_TINTS[12] = vec3[12](
-    vec3(0x17, 0x0a, 0x0a) / 255.0, // #170a0a red
-    vec3(0x17, 0x10, 0x0a) / 255.0, // #17100a orange
-    vec3(0x17, 0x15, 0x0a) / 255.0, // #17150a yellow
-    vec3(0x11, 0x17, 0x0a) / 255.0, // #11170a lime
-    vec3(0x0a, 0x17, 0x0c) / 255.0, // #0a170c green
-    vec3(0x0a, 0x17, 0x14) / 255.0, // #0a1714 teal
-    vec3(0x0a, 0x15, 0x17) / 255.0, // #0a1517 cyan
-    vec3(0x0a, 0x10, 0x17) / 255.0, // #0a1017 blue
-    vec3(0x0c, 0x0a, 0x17) / 255.0, // #0c0a17 indigo
-    vec3(0x12, 0x0a, 0x17) / 255.0, // #120a17 purple
-    vec3(0x17, 0x0a, 0x15) / 255.0, // #170a15 magenta
-    vec3(0x17, 0x0a, 0x0f) / 255.0  // #170a0f pink
-);
 
 vec3 rgbToHsv(vec3 c) {
     vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -113,18 +92,8 @@ vec3 effect(vec2 screenSize, vec2 screen_coords, vec4 colour1, vec4 colour2, vec
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec4 terminal = texture(iChannel0, fragCoord / iResolution.xy);
 
-    // The background this pixel sits on: whichever of the terminal default
-    // and the wt tints it is closest to. Two visible windows with different
-    // tints each swirl in their own hue.
     vec3 key = iBackgroundColor;
     float keyDistance = distance(terminal.rgb, key);
-    for (int i = 0; i < 12; i++) {
-        float tintDistance = distance(terminal.rgb, WT_TINTS[i]);
-        if (tintDistance < keyDistance) {
-            keyDistance = tintDistance;
-            key = WT_TINTS[i];
-        }
-    }
 
     vec3 keyHsv = rgbToHsv(key);
     bool tinted = keyHsv.y >= MIN_USABLE_SATURATION;

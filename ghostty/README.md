@@ -14,7 +14,7 @@ custom-shader = shaders/cursor_smear.glsl
 ```
 
 After merging the shaders, sync the primary checkout at
-`/Users/joshbassin/repos/jrepo` to `main`. The installer refuses linked `wt`
+`/Users/joshbassin/repos/jrepo` to `main`. The installer refuses linked git
 worktrees and uncommitted shader sources.
 
 Run the repository installer to install symlinks into Ghostty's macOS shader
@@ -25,5 +25,5 @@ cd /Users/joshbassin/repos/jrepo
 just install
 ```
 
-Ghostty's shader links use absolute paths, and `wt` trees are disposable, so
-rerun the installer from this long-lived checkout after merging shader changes.
+Ghostty's shader links use absolute paths, and linked worktrees are disposable,
+so rerun the installer from this long-lived checkout after merging shader changes.
