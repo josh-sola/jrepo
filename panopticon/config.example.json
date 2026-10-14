@@ -2,9 +2,19 @@
   "githubLogin": "josh-sola",
   "repos": {
     "Sola-Solutions/monorepo": {
-      "wtRepo": "monorepo",
-      "referenceClone": "~/repos/monorepo",
-      "trunk": "master"
+      "trunk": "master",
+      "referenceClone": "~/Library/wrk/repos/monorepo",
+      "hover": {
+        "steps": [
+          { "profile": "node", "run": "pnpm install --frozen-lockfile" },
+          { "profile": "node", "run": "pnpm build:packages" },
+          {
+            "profile": "python",
+            "cwd": "python",
+            "run": "uv sync --all-packages"
+          }
+        ]
+      }
     }
   }
 }

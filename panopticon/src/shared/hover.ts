@@ -1,6 +1,6 @@
 export type HoverLanguage = 'typescript' | 'python';
 
-// 'unsupported' means the repo has no wt tree configured, so hover is off.
+// 'unsupported' means the repo has no hover config, so hover is off.
 export type TreeState =
   | 'none'
   | 'provisioning'

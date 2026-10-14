@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { testGit } from './__fixtures__/testGit.ts';
 import { RepoStore } from './store.ts';
 
 async function git(args: string[], cwd: string): Promise<string> {
@@ -73,18 +74,30 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: target,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     await store.ensure();
     const headOid = await store.blobOid(headSha, 'b.txt');
     expect(headOid).not.toBeNull();
   });
 
+  test('ensure rewrites a stored remote URL that differs from the expected one', async () => {
+    const store = new RepoStore({
+      dir: bareDir,
+      remoteUrl: 'https://github.com/acme/widgets.git',
+      git: testGit,
+    });
+    await store.ensure();
+    expect(await git(['config', '--get', 'remote.origin.url'], bareDir)).toBe(
+      'https://github.com/acme/widgets.git',
+    );
+  });
+
   test('ensure is a no-op when the directory already exists', async () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     await store.ensure();
     const headOid = await store.blobOid(headSha, 'b.txt');
@@ -95,7 +108,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     const oid = await store.blobOid(headSha, 'b.txt');
     expect(oid).not.toBeNull();
@@ -106,7 +119,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     const oid = await store.blobOid(headSha, 'c.txt');
     expect(oid).not.toBeNull();
@@ -120,7 +133,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     const files = await store.nameStatus(baseSha, headSha);
     const renamed = files.find((f) => f.path === 'b.txt');
@@ -135,7 +148,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     const generated = await store.generatedPaths(headSha, [
       'b.txt',
@@ -151,7 +164,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     expect(await store.generatedPaths(headSha, [])).toEqual(new Set());
   });
@@ -160,7 +173,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     const [bOid, cOid] = await Promise.all([
       store.blobOid(headSha, 'b.txt'),
@@ -180,7 +193,7 @@ describe('RepoStore', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     expect(await store.blobOids(headSha, [])).toEqual([]);
   });
@@ -197,7 +210,7 @@ describe('RepoStore fetchPull', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     await expect(store.fetchPull(1, baseSha, headSha)).resolves.toBeUndefined();
   });
@@ -206,7 +219,7 @@ describe('RepoStore fetchPull', () => {
     const store = new RepoStore({
       dir: bareDir,
       remoteUrl: sourceDir,
-      referenceClone: null,
+      git: testGit,
     });
 
     const first = store.fetchPull(42, baseSha, headSha);
@@ -271,7 +284,7 @@ describe('RepoStore trunk landing', () => {
     const store = new RepoStore({
       dir: trunkBareDir,
       remoteUrl: trunkSourceDir,
-      referenceClone: null,
+      git: testGit,
     });
 
     const before = await git(
@@ -294,7 +307,7 @@ describe('RepoStore trunk landing', () => {
     const store = new RepoStore({
       dir: trunkBareDir,
       remoteUrl: trunkSourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     await store.fetchTrunk('master');
 
@@ -314,7 +327,7 @@ describe('RepoStore trunk landing', () => {
     const store = new RepoStore({
       dir: trunkBareDir,
       remoteUrl: trunkSourceDir,
-      referenceClone: null,
+      git: testGit,
     });
     await store.fetchTrunk('master');
 

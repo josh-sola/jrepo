@@ -115,6 +115,8 @@ export function buildApp(deps: AppDeps): Hono {
     hoverRouter({
       trees,
       servers,
+      headShaFor: (owner, repo, number) =>
+        prs.get(owner, repo, number)?.headSha ?? null,
       loadPr: (owner, repo, number) =>
         loadPr({ github, stores, trunkFor }, owner, repo, number),
     }),

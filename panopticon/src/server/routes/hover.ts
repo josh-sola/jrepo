@@ -13,6 +13,8 @@ import type { TreeManager } from '../hover/trees.ts';
 export interface HoverRouterDeps {
   trees: TreeManager;
   servers: HoverServers;
+  // The head SHA the poller last saw, or null for a PR it does not track.
+  headShaFor(owner: string, repo: string, number: number): string | null;
   loadPr(
     owner: string,
     repo: string,
@@ -62,7 +64,7 @@ export function hoverRouter(deps: HoverRouterDeps): Hono {
       const repo = requireParam(c.req.param('repo'), 'repo');
       const number = Number(requireParam(c.req.param('number'), 'number'));
 
-      const treeState = await deps.trees.status(owner, repo, number);
+      const treeState = deps.trees.status(owner, repo, number);
       const servers = deps.servers.status({ owner, repo, number });
 
       const body: HoverStatusResponse = {
@@ -93,31 +95,42 @@ export function hoverRouter(deps: HoverRouterDeps): Hono {
       }
 
       const pr = { owner, repo, number };
-      const treeState = await deps.trees.status(owner, repo, number);
+      const treeState = deps.trees.status(owner, repo, number);
 
       if (treeState.state === 'unsupported') {
         const body: HoverResponse = { status: 'unsupported' };
         return c.json(body);
       }
 
-      if (treeState.state === 'none') {
+      // A moved head means the tree holds an older commit.
+      const knownHead = deps.headShaFor(owner, repo, number);
+      const mayBeStale =
+        treeState.state === 'none' ||
+        (treeState.state !== 'provisioning' &&
+          (knownHead === null || knownHead !== treeState.headSha));
+      if (mayBeStale) {
         const { pr: prSummary, files } = await deps.loadPr(owner, repo, number);
-        void deps.trees
-          .ensureTree({
-            owner,
-            repo,
-            number,
-            headSha: prSummary.head.sha,
-            languages: languagesInDiff(files),
-            changedPaths: files.map((file) => file.path),
-          })
-          .catch(() => {});
-        const body: HoverResponse = {
-          status: 'preparing',
-          tree: 'provisioning',
-          server: 'stopped',
-        };
-        return c.json(body);
+        const headSha = prSummary.head.sha;
+        if (treeState.state === 'none' || treeState.headSha !== headSha) {
+          void deps.trees
+            .ensureTree({
+              owner,
+              repo,
+              number,
+              headSha,
+              languages: languagesInDiff(files),
+              changedPaths: files.map((file) => file.path),
+            })
+            .catch((error: unknown) => {
+              console.error('panopticon hover: ensureTree failed', error);
+            });
+          const body: HoverResponse = {
+            status: 'preparing',
+            tree: 'provisioning',
+            server: 'stopped',
+          };
+          return c.json(body);
+        }
       }
 
       if (treeState.state === 'provisioning' || treeState.state === 'failed') {

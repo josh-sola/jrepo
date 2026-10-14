@@ -122,6 +122,18 @@ describe('HoverLayer', () => {
     expect(mountEl.textContent).toContain('Preparing types');
   });
 
+  it('says the types failed when the tree could not be prepared', async () => {
+    mount({ status: 'preparing', tree: 'failed', server: 'stopped' });
+    hoverTheWord();
+
+    await act(async () => {
+      await wait(PAST_DEBOUNCE_MS);
+    });
+
+    expect(mountEl.textContent).toContain('Types failed to build');
+    expect(mountEl.textContent).not.toContain('Preparing types');
+  });
+
   it('shows a fenced signature above the doc prose', async () => {
     mount({
       status: 'ready',

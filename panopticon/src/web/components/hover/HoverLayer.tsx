@@ -173,7 +173,11 @@ export function HoverLayer({
       className="fixed z-50 max-h-96 max-w-xl overflow-auto rounded-md border border-border bg-popover p-3 text-sm text-popover-foreground shadow-md"
       style={{ left, top }}
     >
-      {isPreparing ? (
+      {response.status === 'preparing' && response.tree === 'failed' ? (
+        <span className="text-xs text-destructive">
+          Types failed to build for this pull request
+        </span>
+      ) : isPreparing ? (
         <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 animate-spin" />
           Preparing types…

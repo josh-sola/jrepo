@@ -1,17 +1,17 @@
 import { join } from 'node:path';
-import type { RepoConfig } from '../config.ts';
+import type { Git } from './git.ts';
 import { RepoStore } from './store.ts';
 
-// Lazily builds and caches one RepoStore per GitHub repo. gh's own git
-// remote protocol here is ssh, so the clone URL is always the ssh form.
+// Lazily builds and caches one RepoStore per GitHub repo. Clones use HTTPS;
+// `git` supplies the credentials.
 export class RepoStores {
   private readonly dataDir: string;
-  private readonly repos: Record<string, RepoConfig>;
+  private readonly git: Git;
   private readonly stores = new Map<string, RepoStore>();
 
-  constructor(dataDir: string, repos: Record<string, RepoConfig>) {
+  constructor(dataDir: string, git: Git) {
     this.dataDir = dataDir;
-    this.repos = repos;
+    this.git = git;
   }
 
   for(owner: string, repo: string): RepoStore {
@@ -21,8 +21,8 @@ export class RepoStores {
 
     const store = new RepoStore({
       dir: join(this.dataDir, 'repos', owner, `${repo}.git`),
-      remoteUrl: `git@github.com:${owner}/${repo}.git`,
-      referenceClone: this.repos[key]?.referenceClone ?? null,
+      remoteUrl: `https://github.com/${owner}/${repo}.git`,
+      git: this.git,
     });
     this.stores.set(key, store);
     return store;
