@@ -16,6 +16,9 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      # Service links would inject PANOPTICON_PORT=tcp://..., which the server
+      # reads as its own port setting.
+      enableServiceLinks: false
       containers:
         - name: panopticon
           image: {{ .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}
