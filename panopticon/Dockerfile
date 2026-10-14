@@ -28,9 +28,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# The reference clone is a read-only mount owned by another uid.
-RUN git config --system safe.directory '*'
-
 RUN curl -fsSL -o /tmp/difft.tgz "https://github.com/Wilfred/difftastic/releases/download/${DIFFT_VERSION}/difft-aarch64-unknown-linux-gnu.tar.gz" \
     && echo "${DIFFT_SHA256}  /tmp/difft.tgz" | sha256sum -c - \
     && tar -xzf /tmp/difft.tgz -C /usr/local/bin difft \
