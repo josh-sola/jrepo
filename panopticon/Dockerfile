@@ -15,7 +15,7 @@ FROM ghcr.io/astral-sh/uv:0.12.21 AS uv
 
 FROM oven/bun:1.3.14-debian AS bun
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ARG DIFFT_VERSION=0.69.0
 ARG DIFFT_SHA256=abd2f42d2afd424312b4862aa7c7bb0320447670ae22fabcc5159db03e2dccbd
