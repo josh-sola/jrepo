@@ -25,9 +25,6 @@ export interface HoverStep {
 }
 
 export interface RepoConfig {
-  // Where the repo's local Graphite checkout lives; only its Graphite files
-  // are read.
-  referenceClone?: string;
   trunk: string;
   // Hover is on for a repo only when this is set.
   hover?: { steps: HoverStep[] };
@@ -35,6 +32,7 @@ export interface RepoConfig {
 
 export interface Config {
   githubLogin: string;
+  gtApiUrl: string;
   port: number;
   dataDir: string;
   pollIntervalSeconds: number;
@@ -43,6 +41,7 @@ export interface Config {
   repos: Record<string, RepoConfig>;
 }
 
+const DEFAULT_GT_API_URL = 'http://gt-api.k8s.orb.local';
 const DEFAULT_PORT = 7433;
 const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 const DEFAULT_MAX_TREES = 3;
@@ -123,8 +122,6 @@ function isRepoConfig(value: unknown): value is RepoConfig {
   const repo = value as Record<string, unknown>;
   if (!isString(repo.trunk)) return false;
   if (repo.hover !== undefined && !isHoverConfig(repo.hover)) return false;
-  if (repo.referenceClone !== undefined && !isString(repo.referenceClone))
-    return false;
   return true;
 }
 
@@ -198,6 +195,14 @@ export function loadConfig(path: string = configPath()): Config {
     );
   }
 
+  const gtApiUrl =
+    raw.gtApiUrl === undefined ? DEFAULT_GT_API_URL : raw.gtApiUrl;
+  if (!isString(gtApiUrl) || gtApiUrl.length === 0) {
+    throw new ConfigError(
+      `panopticon config at ${path}: "gtApiUrl" must be a non-empty string.`,
+    );
+  }
+
   const dataDir = expandHome(
     process.env.PANOPTICON_DATA_DIR ??
       (isString(raw.dataDir) ? raw.dataDir : DEFAULT_DATA_DIR),
@@ -261,9 +266,6 @@ export function loadConfig(path: string = configPath()): Config {
       repos[key] = {
         trunk: value.trunk,
         ...(value.hover !== undefined ? { hover: value.hover } : {}),
-        ...(value.referenceClone !== undefined
-          ? { referenceClone: expandHome(value.referenceClone) }
-          : {}),
       };
     }
   }
@@ -272,6 +274,7 @@ export function loadConfig(path: string = configPath()): Config {
 
   return {
     githubLogin: raw.githubLogin,
+    gtApiUrl,
     port,
     dataDir,
     pollIntervalSeconds,

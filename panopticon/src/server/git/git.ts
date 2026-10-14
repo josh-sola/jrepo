@@ -16,25 +16,21 @@ export interface Git {
 
 export interface GitEnvOptions {
   token: string;
-  // Directories owned by another user that git must still open, such as a
-  // read-only checkout mounted into a container.
-  safeDirectories: string[];
 }
 
 const TOKEN_ENV_VAR = 'PANOPTICON_GIT_TOKEN';
 const CREDENTIAL_HELPER = `!f() { echo username=x-access-token; echo "password=$${TOKEN_ENV_VAR}"; }; f`;
 
 // Configures git through its environment so the token never lands in a
-// gitconfig file or in a remote URL stored in a clone.
+// gitconfig file or in a remote URL stored in a clone. The empty
+// `credential.helper` first drops any helper from the user's own config, such
+// as the macOS keychain, which would otherwise save the token after a fetch.
 export function buildGitEnv(
   options: GitEnvOptions,
 ): Record<string, string | undefined> {
   const entries: [string, string][] = [
+    ['credential.helper', ''],
     ['credential.https://github.com.helper', CREDENTIAL_HELPER],
-    ...options.safeDirectories.map((dir): [string, string] => [
-      'safe.directory',
-      dir,
-    ]),
   ];
   const env: Record<string, string | undefined> = {
     ...process.env,

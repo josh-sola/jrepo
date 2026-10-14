@@ -8,8 +8,9 @@ import type {
   ReviewSummary,
   ReviewThread,
 } from '../../shared/github.ts';
-import type { BaseRefChange, GitHubApi } from '../github/api.ts';
+import type { GitHubApi } from '../github/api.ts';
 import { GitHubError } from '../github/api.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 import type { RepoStores } from '../git/stores.ts';
 import { loadPr, prRouter, resetLoadPrForTests } from './pr.ts';
 
@@ -69,8 +70,6 @@ function fakeGitHub(options: FakeGitHubOptions): GitHubApi {
     listPullFiles: async () =>
       options.files ?? { files: [fakeFile()], truncated: false },
     listOpenPulls: async () => [],
-    findPullByHead: async () => null,
-    listBaseRefChanges: async (): Promise<BaseRefChange[]> => [],
     listReviewThreads: async () => options.threads ?? [],
     listIssueComments: async () => options.issueComments ?? [],
     listReviews: async () => options.reviews ?? [],
@@ -85,7 +84,6 @@ interface FakeStoreOptions {
   blobOid?: (treeSha: string, path: string) => Promise<string | null>;
   hasCommit?: (sha: string) => Promise<boolean>;
   nameStatus?: PrFile[];
-  landedCommit?: string | null;
 }
 
 function fakeStores(options: FakeStoreOptions = {}): RepoStores {
@@ -94,9 +92,7 @@ function fakeStores(options: FakeStoreOptions = {}): RepoStores {
   const store = {
     ensure: async () => {},
     fetchPull: async () => {},
-    fetchTrunk: async () => {},
     hasCommit: options.hasCommit ?? (async () => true),
-    landedCommit: async () => options.landedCommit ?? null,
     blobOid,
     blobOids: async (treeSha: string, paths: string[]) =>
       Promise.all(paths.map((path) => blobOid(treeSha, path))),
@@ -107,9 +103,16 @@ function fakeStores(options: FakeStoreOptions = {}): RepoStores {
   return { for: () => store } as unknown as RepoStores;
 }
 
-function trunkFor(): string {
-  return 'master';
+function fakeGtApi(landed: () => Promise<string | null> = async () => null) {
+  const gtApi: GtApiClient = {
+    snapshot: async () => null,
+    stack: async () => ({ status: 200, body: null }),
+    landed,
+  };
+  return gtApi;
 }
+
+const gtApi = fakeGtApi();
 
 describe('loadPr', () => {
   test('fills each file oldOid and newOid from the base and head trees', async () => {
@@ -123,7 +126,7 @@ describe('loadPr', () => {
     });
 
     const result = await loadPr(
-      { github, stores, trunkFor },
+      { github, stores, gtApi },
       'Sola-Solutions',
       'monorepo',
       1,
@@ -152,7 +155,7 @@ describe('loadPr', () => {
       blobOid: async (treeSha, path) => `${treeSha}:${path}`,
     });
 
-    const result = await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+    const result = await loadPr({ github, stores, gtApi }, 'o', 'r', 1);
 
     expect(result.files[0]?.oldOid).toBe('base-sha:src/old.ts');
     expect(result.files[0]?.newOid).toBe('head-sha:src/new.ts');
@@ -167,7 +170,7 @@ describe('loadPr', () => {
     });
     const stores = fakeStores({ nameStatus: nameStatusFiles });
 
-    const result = await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+    const result = await loadPr({ github, stores, gtApi }, 'o', 'r', 1);
 
     expect(result.files.map((f) => f.path)).toEqual(['from-git-diff.ts']);
   });
@@ -175,9 +178,10 @@ describe('loadPr', () => {
   test('promotes a closed PR to merged when its squash commit landed on trunk', async () => {
     const pr = fakePr({ state: 'closed', number: 20744, mergeCommitSha: null });
     const github = fakeGitHub({ pr });
-    const stores = fakeStores({ landedCommit: 'cafef00d' });
+    const stores = fakeStores();
+    const gtApi = fakeGtApi(async () => 'cafef00d');
 
-    const result = await loadPr({ github, stores, trunkFor }, 'o', 'r', 20744);
+    const result = await loadPr({ github, stores, gtApi }, 'o', 'r', 20744);
 
     expect(result.pr.state).toBe('merged');
     expect(result.pr.mergeCommitSha).toBe('cafef00d');
@@ -186,9 +190,9 @@ describe('loadPr', () => {
   test('leaves a closed PR closed when no squash commit landed', async () => {
     const pr = fakePr({ state: 'closed', mergeCommitSha: null });
     const github = fakeGitHub({ pr });
-    const stores = fakeStores({ landedCommit: null });
+    const stores = fakeStores();
 
-    const result = await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+    const result = await loadPr({ github, stores, gtApi }, 'o', 'r', 1);
 
     expect(result.pr.state).toBe('closed');
     expect(result.pr.mergeCommitSha).toBeNull();
@@ -212,8 +216,8 @@ describe('loadPr concurrency', () => {
     const stores = fakeStores();
 
     const [firstResult, secondResult] = await Promise.all([
-      loadPr({ github, stores, trunkFor }, 'o', 'r', 1),
-      loadPr({ github, stores, trunkFor }, 'o', 'r', 1),
+      loadPr({ github, stores, gtApi }, 'o', 'r', 1),
+      loadPr({ github, stores, gtApi }, 'o', 'r', 1),
     ]);
 
     expect(getPullCalls).toBe(1);
@@ -229,8 +233,8 @@ describe('loadPr concurrency', () => {
     });
     const stores = fakeStores();
 
-    await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
-    await loadPr({ github, stores, trunkFor }, 'o', 'r', 1);
+    await loadPr({ github, stores, gtApi }, 'o', 'r', 1);
+    await loadPr({ github, stores, gtApi }, 'o', 'r', 1);
 
     expect(getPullCalls).toBe(2);
   });
@@ -270,7 +274,7 @@ describe('prRouter GET /', () => {
         },
       ],
     });
-    const app = mount({ github, stores: fakeStores(), trunkFor });
+    const app = mount({ github, stores: fakeStores(), gtApi });
 
     const res = await app.request('/api/pr/Sola-Solutions/monorepo/1');
 
@@ -287,7 +291,7 @@ describe('prRouter GET /', () => {
     const app = mount({
       github: fakeGitHub({}),
       stores: fakeStores(),
-      trunkFor,
+      gtApi,
     });
     const res = await app.request('/api/pr/o/r/not-a-number');
     expect(res.status).toBe(400);
@@ -297,7 +301,7 @@ describe('prRouter GET /', () => {
     const github = fakeGitHub({
       getPullError: new GitHubError(404, 'Not Found'),
     });
-    const app = mount({ github, stores: fakeStores(), trunkFor });
+    const app = mount({ github, stores: fakeStores(), gtApi });
     const res = await app.request('/api/pr/o/r/99999');
     expect(res.status).toBe(404);
   });
@@ -306,7 +310,7 @@ describe('prRouter GET /', () => {
     const github = fakeGitHub({
       getPullError: new GitHubError(500, 'Internal Server Error'),
     });
-    const app = mount({ github, stores: fakeStores(), trunkFor });
+    const app = mount({ github, stores: fakeStores(), gtApi });
     const res = await app.request('/api/pr/o/r/1');
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: string };

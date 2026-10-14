@@ -1,9 +1,9 @@
 {
   "githubLogin": "josh-sola",
+  "gtApiUrl": "http://gt-api.k8s.orb.local",
   "repos": {
     "Sola-Solutions/monorepo": {
       "trunk": "master",
-      "referenceClone": "~/Library/wrk/repos/monorepo",
       "hover": {
         "steps": [
           { "profile": "node", "run": "pnpm install --frozen-lockfile" },

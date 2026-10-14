@@ -6,12 +6,14 @@
 // Usage: bun scripts/smoke-pr.ts <owner> <repo> <number>
 // The clone's data dir defaults to ./.smoke-data; override it with
 // PANOPTICON_SMOKE_DATA_DIR (used for the recorded smoke run in the report).
+// The gt-api URL comes from PANOPTICON_GT_API_URL.
 
 import { join } from 'node:path';
 import { expandHome } from '../src/server/config.ts';
 import { createGit } from '../src/server/git/git.ts';
 import { RepoStores } from '../src/server/git/stores.ts';
 import { createGitHubApi, readGhToken } from '../src/server/github/client.ts';
+import { createGtApiClient } from '../src/server/gtapi/client.ts';
 import { loadPr } from '../src/server/routes/pr.ts';
 
 async function main(): Promise<void> {
@@ -34,14 +36,13 @@ async function main(): Promise<void> {
   const dataDir = process.env.PANOPTICON_SMOKE_DATA_DIR
     ? expandHome(process.env.PANOPTICON_SMOKE_DATA_DIR)
     : join(process.cwd(), '.smoke-data');
-  const trunk = process.env.PANOPTICON_SMOKE_TRUNK ?? 'master';
-  const stores = new RepoStores(
-    dataDir,
-    createGit({ token, safeDirectories: [] }),
-  );
+  const gtApi = createGtApiClient({
+    baseUrl: process.env.PANOPTICON_GT_API_URL ?? 'http://gt-api.k8s.orb.local',
+  });
+  const stores = new RepoStores(dataDir, createGit({ token }));
 
   const [{ pr, files }, threads] = await Promise.all([
-    loadPr({ github, stores, trunkFor: () => trunk }, owner, repo, number),
+    loadPr({ github, stores, gtApi }, owner, repo, number),
     github.listReviewThreads(owner, repo, number),
   ]);
 

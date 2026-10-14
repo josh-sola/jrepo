@@ -186,7 +186,7 @@ function sameMtimes(a: FileMtimes, b: FileMtimes): boolean {
   );
 }
 
-// Graphite rewrites these files on every `gt` run, which panopticon cannot
+// Graphite rewrites these files on every `gt` run, which gt-api cannot
 // observe, so file mtimes are the only change signal.
 export class GraphiteLocal {
   private readonly repoPath: string | null;
@@ -218,10 +218,7 @@ export class GraphiteLocal {
     try {
       snapshot = readGraphiteSnapshot(gitDir);
     } catch (error) {
-      console.error(
-        `panopticon graphiteLocal: could not read ${gitDir}`,
-        error,
-      );
+      console.error(`gt-api graphiteLocal: could not read ${gitDir}`, error);
       snapshot = null;
     }
     this.cache = { snapshot, mtimes };
@@ -244,7 +241,7 @@ export class GraphiteLocal {
     ]);
     if (exitCode !== 0) {
       console.error(
-        `panopticon graphiteLocal: could not resolve the git dir for ${repoPath}`,
+        `gt-api graphiteLocal: could not resolve the git dir for ${repoPath}`,
       );
       return null;
     }

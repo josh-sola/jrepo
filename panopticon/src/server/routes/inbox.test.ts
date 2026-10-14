@@ -7,10 +7,7 @@ import type { InboxResponse } from '../../shared/inbox.ts';
 import type { PrSummary } from '../../shared/github.ts';
 import { openDb } from '../db.ts';
 import { PrRepository } from '../poller/prs.ts';
-import type { GraphiteSnapshot } from '../stack/graphiteLocal.ts';
-import { testGit } from '../git/__fixtures__/testGit.ts';
-import { GraphiteLocal } from '../stack/graphiteLocal.ts';
-import type { InboxDeps } from './inbox.ts';
+import type { GtApiClient, GtSnapshot } from '../gtapi/client.ts';
 import { groupIntoStacks, inboxRouter } from './inbox.ts';
 
 let dir: string | undefined;
@@ -49,9 +46,11 @@ function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
 }
 
 function parentOfFromSnapshot(
-  snapshot: GraphiteSnapshot | null,
+  snapshot: GtSnapshot | null,
 ): (pr: PrSummary) => string {
-  return (pr) => snapshot?.branches.get(pr.head.ref)?.parent ?? pr.base.ref;
+  return (pr) =>
+    snapshot?.branches.find((branch) => branch.name === pr.head.ref)?.parent ??
+    pr.base.ref;
 }
 
 describe('groupIntoStacks', () => {
@@ -173,23 +172,18 @@ describe('groupIntoStacks', () => {
       head: { ref: 'branch-1', sha: 's' },
     });
     // Graphite pinned the top PR's base to a placeholder named after
-    // itself; the local branch metadata still carries the real parent.
+    // itself; gt-api's branch metadata still carries the real parent.
     const top = fakePr({
       number: 2,
       base: { ref: 'graphite-base/2', sha: 's' },
       head: { ref: 'branch-2', sha: 's' },
     });
-    const snapshot: GraphiteSnapshot = {
+    const snapshot: GtSnapshot = {
       trunk: 'master',
-      branches: new Map([
-        [
-          'branch-1',
-          { name: 'branch-1', parent: 'master', children: ['branch-2'] },
-        ],
-        ['branch-2', { name: 'branch-2', parent: 'branch-1', children: [] }],
-      ]),
-      prsByHead: new Map(),
-      prsByNumber: new Map(),
+      branches: [
+        { name: 'branch-1', parent: 'master', children: ['branch-2'] },
+        { name: 'branch-2', parent: 'branch-1', children: [] },
+      ],
     };
 
     const stacks = groupIntoStacks(
@@ -208,16 +202,20 @@ describe('groupIntoStacks', () => {
   });
 });
 
+function fakeGtApi(snapshot: GtApiClient['snapshot']): GtApiClient {
+  return {
+    snapshot,
+    stack: async () => ({ status: 200, body: null }),
+    landed: async () => null,
+  };
+}
+
 function mount(
   prs: PrRepository,
   repos: string[],
-  graphiteFor: InboxDeps['graphiteFor'] = () =>
-    new GraphiteLocal(null, testGit),
+  gtApi: GtApiClient = fakeGtApi(async () => null),
 ): Hono {
-  return new Hono().route(
-    '/api/inbox',
-    inboxRouter({ prs, repos, graphiteFor }),
-  );
+  return new Hono().route('/api/inbox', inboxRouter({ prs, repos, gtApi }));
 }
 
 describe('inboxRouter GET /', () => {
@@ -323,5 +321,95 @@ describe('inboxRouter GET /', () => {
     const body = (await res.json()) as InboxResponse;
 
     expect(body.stacks).toEqual([]);
+  });
+
+  test('uses the gt-api snapshot to find each branch parent', async () => {
+    const prs = new PrRepository(freshDb());
+    // GitHub says both PRs sit on master, but Graphite stacks 2 on 1.
+    prs.upsertSummary(
+      fakePr({ number: 1, head: { ref: 'branch-1', sha: 's' } }),
+      true,
+    );
+    prs.upsertSummary(
+      fakePr({ number: 2, head: { ref: 'branch-2', sha: 's' } }),
+      true,
+    );
+    const calls: string[] = [];
+    const gtApi = fakeGtApi(async (owner, repo) => {
+      calls.push(`${owner}/${repo}`);
+      return {
+        trunk: 'master',
+        branches: [
+          { name: 'branch-1', parent: 'master', children: ['branch-2'] },
+          { name: 'branch-2', parent: 'branch-1', children: [] },
+        ],
+      };
+    });
+
+    const app = mount(prs, ['acme/widgets'], gtApi);
+    const body = (await (
+      await app.request('/api/inbox')
+    ).json()) as InboxResponse;
+
+    expect(calls).toEqual(['acme/widgets']);
+    expect(body.stacks).toHaveLength(1);
+    expect(body.stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [1, null],
+      [2, 1],
+    ]);
+  });
+
+  test('falls back to the GitHub base ref when gt-api has no snapshot', async () => {
+    const prs = new PrRepository(freshDb());
+    prs.upsertSummary(
+      fakePr({
+        number: 1,
+        base: { ref: 'master', sha: 's' },
+        head: { ref: 'branch-1', sha: 's' },
+      }),
+      true,
+    );
+    prs.upsertSummary(
+      fakePr({
+        number: 2,
+        base: { ref: 'branch-1', sha: 's' },
+        head: { ref: 'branch-2', sha: 's' },
+      }),
+      true,
+    );
+
+    const app = mount(
+      prs,
+      ['acme/widgets'],
+      fakeGtApi(async () => null),
+    );
+    const res = await app.request('/api/inbox');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as InboxResponse;
+    expect(body.stacks[0]?.entries.map((e) => [e.number, e.parent])).toEqual([
+      [1, null],
+      [2, 1],
+    ]);
+  });
+
+  test('still renders when gt-api is unreachable', async () => {
+    const prs = new PrRepository(freshDb());
+    prs.upsertSummary(fakePr({ number: 1 }), true);
+    const gtApi = fakeGtApi(async () => {
+      throw new Error('gt-api is down');
+    });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const app = mount(prs, ['acme/widgets'], gtApi);
+      const res = await app.request('/api/inbox');
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as InboxResponse;
+      expect(body.stacks[0]?.entries.map((e) => e.number)).toEqual([1]);
+    } finally {
+      console.warn = warn;
+    }
   });
 });

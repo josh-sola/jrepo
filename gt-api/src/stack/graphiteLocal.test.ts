@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 function freshDir(): string {
-  dir = mkdtempSync(join(tmpdir(), 'panopticon-graphite-test-'));
+  dir = mkdtempSync(join(tmpdir(), 'gt-api-graphite-test-'));
   return dir;
 }
 

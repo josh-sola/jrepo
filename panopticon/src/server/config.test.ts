@@ -37,19 +37,13 @@ describe('loadConfig', () => {
     });
   });
 
-  test("expands ~ in a repo's referenceClone", () => {
-    withTempConfig(
-      {
-        repos: {
-          'owner/name': { trunk: 'main', referenceClone: '~/repos/name' },
-        },
-      },
-      (path) => {
-        const config = loadConfig(path);
-        expect(config.repos['owner/name']?.referenceClone).not.toContain('~');
-        expect(config.repos['owner/name']?.trunk).toBe('main');
-      },
-    );
+  test('defaults gtApiUrl and reads an override', () => {
+    withTempConfig({}, (path) => {
+      expect(loadConfig(path).gtApiUrl).toBe('http://gt-api.k8s.orb.local');
+    });
+    withTempConfig({ gtApiUrl: 'http://gt-api.test' }, (path) => {
+      expect(loadConfig(path).gtApiUrl).toBe('http://gt-api.test');
+    });
   });
 
   test('creates dataDir if it does not exist', () => {

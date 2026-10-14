@@ -10,7 +10,7 @@ import { assertDifftVersion } from './diff/difft.ts';
 import { createGit } from './git/git.ts';
 import { RepoStores } from './git/stores.ts';
 import { createGitHubApi, readGhToken } from './github/client.ts';
-import { GraphiteLocals } from './stack/graphiteLocals.ts';
+import { createGtApiClient } from './gtapi/client.ts';
 import { createHoverServers } from './hover/servers.ts';
 import { TreeManager } from './hover/trees.ts';
 
@@ -29,14 +29,9 @@ mkdirSync(tmpDir, { recursive: true });
 const db = openDb(join(config.dataDir, 'panopticon.sqlite'));
 const token = await readGhToken();
 const github = createGitHubApi(token);
-const git = createGit({
-  token,
-  safeDirectories: Object.values(config.repos).flatMap((repo) =>
-    repo.referenceClone === undefined ? [] : [repo.referenceClone],
-  ),
-});
+const git = createGit({ token });
 const stores = new RepoStores(config.dataDir, git);
-const graphiteLocals = new GraphiteLocals(config.repos, git);
+const gtApi = createGtApiClient({ baseUrl: config.gtApiUrl });
 const servers = createHoverServers();
 const trees = new TreeManager({
   db,
@@ -62,12 +57,9 @@ console.log(
 );
 const bus = new PrEventBus();
 const prs = new PrRepository(db);
-const trunkFor = (owner: string, repo: string): string =>
-  config.repos[`${owner}/${repo}`]?.trunk ?? 'main';
 const poller = new Poller({
   github,
-  stores,
-  trunkFor,
+  gtApi,
   prs,
   bus,
   db,
@@ -83,7 +75,7 @@ const app = buildApp({
   config,
   github,
   stores,
-  graphiteLocals,
+  gtApi,
   tmpDir,
   trees,
   servers,

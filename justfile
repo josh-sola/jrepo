@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: fmt clippy test bash swift check-palette panopticon
+check: fmt clippy test bash swift check-palette gt-api panopticon
 
 # Check Rust formatting.
 fmt:
@@ -41,6 +41,11 @@ swift:
     "$tmpdir/planter-tests" "$tmpdir/planter"
     "$tmpdir/planter-codex-bridge" --self-test
 
+# Install dependencies and run gt-api's checks.
+gt-api:
+    cd gt-api && bun install --frozen-lockfile && bun run check
+    helm lint gt-api/deploy/chart --set image.tag=lint
+
 # Install dependencies and run panopticon's checks.
 panopticon:
     cd panopticon && bun install --frozen-lockfile && bun run check
@@ -72,6 +77,26 @@ panopticon-secret:
     kubectl --context orbstack create namespace panopticon --dry-run=client -o yaml | kubectl --context orbstack apply -f -
     gh auth token | kubectl --context orbstack -n panopticon create secret generic panopticon-github --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl --context orbstack apply -f -
 
-# Build the panopticon image and apply every release to the local cluster.
-k8s-deploy: panopticon-image
-    PANOPTICON_IMAGE_TAG="$(just panopticon-tag)" helmfile apply
+# Image tag for the current commit; refuses to build from uncommitted gt-api changes.
+[private]
+gt-api-tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$(git status --porcelain -- gt-api)" ]]; then
+        echo "error: commit or stash gt-api changes before building an image" >&2
+        exit 1
+    fi
+    git rev-parse --short HEAD
+
+# Build the gt-api image for the local cluster, tagged with the git short sha.
+gt-api-image:
+    docker build -t "gt-api:$(just gt-api-tag)" gt-api/
+
+# Create or update the GitHub token Secret that gt-api reads.
+gt-api-secret:
+    kubectl --context orbstack create namespace gt-api --dry-run=client -o yaml | kubectl --context orbstack apply -f -
+    gh auth token | kubectl --context orbstack -n gt-api create secret generic gt-api-github --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl --context orbstack apply -f -
+
+# Build the gt-api and panopticon images and apply every release to the local cluster.
+k8s-deploy: gt-api-image panopticon-image
+    GT_API_IMAGE_TAG="$(just gt-api-tag)" PANOPTICON_IMAGE_TAG="$(just panopticon-tag)" helmfile apply

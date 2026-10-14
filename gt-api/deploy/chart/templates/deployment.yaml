@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      # Service links would inject GT_API_PORT=tcp://..., which the server
+      # reads as its own port setting.
+      enableServiceLinks: false
+      containers:
+        - name: gt-api
+          image: {{ .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.githubTokenSecret }}
+                  key: token
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/gt-api
+              readOnly: true
+            - name: checkout
+              mountPath: /graphite/monorepo
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
+        - name: checkout
+          hostPath:
+            path: {{ .Values.checkout.hostPath }}
+            type: Directory

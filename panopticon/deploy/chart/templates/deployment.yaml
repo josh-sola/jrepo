@@ -49,9 +49,6 @@ spec:
             - name: config
               mountPath: /etc/panopticon
               readOnly: true
-            - name: reference-clone
-              mountPath: /graphite/monorepo
-              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -59,7 +56,3 @@ spec:
         - name: config
           configMap:
             name: {{ .Release.Name }}
-        - name: reference-clone
-          hostPath:
-            path: {{ .Values.referenceClone.hostPath }}
-            type: Directory

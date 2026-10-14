@@ -1,0 +1,52 @@
+[
+  {
+    "number": 20924,
+    "title": "helmsync: Update helm submodule to 08e8a63",
+    "body": "Updates the helm submodule via `helmsync`.\n\nCompare: https://github.com/Sola-Solutions/helm/compare/f31cafdc782cce69cee827641a7982dbe80779ac...08e8a6390d5b90728ead703e0f3da7ce6bf497d9",
+    "state": "open",
+    "draft": false,
+    "user": {
+      "login": "helmsync[bot]",
+      "type": "Bot",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151657056?v=4"
+    },
+    "base": {
+      "ref": "master",
+      "sha": "079e044d0c27ffe385252989a77913a0080949a2"
+    },
+    "head": {
+      "ref": "helmsync/helm-08e8a63",
+      "sha": "b2a8cb4e81433001a8dab6b118362cbd6469ff3b"
+    },
+    "merge_commit_sha": "b6c15ee9d481f386fb9f8099d728d36a244bf564",
+    "merged_at": null,
+    "created_at": "2026-09-17T20:26:42Z",
+    "updated_at": "2026-09-17T20:27:01Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20924"
+  },
+  {
+    "number": 20923,
+    "title": "[FE-1021] compiler: check assignments against variable schemas",
+    "body": "Assignments now check whether a known value fits the destination variable's schema. For example, assigning `\"hello\"` to a numeric `customer.age` fails compilation. This covers globals, visible locals, nested record fields, and list items, including computed indexes.\n\nChecks include required fields, open/closed records, nullability, and handle identity. Unknown value shapes remain allowed. Defaults are not reapplied during writes. Action-output inference and runtime write validation remain separate work.\n\nStacked on #20882 for schema-backed locals. Reuses its expression-schema inference; most of that helper's diff is a file move. Five existing fixtures were corrected to match the values they actually write.\n\nValidated with the compiler suite, compiler-to-engine integration suite, worker tests, Gym, seed-data, and dashboard-api tests; scoped compiler/worker/variables-api typechecks and compiler/worker lint pass. The integration test compiles and serializes a workflow, runs the real engine, and checks that nested updates preserve sibling fields and list items.\n\nLinear: https://linear.app/sola-ai/issue/FE-1021/dsl-check-assignments-against-variable-schemas\n",
+    "state": "open",
+    "draft": false,
+    "user": {
+      "login": "jared-sola",
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/300486082?v=4"
+    },
+    "base": {
+      "ref": "jared/fe-1017-schema-backed-locals",
+      "sha": "242ff89866cd804a4bbb2e26ba3502ac2bcfb4cd"
+    },
+    "head": {
+      "ref": "jared/fe-1021-assignment-schemas",
+      "sha": "a83fa21e640025aa7c8fb14296a99d0762e4e0f1"
+    },
+    "merge_commit_sha": "72386dab446294daa93c67f52bab09bd15fcdb7d",
+    "merged_at": null,
+    "created_at": "2026-09-17T20:23:20Z",
+    "updated_at": "2026-09-17T20:23:38Z",
+    "html_url": "https://github.com/Sola-Solutions/monorepo/pull/20923"
+  }
+]

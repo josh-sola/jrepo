@@ -1,105 +1,70 @@
 import { describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { StackResponse } from '../../shared/stack.ts';
-import { createStackCache } from '../stack/cache.ts';
-import { testGit } from '../git/__fixtures__/testGit.ts';
-import { GraphiteLocal } from '../stack/graphiteLocal.ts';
-import { StackError } from '../stack/resolve.ts';
-import type { StackSource } from '../stack/source.ts';
-import type { StackRouterDeps } from './stack.ts';
+import type { GtApiClient, GtApiPassthrough } from '../gtapi/client.ts';
 import { stackRouter } from './stack.ts';
 
-// No referenceClone, so snapshot() always resolves null without spawning
-// git; every test here exercises the GitHub fallback path.
-function noGraphiteLocal(): GraphiteLocal {
-  return new GraphiteLocal(null, testGit);
-}
-
-function mountStackRouter(deps: StackRouterDeps): Hono {
+function mountStackRouter(
+  stack: (
+    owner: string,
+    repo: string,
+    number: number,
+  ) => Promise<GtApiPassthrough>,
+): Hono {
+  const gtApi: GtApiClient = {
+    snapshot: async () => null,
+    stack,
+    landed: async () => null,
+  };
   const app = new Hono();
-  app.route('/api/pr/:owner/:repo/:number/stack', stackRouter(deps));
+  app.route('/api/pr/:owner/:repo/:number/stack', stackRouter({ gtApi }));
   return app;
 }
 
-function unusedSource(): StackSource {
-  return {
-    getPull: () => Promise.reject(new Error('not used in this test')),
-    listOpenPulls: () => Promise.reject(new Error('not used in this test')),
-    findPullByHead: () => Promise.reject(new Error('not used in this test')),
-    listBaseRefChanges: () =>
-      Promise.reject(new Error('not used in this test')),
-  };
-}
-
 describe('stackRouter', () => {
-  test('returns the stack from a cache hit without calling the source', async () => {
-    const cached: StackResponse = { entries: [], truncatedBelow: false };
-    const cache = createStackCache();
-    cache.set('o/r#1', cached);
-    const app = mountStackRouter({
-      sourceFor: () => unusedSource(),
-      trunkFor: () => 'master',
-      graphiteFor: () => noGraphiteLocal(),
-      cache,
+  test('passes a gt-api stack through with its status', async () => {
+    const stack: StackResponse = { entries: [], truncatedBelow: false };
+    const calls: [string, string, number][] = [];
+    const app = mountStackRouter(async (owner, repo, number) => {
+      calls.push([owner, repo, number]);
+      return { status: 200, body: stack };
     });
 
     const res = await app.request('/api/pr/o/r/1/stack');
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(cached);
+    expect(await res.json()).toEqual(stack);
+    expect(calls).toEqual([['o', 'r', 1]]);
   });
 
-  test('maps a missing PR to 404', async () => {
-    const source: StackSource = {
-      ...unusedSource(),
-      getPull: () => Promise.resolve(null),
-      listOpenPulls: () => Promise.resolve([]),
-    };
-    const app = mountStackRouter({
-      sourceFor: () => source,
-      trunkFor: () => 'master',
-      graphiteFor: () => noGraphiteLocal(),
-      cache: createStackCache(),
-    });
+  test('passes a gt-api error status and body through', async () => {
+    const app = mountStackRouter(async () => ({
+      status: 404,
+      body: { error: 'pull request not found' },
+    }));
 
     const res = await app.request('/api/pr/o/r/404/stack');
 
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'pull request not found' });
   });
 
-  test('maps another source failure to 502 with the message', async () => {
-    const source: StackSource = {
-      ...unusedSource(),
-      getPull: () => Promise.reject(new Error('github is down')),
-    };
-    const app = mountStackRouter({
-      sourceFor: () => source,
-      trunkFor: () => 'master',
-      graphiteFor: () => noGraphiteLocal(),
-      cache: createStackCache(),
-    });
+  test('maps an unreachable gt-api to 502 with the message', async () => {
+    const app = mountStackRouter(() =>
+      Promise.reject(new Error('gt-api down')),
+    );
 
     const res = await app.request('/api/pr/o/r/1/stack');
 
     expect(res.status).toBe(502);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('github is down');
+    expect(await res.json()).toEqual({ error: 'gt-api down' });
   });
 
-  test('a StackError with a non-404 status still maps to 502', async () => {
-    const source: StackSource = {
-      ...unusedSource(),
-      getPull: () => Promise.reject(new StackError('bad upstream data', 500)),
-    };
-    const app = mountStackRouter({
-      sourceFor: () => source,
-      trunkFor: () => 'master',
-      graphiteFor: () => noGraphiteLocal(),
-      cache: createStackCache(),
-    });
+  test('rejects a non-numeric PR number', async () => {
+    const app = mountStackRouter(() => Promise.reject(new Error('not used')));
 
-    const res = await app.request('/api/pr/o/r/1/stack');
+    const res = await app.request('/api/pr/o/r/abc/stack');
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(400);
   });
 });

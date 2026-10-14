@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   }
 
   const token = await readGhToken();
-  const git = createGit({ token, safeDirectories: [] });
+  const git = createGit({ token });
   const stores = new RepoStores(dataDir, git);
   const db = openDb(join(dataDir, 'smoke-hover.sqlite'));
   const servers = createHoverServers();

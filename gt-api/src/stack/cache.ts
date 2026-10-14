@@ -1,4 +1,4 @@
-import type { StackResponse } from '../../shared/stack.ts';
+import type { StackResponse } from '../shared/stack.ts';
 
 const DEFAULT_TTL_MS = 60_000;
 

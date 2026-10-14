@@ -801,111 +801,6 @@ function mapReviewThread(
   };
 }
 
-interface RawBaseRefChangedEvent {
-  __typename: 'BaseRefChangedEvent';
-  previousRefName: string;
-  currentRefName: string;
-  createdAt: string;
-  actor: { login: string } | null;
-}
-
-interface RawAutomaticBaseChangeEvent {
-  __typename: 'AutomaticBaseChangeSucceededEvent';
-  oldBase: string;
-  newBase: string;
-  createdAt: string;
-  actor: { login: string } | null;
-}
-
-type RawTimelineNode = RawBaseRefChangedEvent | RawAutomaticBaseChangeEvent;
-
-function isRawActor(value: unknown): value is { login: string } | null {
-  return value === null || (isRecord(value) && typeof value.login === 'string');
-}
-
-function isRawTimelineNode(value: unknown): value is RawTimelineNode {
-  if (!isRecord(value)) return false;
-  if (
-    value.__typename === 'BaseRefChangedEvent' &&
-    typeof value.previousRefName === 'string' &&
-    typeof value.currentRefName === 'string' &&
-    typeof value.createdAt === 'string' &&
-    isRawActor(value.actor)
-  ) {
-    return true;
-  }
-  return (
-    value.__typename === 'AutomaticBaseChangeSucceededEvent' &&
-    typeof value.oldBase === 'string' &&
-    typeof value.newBase === 'string' &&
-    typeof value.createdAt === 'string' &&
-    isRawActor(value.actor)
-  );
-}
-
-interface RawTimelinePage {
-  pageInfo: { hasNextPage: boolean; endCursor: string | null };
-  nodes: RawTimelineNode[];
-}
-
-function isRawTimelinePage(value: unknown): value is RawTimelinePage {
-  if (!isRecord(value)) return false;
-  const pageInfo = value.pageInfo;
-  if (!isRecord(pageInfo)) return false;
-  if (typeof pageInfo.hasNextPage !== 'boolean') return false;
-  if (!isStringOrNull(pageInfo.endCursor)) return false;
-  return Array.isArray(value.nodes) && value.nodes.every(isRawTimelineNode);
-}
-
-function isTimelineResponse(value: unknown): value is {
-  repository: { pullRequest: { timelineItems: unknown } | null } | null;
-} {
-  if (!isRecord(value)) return false;
-  const repository = value.repository;
-  if (repository === null) return true;
-  if (!isRecord(repository)) return false;
-  const pullRequest = repository.pullRequest;
-  return pullRequest === null || isRecord(pullRequest);
-}
-
-function extractTimelinePage(response: unknown): RawTimelinePage {
-  if (!isTimelineResponse(response)) {
-    throw new Error('unexpected shape for a timelineItems GraphQL response');
-  }
-  const pullRequest = response.repository?.pullRequest;
-  const timelineItems = isRecord(pullRequest)
-    ? pullRequest.timelineItems
-    : undefined;
-  if (!isRawTimelinePage(timelineItems)) {
-    throw new Error('unexpected shape for a timelineItems GraphQL response');
-  }
-  return timelineItems;
-}
-
-export interface BaseRefChange {
-  previousRefName: string;
-  currentRefName: string;
-  createdAt: string;
-  actorLogin: string | null;
-}
-
-function mapBaseRefChange(node: RawTimelineNode): BaseRefChange {
-  if (node.__typename === 'BaseRefChangedEvent') {
-    return {
-      previousRefName: node.previousRefName,
-      currentRefName: node.currentRefName,
-      createdAt: node.createdAt,
-      actorLogin: node.actor?.login ?? null,
-    };
-  }
-  return {
-    previousRefName: node.oldBase,
-    currentRefName: node.newBase,
-    createdAt: node.createdAt,
-    actorLogin: node.actor?.login ?? null,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // The public interface.
 
@@ -917,16 +812,6 @@ export interface GitHubApi {
     number: number,
   ): Promise<{ files: PrFile[]; truncated: boolean }>;
   listOpenPulls(owner: string, repo: string): Promise<PrSummary[]>;
-  findPullByHead(
-    owner: string,
-    repo: string,
-    branch: string,
-  ): Promise<PrSummary | null>;
-  listBaseRefChanges(
-    owner: string,
-    repo: string,
-    number: number,
-  ): Promise<BaseRefChange[]>;
   listReviewThreads(
     owner: string,
     repo: string,
@@ -1052,36 +937,6 @@ const UNRESOLVE_THREAD_MUTATION = `
 mutation($threadId: ID!) {
   unresolveReviewThread(input: { threadId: $threadId }) {
     thread { id }
-  }
-}`;
-
-const TIMELINE_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      timelineItems(
-        first: ${THREAD_PAGE_SIZE}
-        after: $cursor
-        itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]
-      ) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          __typename
-          ... on BaseRefChangedEvent {
-            previousRefName
-            currentRefName
-            createdAt
-            actor { login }
-          }
-          ... on AutomaticBaseChangeSucceededEvent {
-            oldBase
-            newBase
-            createdAt
-            actor { login }
-          }
-        }
-      }
-    }
   }
 }`;
 
@@ -1261,34 +1116,6 @@ class OctokitGitHubApi implements GitHubApi {
     return [...items].sort((a, b) => a.number - b.number);
   }
 
-  async findPullByHead(
-    owner: string,
-    repo: string,
-    branch: string,
-  ): Promise<PrSummary | null> {
-    const key = `GET /repos/${owner}/${repo}/pulls?head=${owner}:${branch}&state=all`;
-    const { items } = await this.paginatedGet(
-      key,
-      (page, headers) =>
-        this.rest.pulls.list({
-          owner,
-          repo,
-          state: 'all',
-          head: `${owner}:${branch}`,
-          per_page: PAGE_SIZE,
-          page,
-          headers,
-        }),
-      isRawPullListItemArray,
-      (raw) => mapPrListSummary(owner, repo, raw),
-    );
-    if (items.length === 0) return null;
-    return (
-      [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ??
-      null
-    );
-  }
-
   async listIssueComments(
     owner: string,
     repo: string,
@@ -1333,28 +1160,6 @@ class OctokitGitHubApi implements GitHubApi {
       mapReviewSummary,
     );
     return items;
-  }
-
-  async listBaseRefChanges(
-    owner: string,
-    repo: string,
-    number: number,
-  ): Promise<BaseRefChange[]> {
-    const nodes: RawTimelineNode[] = [];
-    let cursor: string | null = null;
-    for (;;) {
-      const response = await this.graphqlClient(TIMELINE_QUERY, {
-        owner,
-        repo,
-        number,
-        cursor,
-      });
-      const page = extractTimelinePage(response);
-      nodes.push(...page.nodes);
-      if (!page.pageInfo.hasNextPage) break;
-      cursor = page.pageInfo.endCursor;
-    }
-    return nodes.map(mapBaseRefChange);
   }
 
   private async fetchAllThreadComments(

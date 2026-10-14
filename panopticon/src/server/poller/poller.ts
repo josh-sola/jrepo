@@ -5,7 +5,7 @@ import type { PrEventBus } from '../events.ts';
 import { GitHubError } from '../github/api.ts';
 import type { GitHubApi } from '../github/api.ts';
 import { withLandedState } from '../github/landed.ts';
-import type { RepoStores } from '../git/stores.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 import type { PrRepository } from './prs.ts';
 import { ensureSchema } from '../db.ts';
 import { VIEWED_SCHEMA } from '../routes/viewed.ts';
@@ -16,8 +16,7 @@ export interface Cleanup {
 
 export interface PollerDeps {
   github: GitHubApi;
-  stores: RepoStores;
-  trunkFor(owner: string, repo: string): string;
+  gtApi: GtApiClient;
   prs: PrRepository;
   bus: PrEventBus;
   db: Database;
@@ -65,8 +64,7 @@ function isRateLimited(error: unknown): boolean {
 
 export class Poller {
   private readonly github: GitHubApi;
-  private readonly stores: RepoStores;
-  private readonly trunkFor: (owner: string, repo: string) => string;
+  private readonly gtApi: GtApiClient;
   private readonly prs: PrRepository;
   private readonly bus: PrEventBus;
   private readonly db: Database;
@@ -85,8 +83,7 @@ export class Poller {
 
   constructor(deps: PollerDeps) {
     this.github = deps.github;
-    this.stores = deps.stores;
-    this.trunkFor = deps.trunkFor;
+    this.gtApi = deps.gtApi;
     this.prs = deps.prs;
     this.bus = deps.bus;
     this.db = deps.db;
@@ -164,8 +161,6 @@ export class Poller {
       return;
     }
     const { owner, repo } = parsed;
-    const trunk = this.trunkFor(owner, repo);
-    const store = this.stores.for(owner, repo);
 
     const watchedRows = this.prs
       .listWatched(WATCHED_DAYS)
@@ -195,7 +190,7 @@ export class Poller {
     for (const row of watched) {
       try {
         const raw = await this.github.getPull(owner, repo, row.number);
-        const landed = await withLandedState(raw, store, trunk);
+        const landed = await withLandedState(raw, this.gtApi);
         this.applyUpdate(landed, landed.author.login === this.login);
         touchedNumbers.add(row.number);
       } catch (error) {

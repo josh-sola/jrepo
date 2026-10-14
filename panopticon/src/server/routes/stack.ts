@@ -1,20 +1,13 @@
 import { Hono } from 'hono';
-import type { StackResponse } from '../../shared/stack.ts';
-import type { GraphiteLocal } from '../stack/graphiteLocal.ts';
-import type { StackCache } from '../stack/cache.ts';
-import { stackCacheKey } from '../stack/cache.ts';
-import { resolveStack, StackError } from '../stack/resolve.ts';
-import type { StackSource } from '../stack/source.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 
 export interface StackRouterDeps {
-  sourceFor(owner: string, repo: string): StackSource;
-  trunkFor(owner: string, repo: string): string;
-  graphiteFor(owner: string, repo: string): GraphiteLocal;
-  cache: StackCache;
+  gtApi: GtApiClient;
 }
 
 // Mounted at /api/pr/:owner/:repo/:number/stack, so owner, repo, and number
-// come from the parent route.
+// come from the parent route. gt-api resolves and caches the stack; this
+// route passes its status and body through.
 export function stackRouter(deps: StackRouterDeps): Hono {
   return new Hono().get('/', async (c) => {
     const owner = c.req.param('owner');
@@ -25,29 +18,13 @@ export function stackRouter(deps: StackRouterDeps): Hono {
       return c.json({ error: 'owner, repo, and number are required' }, 400);
     }
 
-    const key = stackCacheKey(owner, repo, number);
-    const cached = deps.cache.get(key);
-    if (cached) return c.json(cached);
-
     try {
-      const source = deps.sourceFor(owner, repo);
-      const snapshot = await deps.graphiteFor(owner, repo).snapshot();
-      const trunk = snapshot?.trunk ?? deps.trunkFor(owner, repo);
-      const stack: StackResponse = await resolveStack(
-        source,
-        number,
-        trunk,
-        snapshot,
-      );
-      deps.cache.set(key, stack);
-      return c.json(stack);
+      const { status, body } = await deps.gtApi.stack(owner, repo, number);
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
     } catch (error) {
-      if (error instanceof StackError) {
-        return c.json(
-          { error: error.message },
-          error.status === 404 ? 404 : 502,
-        );
-      }
       const message = error instanceof Error ? error.message : String(error);
       return c.json({ error: message }, 502);
     }

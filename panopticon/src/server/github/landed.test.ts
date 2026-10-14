@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { PrSummary } from '../../shared/github.ts';
-import type { RepoStore } from '../git/store.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 import { withLandedState } from './landed.ts';
 
 function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
@@ -26,72 +26,76 @@ function fakePr(overrides: Partial<PrSummary> = {}): PrSummary {
   };
 }
 
-interface FakeStoreCalls {
-  fetchTrunk: number;
-  landedCommitArgs: { trunk: string; number: number; since: string }[];
+interface LandedCall {
+  owner: string;
+  repo: string;
+  number: number;
+  createdAt: string;
 }
 
-function fakeStore(landedSha: string | null, calls: FakeStoreCalls): RepoStore {
-  const store = {
-    fetchTrunk: async () => {
-      calls.fetchTrunk += 1;
-    },
-    landedCommit: async (trunk: string, number: number, since: string) => {
-      calls.landedCommitArgs.push({ trunk, number, since });
-      return landedSha;
+function fakeGtApi(
+  landed: () => Promise<string | null>,
+  calls: LandedCall[] = [],
+): GtApiClient {
+  return {
+    snapshot: async () => null,
+    stack: async () => ({ status: 200, body: null }),
+    landed: async (owner, repo, number, createdAt) => {
+      calls.push({ owner, repo, number, createdAt });
+      return landed();
     },
   };
-  return store as unknown as RepoStore;
 }
 
 describe('withLandedState', () => {
-  test('returns an open PR unchanged without touching git', async () => {
-    const calls: FakeStoreCalls = { fetchTrunk: 0, landedCommitArgs: [] };
-    const store = fakeStore('deadbeef', calls);
+  test('returns an open PR unchanged without calling gt-api', async () => {
+    const calls: LandedCall[] = [];
+    const gtApi = fakeGtApi(async () => 'deadbeef', calls);
     const pr = fakePr({ state: 'open' });
 
-    const result = await withLandedState(pr, store, 'master');
+    const result = await withLandedState(pr, gtApi);
 
     expect(result).toEqual(pr);
-    expect(calls.fetchTrunk).toBe(0);
-    expect(calls.landedCommitArgs.length).toBe(0);
+    expect(calls).toEqual([]);
   });
 
-  test('promotes a closed PR to merged when its squash commit is on trunk', async () => {
-    const calls: FakeStoreCalls = { fetchTrunk: 0, landedCommitArgs: [] };
-    const store = fakeStore('cafef00d', calls);
+  test('promotes a closed PR to merged when gt-api finds its squash commit', async () => {
+    const calls: LandedCall[] = [];
+    const gtApi = fakeGtApi(async () => 'cafef00d', calls);
     const pr = fakePr({ state: 'closed', number: 20744 });
 
-    const result = await withLandedState(pr, store, 'master');
+    const result = await withLandedState(pr, gtApi);
 
     expect(result.state).toBe('merged');
     expect(result.mergeCommitSha).toBe('cafef00d');
-    expect(calls.landedCommitArgs).toEqual([
-      { trunk: 'master', number: 20744, since: pr.createdAt },
+    expect(calls).toEqual([
+      {
+        owner: 'Sola-Solutions',
+        repo: 'monorepo',
+        number: 20744,
+        createdAt: pr.createdAt,
+      },
     ]);
   });
 
-  test('leaves a closed PR closed when no squash commit lands', async () => {
-    const calls: FakeStoreCalls = { fetchTrunk: 0, landedCommitArgs: [] };
-    const store = fakeStore(null, calls);
+  test('leaves a closed PR closed when gt-api finds no squash commit', async () => {
+    const gtApi = fakeGtApi(async () => null);
     const pr = fakePr({ state: 'closed' });
 
-    const result = await withLandedState(pr, store, 'master');
-
-    expect(result).toEqual(pr);
+    expect(await withLandedState(pr, gtApi)).toEqual(pr);
   });
 
-  test('fetches trunk once per store even across several closed-PR checks', async () => {
-    const calls: FakeStoreCalls = { fetchTrunk: 0, landedCommitArgs: [] };
-    const store = fakeStore('cafef00d', calls);
-
-    await Promise.all([
-      withLandedState(fakePr({ number: 1 }), store, 'master'),
-      withLandedState(fakePr({ number: 2 }), store, 'master'),
-      withLandedState(fakePr({ number: 3 }), store, 'master'),
-    ]);
-
-    expect(calls.fetchTrunk).toBe(1);
-    expect(calls.landedCommitArgs.length).toBe(3);
+  test('leaves a closed PR untouched when gt-api fails', async () => {
+    const gtApi = fakeGtApi(async () => {
+      throw new Error('gt-api is down');
+    });
+    const pr = fakePr({ state: 'closed' });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(await withLandedState(pr, gtApi)).toEqual(pr);
+    } finally {
+      console.warn = warn;
+    }
   });
 });

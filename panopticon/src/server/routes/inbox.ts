@@ -5,13 +5,13 @@ import type {
   InboxStackEntry,
 } from '../../shared/inbox.ts';
 import type { PrSummary } from '../../shared/github.ts';
-import type { GraphiteLocal } from '../stack/graphiteLocal.ts';
+import type { GtApiClient } from '../gtapi/client.ts';
 import type { PrRepository, StoredPr } from '../poller/prs.ts';
 
 export interface InboxDeps {
   prs: PrRepository;
   repos: string[];
-  graphiteFor(owner: string, repo: string): GraphiteLocal;
+  gtApi: GtApiClient;
 }
 
 function splitRepoKey(repoKey: string): { owner: string; repo: string } | null {
@@ -101,6 +101,28 @@ function newestUpdate(stack: InboxStack): string {
   );
 }
 
+// Graphite's parent for each branch, or an empty map when gt-api has no
+// answer. The inbox then falls back to each PR's GitHub base branch.
+async function graphiteParents(
+  gtApi: GtApiClient,
+  owner: string,
+  repo: string,
+): Promise<Map<string, string>> {
+  const parents = new Map<string, string>();
+  try {
+    const snapshot = await gtApi.snapshot(owner, repo);
+    for (const branch of snapshot?.branches ?? []) {
+      if (branch.parent !== null) parents.set(branch.name, branch.parent);
+    }
+  } catch (error) {
+    console.warn(
+      `panopticon: gt-api snapshot for ${owner}/${repo} failed`,
+      error,
+    );
+  }
+  return parents;
+}
+
 export function inboxRouter(deps: InboxDeps): Hono {
   return new Hono().get('/', async (c) => {
     const stacks: InboxStack[] = [];
@@ -109,11 +131,13 @@ export function inboxRouter(deps: InboxDeps): Hono {
     for (const repoKey of deps.repos) {
       const parsed = splitRepoKey(repoKey);
       if (parsed === null) continue;
-      const snapshot = await deps
-        .graphiteFor(parsed.owner, parsed.repo)
-        .snapshot();
+      const parents = await graphiteParents(
+        deps.gtApi,
+        parsed.owner,
+        parsed.repo,
+      );
       const parentOf = (pr: PrSummary): string =>
-        snapshot?.branches.get(pr.head.ref)?.parent ?? pr.base.ref;
+        parents.get(pr.head.ref) ?? pr.base.ref;
       const mineOpen = deps.prs
         .listMine(parsed.owner, parsed.repo)
         .filter((pr) => pr.state === 'open' && isHydrated(pr))

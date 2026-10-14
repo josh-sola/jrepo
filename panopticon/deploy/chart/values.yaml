@@ -15,10 +15,6 @@ persistence:
   size: 50Gi
   storageClass: local-path
 
-# Host path of the monorepo clone, mounted read-only as the reference clone.
-referenceClone:
-  hostPath: /Users/joshbassin/Library/wrk/repos/monorepo
-
 # Existing Secret holding the GitHub token under the key "token".
 githubTokenSecret: panopticon-github
 
@@ -31,12 +27,12 @@ resources:
 
 config:
   githubLogin: josh-sola
+  gtApiUrl: http://gt-api.gt-api.svc.cluster.local
   port: 7433
   dataDir: /data
   repos:
     Sola-Solutions/monorepo:
       trunk: master
-      referenceClone: /graphite/monorepo
       hover:
         steps:
           - { profile: node, run: pnpm install --frozen-lockfile }

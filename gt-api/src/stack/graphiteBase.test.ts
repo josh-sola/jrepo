@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { PrSummary } from '../../shared/github.ts';
+import type { PrSummary } from '../shared/github.ts';
 import {
   isGraphitePlaceholder,
   realBaseFromHistory,
