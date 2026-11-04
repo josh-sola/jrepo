@@ -7,6 +7,7 @@ Personal projects that share one checkout and one Git history.
 | [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
 | [gt-api](gt-api/) | A local REST service that knows Graphite stacks. |
 | [panopticon](panopticon/) | A personal server for reviewing GitHub pull requests. |
+| [pubsub](pubsub/) | A local message bus that lets agents talk through topics. |
 
 ## Validate
 
