@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Run every repository check.
-check: bash gt-api panopticon
+check: bash gt-api panopticon pubsub
 
 # Check shell-script syntax.
 bash:
@@ -18,6 +18,14 @@ gt-api:
 panopticon:
     cd panopticon && bun install --frozen-lockfile && bun run check && bun run gen:gtapi:check
     helm lint panopticon/deploy/chart --set image.tag=lint
+
+# Run pubsub's format, lint, and test checks.
+pubsub:
+    cd pubsub && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+
+# Install the pubsub binary with cargo.
+pubsub-install:
+    cargo install --path pubsub
 
 install:
     ./ghostty/install.sh
