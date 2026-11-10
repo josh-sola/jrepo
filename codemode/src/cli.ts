@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Effect, Option } from 'effect';
-import { Argument, CliError, Command, Flag } from 'effect/unstable/cli';
+import { Argument, CliError, Command, Flag } from 'effect/cli';
 import type { Runtime } from 'mcporter';
 import pkg from '../package.json' with { type: 'json' };
 import { loadConfig, toDefinitions, type Config } from './config.ts';
@@ -151,11 +151,11 @@ const handle = (body: () => Promise<number>) =>
 const runCommand = Command.make(
   'run',
   {
-    file: Flag.string('file').pipe(
+    file: Flag.String('file').pipe(
       Flag.withDescription('Read the program from this file instead of stdin.'),
       Flag.optional,
     ),
-    timeout: Flag.integer('timeout').pipe(
+    timeout: Flag.Int('timeout').pipe(
       Flag.filter(
         (ms) => ms > 0,
         () => 'must be a positive number of milliseconds',
@@ -182,7 +182,7 @@ const runCommand = Command.make(
 const describeCommand = Command.make(
   'describe',
   {
-    target: Argument.string('target').pipe(
+    target: Argument.String('target').pipe(
       Argument.withDescription(
         'A server, or <server>.<tool>. Omit it to list every server.',
       ),
@@ -199,7 +199,7 @@ const describeCommand = Command.make(
 const authCommand = Command.make(
   'auth',
   {
-    server: Argument.string('server').pipe(
+    server: Argument.String('server').pipe(
       Argument.withDescription('A server that uses OAuth.'),
       Argument.variadic({ min: 1 }),
     ),

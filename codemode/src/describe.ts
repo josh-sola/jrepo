@@ -1,4 +1,4 @@
-import { CodeMode } from '@opencode-ai/codemode';
+import { CodeMode } from '@opencode/codemode';
 import { UsageError } from './errors.ts';
 import type { ToolTree } from './tools.ts';
 
@@ -11,7 +11,7 @@ const firstLine = (text: string): string => {
     : line;
 };
 
-const catalogOf = (tree: ToolTree) => CodeMode.make({ tools: tree }).catalog();
+const catalogOf = (tree: ToolTree) => CodeMode.make({ tools: tree }).catalog;
 
 export const describeServers = (
   tree: ToolTree,

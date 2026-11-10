@@ -1,6 +1,7 @@
+# @effect/platform-node asks for platform-node-shared ^4.1.0, whose newer releases
+# need a newer effect than @opencode/codemode pins.
 overrides:
-  effect: 4.0.0-beta.101
-  '@effect/platform-node-shared': 4.0.0-beta.101
+  '@effect/platform-node-shared': 4.1.0
 allowBuilds:
   esbuild: false
   msgpackr-extract: false

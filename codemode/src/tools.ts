@@ -1,4 +1,4 @@
-import { Tool, toolError } from '@opencode-ai/codemode';
+import { Tool, toolError } from '@opencode/codemode';
 import { Effect } from 'effect';
 import type { Runtime } from 'mcporter';
 import { isRecord } from './env.ts';
