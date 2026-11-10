@@ -228,7 +228,6 @@ export const chooseInteractively = (
 export type AuthDeps = {
   readonly choose: (candidates: ReadonlyArray<Candidate>) => Promise<string[]>;
   readonly probe: (name: string, server: HttpServer) => Promise<boolean>;
-  /** Runs the OAuth login for one server and returns its exit code. */
   readonly login: (name: string) => Promise<number>;
 };
 
@@ -304,7 +303,7 @@ export const setupAuth = async (options: {
     );
   }
 
-  const picked = await select(fresh, options, deps);
+  const picked = fresh.length === 0 ? [] : await select(fresh, options, deps);
   const entries = await Promise.all(
     picked.map(async ({ name, config, knownOauth }) => {
       let oauth = knownOauth ?? false;
@@ -327,6 +326,8 @@ export const setupAuth = async (options: {
   if (entries.length > 0) {
     appendServers(file, entries);
     await print(`Added ${entries.length} to ${file}.`);
+  } else if (fresh.length > 0) {
+    await print('No servers picked. Nothing changed.');
   }
 
   let failed = 0;

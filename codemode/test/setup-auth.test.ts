@@ -206,11 +206,11 @@ describe('setupAuth', () => {
     expect(fs.statSync(loose.configFile).mode & 0o777).toBe(0o600);
   });
 
-  it('adds nothing a second time', async () => {
+  it('adds nothing a second time, even without --all', async () => {
     const first = await run({ files: FILES }, { all: true });
     const before = fs.readFileSync(first.configFile, 'utf8');
     const second = await setupAuth({
-      all: true,
+      all: false,
       only: [],
       interactive: false,
       env: { CM_CONFIG: first.configFile },

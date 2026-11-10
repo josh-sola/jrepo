@@ -4,7 +4,6 @@ import path from 'node:path';
 
 export type Dirs = {
   readonly home: string;
-  /** Where OpenCode keeps its config folder. */
   readonly configHome: string;
 };
 

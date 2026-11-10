@@ -17,10 +17,12 @@ export const skillText = (servers: ReadonlyArray<string>): string => {
       ? ` and ${servers.length - MAX_LISTED} more`
       : '';
   const available =
-    servers.length === 0 ? '' : ` Available servers are ${shown}${more}.`;
+    servers.length === 0
+      ? ' Use it whenever a task needs an MCP server.'
+      : ` Available servers are ${shown}${more}. Use it whenever a task needs one of them.`;
   return `---
 name: cm
-description: Call MCP server tools through the cm CLI.${available} Use it whenever a task needs one of them.
+description: Call MCP server tools through the cm CLI.${available}
 ---
 
 Run \`cm guide\` once before your first \`cm run\`. It explains how to find
@@ -38,7 +40,6 @@ export const writeSkill = (
   return { file, summary: 'wrote the cm skill' };
 };
 
-/** Rewrites each installed cm skill so its server list stays current. */
 export const refreshSkills = (
   dirs: Dirs,
   servers: ReadonlyArray<string>,
