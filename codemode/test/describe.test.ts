@@ -44,12 +44,37 @@ describe('describeServers', () => {
 });
 
 describe('describeServer', () => {
-  it('prints one signature per tool with a one-line comment', () => {
+  it('prints every signature with a one-sentence comment for a small server', () => {
     const text = describeServer(tree, 'demo');
+    expect(text.startsWith('demo: 3 tools.\n\n')).toBe(true);
     expect(text).toContain('// Echo the message.\ntools.demo.echo({');
     expect(text).toContain('message: string');
     expect(text).toContain('tools.demo["get-sum"]');
     expect(text).not.toContain('Second line');
+    expect(text).toContain(`// ${'x'.repeat(99)}…\n`);
+  });
+
+  it('prints one line per tool once the full listing is over 4 KB', () => {
+    const big: ToolTree = {
+      big: Object.fromEntries(
+        Array.from({ length: 40 }, (_, i) => [
+          `tool_${i}`,
+          tool(
+            `Does thing ${i}, version 1.2 style. ${'More detail. '.repeat(10)}`,
+          ),
+        ]),
+      ),
+    };
+    big.big = { ...big.big, a: tool('No full stop here'), b: tool('') };
+    const lines = describeServer(big, 'big').split('\n');
+    expect(lines[0]).toBe(
+      'big: 42 tools. Run "cm describe big.<tool>" for one tool\'s signature.',
+    );
+    expect(lines).toHaveLength(43);
+    expect(lines).toContain('tool_0   Does thing 0, version 1.2 style.');
+    expect(lines).toContain('a        No full stop here');
+    expect(lines).toContain('b');
+    expect(lines.join('\n')).not.toContain('tools.big.');
   });
 });
 
