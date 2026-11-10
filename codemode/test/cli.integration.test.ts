@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const root = path.resolve(import.meta.dirname, '..');
 const bin = (name: string) => path.join(root, 'node_modules/.bin', name);
 const cli = path.join(root, 'src/cli.ts');
+// CM_BIN runs the suite against a built executable instead of the source.
+const binary = process.env.CM_BIN;
 const mcporterCli = path.join(root, 'node_modules/mcporter/dist/cli.js');
 
 // Socket paths are capped near 104 bytes on macOS, so keep this dir short.
@@ -31,7 +33,8 @@ const cm = (
   args: string[],
   options: { input?: string; env?: Record<string, string> } = {},
 ): Result => {
-  const result = spawnSync(process.execPath, [cli, ...args], {
+  const command = binary ?? process.execPath;
+  const result = spawnSync(command, binary ? args : [cli, ...args], {
     encoding: 'utf8',
     input: options.input ?? '',
     env: { ...env, ...options.env },
@@ -309,7 +312,14 @@ describe('help and usage errors', () => {
     const result = cm(['--help']);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Run "cm guide"');
-    for (const name of ['run', 'describe', 'auth', 'guide']) {
+    for (const name of [
+      'run',
+      'describe',
+      'auth',
+      'guide',
+      'daemon',
+      'upgrade',
+    ]) {
       expect(result.stdout).toContain(name);
     }
     const sub = cm(['run', '--help']);
@@ -365,5 +375,27 @@ describe('other commands', () => {
     const result = cm(['auth', 'fs']);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('does not use OAuth');
+  });
+});
+
+describe('daemon', () => {
+  it('reports a running daemon, stops it, then reports it stopped', () => {
+    expect(run('return 1').status).toBe(0);
+    const running = cm(['daemon', 'status']);
+    expect(running.status).toBe(0);
+    expect(running.stdout).toMatch(/Daemon pid \d+/);
+
+    const stop = cm(['daemon', 'stop']);
+    expect(stop.status).toBe(0);
+    expect(stop.stdout).toContain('Daemon stopped');
+
+    const stopped = cm(['daemon', 'status']);
+    expect(stopped.status).toBe(0);
+    expect(stopped.stdout).toContain('Daemon is not running.');
+  });
+
+  it('starts a new daemon on the next run', () => {
+    expect(run('return 2').json).toEqual({ ok: true, value: 2 });
+    expect(cm(['daemon', 'status']).stdout).toMatch(/Daemon pid \d+/);
   });
 });
