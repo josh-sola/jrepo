@@ -6,6 +6,22 @@ configured MCP server is a namespace named `tools.<server>`.
 
 `cm guide` prints this file, and `cm --help` points agents to it.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/josh-sola/jrepo/main/codemode/install.sh | sh
+```
+
+This installs the newest release on macOS or Linux into `~/.local/bin/cm`. Put
+`CM_VERSION=0.1.0` in front of `sh` to pick a version.
+
+```sh
+cm upgrade          # install the newest release
+cm upgrade --check  # only report the installed and newest versions
+cm daemon status    # show whether the background daemon is running
+cm daemon stop      # stop the daemon and the servers it keeps warm
+```
+
 ## Config
 
 `cm` reads `$CM_CONFIG`. Without it, `cm` reads

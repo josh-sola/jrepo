@@ -1,0 +1,191 @@
+name: cm release
+
+on:
+  pull_request:
+    paths:
+      - codemode/**
+      - .github/workflows/cm-release.yml
+  push:
+    branches: [main]
+    paths:
+      - codemode/**
+      - .github/workflows/cm-release.yml
+
+# One run per ref at a time, so two merges cannot claim the same version.
+concurrency:
+  group: cm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  BUN_VERSION: 1.3.14
+  NODE_VERSION: 24.17.0
+  PNPM_VERSION: 12.4.2
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: codemode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: semver
+        uses: PaulHatch/semantic-version@5ae1354e589c5a67345fb2c6e65b025ff676d7c7 # v6.0.7
+        with:
+          tag_prefix: cm-v
+          change_path: codemode .github/workflows/cm-release.yml
+          major_pattern: (MAJOR)
+          minor_pattern: (MINOR)
+          search_commit_body: true
+
+      # The action counts up from 0.0.0 when no cm-v tag exists, which would
+      # make the first release 0.0.1.
+      - id: version
+        env:
+          NEXT: ${{ steps.semver.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$(git tag --list 'cm-v*')" ]; then
+            version=0.1.0
+          else
+            version=$NEXT
+          fi
+          if [ "$EVENT" = pull_request ]; then
+            version="$version-pr.$PR"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: codemode/pnpm-lock.yaml
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+
+      - name: Build the executables
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/build.sh "$VERSION" darwin-arm64 darwin-x64 linux-x64 linux-arm64
+
+      - name: Run the integration tests against the darwin-arm64 executable
+        run: CM_BIN="$PWD/dist/cm-darwin-arm64" pnpm vitest run test/cli.integration.test.ts
+
+      - name: Package the release
+        run: |
+          mkdir -p release
+          for file in dist/cm-*; do
+            gzip -9 -c "$file" > "release/$(basename "$file").gz"
+          done
+          cp install.sh release/
+          cd release && shasum -a 256 cm-*.gz install.sh > SHA256SUMS
+
+      # gh is left off PATH: these files have no attestation until publish.
+      - name: Install from a local file server
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          root=$(mktemp -d)
+          mkdir -p "$root/www/cm-v$VERSION"
+          cp release/* "$root/www/cm-v$VERSION/"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$root/www" &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fs http://127.0.0.1:8765/ >/dev/null && break
+            sleep 1
+          done
+          env -i PATH=/usr/bin:/bin HOME="$root/home" CM_VERSION="$VERSION" \
+            CM_DOWNLOAD_BASE=http://127.0.0.1:8765 \
+            CM_BIN_DIR="$root/home/bin" XDG_DATA_HOME="$root/home/data" \
+            sh install.sh
+          "$root/home/bin/cm" --version | grep -F "$VERSION"
+          MCPORTER_DAEMON_DIR=/tmp/cm-e2e "$root/home/bin/cm" daemon status
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cm-release
+          path: codemode/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-test:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codemode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: codemode/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: shellcheck install.sh scripts/build.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cm-release
+          path: codemode/release
+      - name: Run the integration tests against the linux-x64 executable
+        run: |
+          gunzip -c release/cm-linux-x64.gz > cm-linux-x64
+          chmod +x cm-linux-x64
+          CM_BIN="$PWD/cm-linux-x64" pnpm vitest run test/cli.integration.test.ts
+
+  publish:
+    needs: [build, linux-test]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cm-release
+          path: release
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/cm-*.gz
+            release/install.sh
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "cm-v$VERSION" release/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "cm $VERSION" \
+            --notes "Install or upgrade with the curl command in codemode/README.md, or run cm upgrade."

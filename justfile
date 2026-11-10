@@ -13,6 +13,10 @@ bash:
 codemode:
     cd codemode && pnpm install --frozen-lockfile && pnpm run check
 
+# Build cm executables into codemode/dist; targets default to this machine.
+codemode-binary version="0.0.0-dev" *targets:
+    cd codemode && scripts/build.sh {{version}} {{targets}}
+
 # Install a cm shim in ~/.local/bin that runs this checkout.
 codemode-install:
     #!/usr/bin/env bash

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Effect, Option } from 'effect';
 import { Argument, CliError, Command, Flag } from 'effect/cli';
-import type { Runtime } from 'mcporter';
+import { handleDaemonCli, type Runtime } from 'mcporter';
 import pkg from '../package.json' with { type: 'json' };
 import { loadConfig, toDefinitions, type Config } from './config.ts';
 import { createDaemonRuntime, createDirectRuntime } from './connect.ts';
@@ -12,6 +12,10 @@ import { applyEnv, restrictEnv } from './env.ts';
 import { ServerError, UsageError, errorMessage } from './errors.ts';
 import { DEFAULT_LIMITS, runProgram } from './run.ts';
 import { buildAvailableTools } from './tools.ts';
+import { upgrade } from './upgrade.ts';
+
+const VERSION =
+  typeof CM_VERSION === 'string' ? CM_VERSION : `${pkg.version}-dev`;
 
 const writeStdout = process.stdout.write.bind(process.stdout);
 
@@ -135,9 +139,21 @@ const auth = async (servers: ReadonlyArray<string>): Promise<number> => {
   });
 };
 
+const readGuide = async (): Promise<string> => {
+  // A Bun executable has no README on disk, so it carries the text inside.
+  if (process.versions.bun) {
+    return (await import('../README.md', { with: { type: 'text' } })).default;
+  }
+  return fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+};
+
 const guide = async (): Promise<number> => {
-  const readme = new URL('../README.md', import.meta.url);
-  await emit(fs.readFileSync(readme, 'utf8'));
+  await emit(await readGuide());
+  return 0;
+};
+
+const daemon = async (subcommand: 'stop' | 'status'): Promise<number> => {
+  await handleDaemonCli([subcommand], { configPath: '', configExplicit: true });
   return 0;
 };
 
@@ -211,6 +227,32 @@ const guideCommand = Command.make('guide', {}, () => handle(guide)).pipe(
   Command.withDescription('Print the guide for agents.'),
 );
 
+const daemonCommand = Command.make('daemon').pipe(
+  Command.withDescription('Stop the background daemon or show its status.'),
+  Command.withSubcommands([
+    Command.make('stop', {}, () => handle(() => daemon('stop'))).pipe(
+      Command.withDescription('Stop the daemon and the servers it runs.'),
+    ),
+    Command.make('status', {}, () => handle(() => daemon('status'))).pipe(
+      Command.withDescription('Show whether the daemon is running.'),
+    ),
+  ]),
+);
+
+const upgradeCommand = Command.make(
+  'upgrade',
+  {
+    check: Flag.Boolean('check').pipe(
+      Flag.withDescription('Only report the installed and latest versions.'),
+      Flag.withDefault(false),
+    ),
+  },
+  ({ check }) =>
+    handle(() =>
+      upgrade({ current: VERSION, check, env: process.env, print: emit }),
+    ),
+).pipe(Command.withDescription('Update cm to the newest release.'));
+
 const root = Command.make('cm').pipe(
   Command.withDescription(
     [
@@ -225,11 +267,13 @@ const root = Command.make('cm').pipe(
     describeCommand,
     authCommand,
     guideCommand,
+    daemonCommand,
+    upgradeCommand,
   ]),
 );
 
 // The module prints parse errors itself, so those only need an exit code.
-const program = Command.run(root, { version: pkg.version }).pipe(
+const program = Command.run(root, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   Effect.catch((error: unknown) =>
     Effect.sync(() => {
@@ -243,5 +287,14 @@ const program = Command.run(root, { version: pkg.version }).pipe(
   ),
 );
 
-await Effect.runPromise(program);
-process.exit();
+// A Bun executable is its own mcporter daemon: mcporter relaunches it as
+// `daemon start --foreground` with MCPORTER_DAEMON_CHILD=1.
+if (process.env.MCPORTER_DAEMON_CHILD === '1' && process.argv[2] === 'daemon') {
+  await handleDaemonCli(process.argv.slice(3), {
+    configPath: '',
+    configExplicit: true,
+  });
+} else {
+  await Effect.runPromise(program);
+  process.exit();
+}

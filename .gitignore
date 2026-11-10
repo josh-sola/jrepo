@@ -3,6 +3,7 @@
 panopticon/node_modules/
 gt-api/node_modules/
 codemode/node_modules/
+codemode/dist/
 panopticon/dist/
 panopticon/tools/*/node_modules/
 pubsub/target/
