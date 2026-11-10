@@ -90,7 +90,7 @@ cm auth linear
       {
         "path": "tools.everything.echo",
         "description": "Echoes back the input string",
-        "signature": "tools.everything.echo(input: {\n  /** Message to echo */\n  message: string,\n}): Promise<string | null>"
+        "signature": "tools.everything.echo({\n  /** Message to echo */\n  message: string,\n}): Promise<string | null>"
       }
     ],
     "remaining": 0,
@@ -111,6 +111,8 @@ cm auth linear
 - The program runs in a confined interpreter that supports a JavaScript
   subset. It has no `require`, no `fetch` and no file access. Use tools for
   those.
+- You may use TypeScript type annotations. They are stripped before the
+  program runs. Enums and namespaces are not supported.
 - Limits: 60 seconds (change with `--timeout <ms>`), 100 tool calls, and 1 MB
   of output.
 

@@ -90,7 +90,7 @@ describe('describe', () => {
   it('prints signatures for one server', () => {
     const { status, stdout } = cm(['describe', 'everything']);
     expect(status).toBe(0);
-    expect(stdout).toContain('tools.everything.echo(input: {');
+    expect(stdout).toContain('tools.everything.echo({');
     expect(stdout).not.toContain('tools.fs.');
   });
 
@@ -151,6 +151,21 @@ describe('run', () => {
         message: expect.stringContaining('boom'),
       },
     });
+  });
+
+  it('runs a program with type annotations', () => {
+    const { status, json } = run(`
+      const echo: string = await tools.everything.echo({ message: "hi" as string })
+      return echo
+    `);
+    expect(status).toBe(0);
+    expect(json).toEqual({ ok: true, value: 'Echo: hi' });
+  });
+
+  it('exits 1 with a parse error for an enum', () => {
+    const { status, json } = run(`enum E { A }\nreturn E.A`);
+    expect(status).toBe(1);
+    expect(json.error.kind).toBe('ParseError');
   });
 
   it('exits 1 for an unknown tool', () => {

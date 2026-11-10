@@ -1,5 +1,6 @@
-import { CodeMode } from '@opencode-ai/codemode';
+import { CodeMode } from '@opencode/codemode';
 import { Effect } from 'effect';
+import { stripTypes } from './strip.ts';
 import type { ToolTree } from './tools.ts';
 
 export const DEFAULT_LIMITS = {
@@ -64,6 +65,16 @@ export const runProgram = async (
   limits: CodeMode.ExecutionLimits = DEFAULT_LIMITS,
   failures: ReadonlyMap<string, string> = new Map(),
 ): Promise<Output> => {
+  const stripped = stripTypes(code);
+  if ('error' in stripped) {
+    return toOutput(
+      { ok: false, error: stripped.error, toolCalls: [] },
+      failures,
+    );
+  }
   const codeMode = CodeMode.make({ tools, limits });
-  return toOutput(await Effect.runPromise(codeMode.execute(code)), failures);
+  return toOutput(
+    await Effect.runPromise(codeMode.execute(stripped.code)),
+    failures,
+  );
 };

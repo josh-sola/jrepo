@@ -1,4 +1,4 @@
-import { Tool } from '@opencode-ai/codemode';
+import { Tool } from '@opencode/codemode';
 import { Effect } from 'effect';
 import { describe, expect, it } from 'vitest';
 import {
@@ -46,7 +46,7 @@ describe('describeServers', () => {
 describe('describeServer', () => {
   it('prints one signature per tool with a one-line comment', () => {
     const text = describeServer(tree, 'demo');
-    expect(text).toContain('// Echo the message.\ntools.demo.echo(input: {');
+    expect(text).toContain('// Echo the message.\ntools.demo.echo({');
     expect(text).toContain('message: string');
     expect(text).toContain('tools.demo["get-sum"]');
     expect(text).not.toContain('Second line');
@@ -57,7 +57,7 @@ describe('describeTool', () => {
   it('prints the full description and signature', () => {
     const text = describeTool(tree, 'demo', 'echo');
     expect(text).toContain('Echo the message.\nSecond line.');
-    expect(text).toContain('tools.demo.echo(input:');
+    expect(text).toContain('tools.demo.echo({');
   });
 
   it('rejects an unknown tool and lists the real ones', () => {
