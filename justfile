@@ -3,11 +3,24 @@ default:
     @just --list
 
 # Run every repository check.
-check: bash gt-api panopticon pubsub
+check: bash codemode gt-api panopticon pubsub
 
 # Check shell-script syntax.
 bash:
     bash -n ghostty/install.sh
+
+# Install dependencies and run codemode's checks.
+codemode:
+    cd codemode && pnpm install --frozen-lockfile && pnpm run check
+
+# Install a cm shim in ~/.local/bin that runs this checkout.
+codemode-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "$HOME/.local/bin"
+    printf '#!/bin/sh\nexec node %s/codemode/src/cli.ts "$@"\n' "$(pwd)" > "$HOME/.local/bin/cm"
+    chmod +x "$HOME/.local/bin/cm"
+    echo "Installed $HOME/.local/bin/cm"
 
 # Install dependencies and run gt-api's checks.
 gt-api:
