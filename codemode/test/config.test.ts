@@ -118,7 +118,7 @@ auth = "oauth"
   const env = { HOME: '/home/me', TOKEN: 'abc' };
 
   it('expands placeholders and home, and sets keep-alive', () => {
-    const [fs, gh] = toDefinitions(config, env);
+    const [fs, gh] = toDefinitions(config, env, {});
     expect(fs).toMatchObject({
       name: 'fs',
       command: {
@@ -130,6 +130,7 @@ auth = "oauth"
       env: { KEY: 'abc' },
       lifecycle: { mode: 'keep-alive', idleTimeoutMs: 600_000 },
     });
+    expect(fs?.env).not.toHaveProperty('CM_CONNECTION');
     expect(gh).toMatchObject({
       name: 'gh',
       auth: 'oauth',
@@ -137,6 +138,7 @@ auth = "oauth"
         kind: 'http',
         headers: { Authorization: 'Bearer abc' },
       },
+      env: { CM_CONNECTION: '0' },
       lifecycle: { mode: 'keep-alive', idleTimeoutMs: 600_000 },
     });
     expect(gh?.command.kind === 'http' && gh.command.url.href).toBe(
@@ -144,13 +146,19 @@ auth = "oauth"
     );
   });
 
+  it('gives a remote server its saved connection number', () => {
+    const [fs, gh] = toDefinitions(config, env, { fs: 4, gh: 3 });
+    expect(gh?.env).toEqual({ CM_CONNECTION: '3' });
+    expect(fs?.env).toEqual({ KEY: 'abc' });
+  });
+
   it('only expands the servers it is asked for', () => {
-    expect(toDefinitions(config, { HOME: '/h' }, [])).toEqual([]);
-    expect(() => toDefinitions(config, { HOME: '/h' })).toThrow(UsageError);
+    expect(toDefinitions(config, { HOME: '/h' }, {}, [])).toEqual([]);
+    expect(() => toDefinitions(config, { HOME: '/h' }, {})).toThrow(UsageError);
   });
 
   it('rejects an unknown server', () => {
-    expect(() => toDefinitions(config, env, ['nope'])).toThrow(
+    expect(() => toDefinitions(config, env, {}, ['nope'])).toThrow(
       /No server named "nope"/,
     );
   });

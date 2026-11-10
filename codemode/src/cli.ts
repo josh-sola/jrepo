@@ -7,6 +7,7 @@ import { handleDaemonCli, type Runtime } from 'mcporter';
 import pkg from '../package.json' with { type: 'json' };
 import { loadConfig, toDefinitions, type Config } from './config.ts';
 import { createDaemonRuntime, createDirectRuntime } from './connect.ts';
+import { connectionsFile, readConnections } from './connection.ts';
 import { describeServer, describeServers, describeTool } from './describe.ts';
 import { applyEnv, restrictEnv } from './env.ts';
 import { ServerError, UsageError, errorMessage } from './errors.ts';
@@ -47,11 +48,21 @@ const readProgram = (file: string | undefined): string => {
 const withRuntime = async (
   names: ReadonlyArray<string> | undefined,
   daemon: boolean,
-  body: (runtime: Runtime, config: Config) => Promise<number>,
+  body: (
+    runtime: Runtime,
+    config: Config,
+    stateFile: string,
+  ) => Promise<number>,
 ): Promise<number> => {
   const config = loadConfig(process.env);
   const selected = names ?? [...config.servers.keys()];
-  const definitions = toDefinitions(config, process.env, selected);
+  const stateFile = connectionsFile(process.env);
+  const definitions = toDefinitions(
+    config,
+    process.env,
+    readConnections(stateFile),
+    selected,
+  );
   applyEnv(restrictEnv(process.env));
   // mcporter can print server logs to stdout, which would corrupt the result.
   const restoreStdout = process.stdout.write;
@@ -60,7 +71,7 @@ const withRuntime = async (
     ? createDaemonRuntime(definitions)
     : createDirectRuntime(definitions));
   try {
-    return await body(runtime, config);
+    return await body(runtime, config, stateFile);
   } finally {
     await runtime.close();
     process.stdout.write = restoreStdout;
@@ -72,10 +83,12 @@ const run = async (
   timeoutMs: number,
 ): Promise<number> => {
   const code = readProgram(file);
-  return withRuntime(undefined, true, async (runtime, config) => {
-    const { tree, failures } = await buildAvailableTools(runtime, [
-      ...config.servers.keys(),
-    ]);
+  return withRuntime(undefined, true, async (runtime, config, stateFile) => {
+    const { tree, failures } = await buildAvailableTools(
+      runtime,
+      [...config.servers.keys()],
+      stateFile,
+    );
     const output = await runProgram(
       tree,
       code,
@@ -98,10 +111,14 @@ const describe = async (targets: ReadonlyArray<string>): Promise<number> => {
   return withRuntime(
     server === undefined ? undefined : [server],
     true,
-    async (runtime, config) => {
+    async (runtime, config, stateFile) => {
       const names =
         server === undefined ? [...config.servers.keys()] : [server];
-      const { tree, failures } = await buildAvailableTools(runtime, names);
+      const { tree, failures } = await buildAvailableTools(
+        runtime,
+        names,
+        stateFile,
+      );
       if (server === undefined) {
         await emit(describeServers(tree, failures));
         return failures.size > 0 ? 1 : 0;

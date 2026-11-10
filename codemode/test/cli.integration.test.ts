@@ -1,4 +1,10 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  execFileSync,
+  spawn,
+  spawnSync,
+  type ChildProcess,
+} from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -274,6 +280,42 @@ args = ["-e", "process.exit(1)"]
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('dead (unavailable)');
     expect(result.stdout).toContain('everything (');
+  });
+});
+
+describe('a remote server whose session expires', () => {
+  const remote = path.join(dir, 'remote.toml');
+  let server: ChildProcess;
+  let base: string;
+
+  beforeAll(async () => {
+    server = spawn(
+      process.execPath,
+      [path.join(root, 'test/fixtures/session-server.ts')],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    const [port] = await once(server.stdout!, 'data');
+    base = `http://127.0.0.1:${String(port).trim()}`;
+    fs.writeFileSync(remote, `[servers.remote]\nurl = "${base}/mcp"\n`);
+  });
+
+  afterAll(() => {
+    server.kill();
+  });
+
+  it('works again on the next run, on a new connection', async () => {
+    const ping = () =>
+      JSON.parse(
+        cm(['run'], {
+          input: 'return await tools.remote.ping({})',
+          env: { CM_CONFIG: remote },
+        }).stdout,
+      );
+    expect(ping()).toEqual({ ok: true, value: 'pong' });
+    await fetch(`${base}/forget`, { method: 'POST' });
+    expect(ping()).toEqual({ ok: true, value: 'pong' });
+    const state = path.join(env.XDG_STATE_HOME, 'cm/connections.json');
+    expect(JSON.parse(fs.readFileSync(state, 'utf8'))).toEqual({ remote: 1 });
   });
 });
 
