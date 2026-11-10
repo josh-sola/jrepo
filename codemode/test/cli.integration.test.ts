@@ -6,6 +6,8 @@ import {
 } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -31,6 +33,7 @@ const env = {
   XDG_STATE_HOME: path.join(home, '.state'),
   MCPORTER_DAEMON_DIR: path.join(dir, 'd'),
   CM_CONFIG: configFile,
+  CM_NO_UPDATE_CHECK: '1',
 };
 
 type Result = { status: number | null; stdout: string; stderr: string };
@@ -491,5 +494,121 @@ describe('setup', () => {
 
   it('exits 2 for an unknown harness', () => {
     expect(cm(['setup', 'harness', 'nope'], { env: setupEnv }).status).toBe(2);
+  });
+});
+
+describe.skipIf(!binary)('update check', () => {
+  const NEWER = '99.0.0';
+  const notice = new RegExp(
+    `^cm ${NEWER} is out \\(you have \\S+\\)\\. Tell the user they can update with: cm upgrade\n$`,
+  );
+  let server: http.Server;
+  let origin = '';
+  let hits = 0;
+
+  beforeAll(async () => {
+    server = http.createServer((_request, response) => {
+      hits += 1;
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify([
+          { tag_name: `cm-v${NEWER}`, draft: false, prerelease: false },
+        ]),
+      );
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const freshState = () => {
+    hits = 0;
+    const state = fs.mkdtempSync(path.join(dir, 'state-'));
+    return { state, file: path.join(state, 'cm', 'update.json') };
+  };
+
+  const check = (state: string, extra: Record<string, string> = {}) =>
+    cm(['run'], {
+      input: 'return 1',
+      env: {
+        XDG_STATE_HOME: state,
+        CM_GITHUB_API: origin,
+        CM_NO_UPDATE_CHECK: '',
+        ...extra,
+      },
+    });
+
+  const readLatest = (file: string): unknown => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8')).latest;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const waitForLatest = async (file: string) => {
+    for (let i = 0; i < 100 && readLatest(file) !== NEWER; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return readLatest(file);
+  };
+
+  it('checks in the background, then prints the notice once', async () => {
+    const { state, file } = freshState();
+    const first = check(state);
+    expect(first.status).toBe(0);
+    expect(first.stderr).toBe('');
+    expect(await waitForLatest(file)).toBe(NEWER);
+    expect(hits).toBe(1);
+
+    const second = check(state);
+    expect(second.stderr).toMatch(notice);
+    expect(JSON.parse(second.stdout)).toEqual({ ok: true, value: 1 });
+
+    const third = check(state);
+    expect(third.stderr).toBe('');
+    expect(JSON.parse(third.stdout).ok).toBe(true);
+    expect(hits).toBe(1);
+  });
+
+  it('checks again when the last check is over a day old', async () => {
+    const { state, file } = freshState();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const old = new Date(Date.now() - 25 * 3_600_000).toISOString();
+    fs.writeFileSync(file, JSON.stringify({ checkedAt: old, latest: '0.0.1' }));
+    expect(check(state).status).toBe(0);
+    expect(await waitForLatest(file)).toBe(NEWER);
+    expect(hits).toBe(1);
+  });
+
+  it.each([
+    ['CM_NO_UPDATE_CHECK', '1'],
+    ['CI', '1'],
+  ])('stays quiet and starts no check with %s set', async (name, value) => {
+    const { state, file } = freshState();
+    const result = check(state, { [name]: value });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(hits).toBe(0);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('stays quiet for upgrade and daemon commands', async () => {
+    const { state, file } = freshState();
+    const env = {
+      XDG_STATE_HOME: state,
+      CM_GITHUB_API: origin,
+      CM_NO_UPDATE_CHECK: '',
+    };
+    expect(cm(['daemon', 'status'], { env }).stderr).toBe('');
+    expect(cm(['upgrade', '--check'], { env }).stderr).not.toMatch(notice);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(fs.existsSync(file)).toBe(false);
   });
 });

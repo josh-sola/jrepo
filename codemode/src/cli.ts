@@ -17,6 +17,7 @@ import { chooseInteractively, probeOauth, setupAuth } from './setup/auth.ts';
 import { dirsFrom } from './setup/files.ts';
 import { setupHarness } from './setup/harness.ts';
 import { HARNESS_NAMES } from './setup/harnesses/types.ts';
+import { checkForUpdate, recordCheck, runCheck } from './update-check.ts';
 import { upgrade } from './upgrade.ts';
 
 const VERSION =
@@ -270,7 +271,13 @@ const upgradeCommand = Command.make(
   },
   ({ check }) =>
     handle(() =>
-      upgrade({ current: VERSION, check, env: process.env, print: emit }),
+      upgrade({
+        current: VERSION,
+        check,
+        env: process.env,
+        print: emit,
+        onInstalled: (version) => recordCheck(process.env, version, new Date()),
+      }),
     ),
 ).pipe(Command.withDescription('Update cm to the newest release.'));
 
@@ -371,14 +378,29 @@ const program = Command.run(root, { version: VERSION }).pipe(
   ),
 );
 
-// A Bun executable is its own mcporter daemon: mcporter relaunches it as
-// `daemon start --foreground` with MCPORTER_DAEMON_CHILD=1.
-if (process.env.MCPORTER_DAEMON_CHILD === '1' && process.argv[2] === 'daemon') {
+// checkForUpdate relaunches this executable with CM_UPDATE_CHECK=1, which skips
+// the CLI. A Bun executable is also its own mcporter daemon: mcporter
+// relaunches it as `daemon start --foreground` with MCPORTER_DAEMON_CHILD=1.
+if (process.env.CM_UPDATE_CHECK === '1') {
+  await runCheck(process.env);
+  process.exit();
+} else if (
+  process.env.MCPORTER_DAEMON_CHILD === '1' &&
+  process.argv[2] === 'daemon'
+) {
   await handleDaemonCli(process.argv.slice(3), {
     configPath: '',
     configExplicit: true,
   });
 } else {
+  if (typeof CM_VERSION === 'string') {
+    checkForUpdate({
+      current: VERSION,
+      args: process.argv.slice(2),
+      env: process.env,
+      now: new Date(),
+    });
+  }
   await Effect.runPromise(program);
   process.exit();
 }

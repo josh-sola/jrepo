@@ -26,7 +26,7 @@ type Version = {
   readonly pre: string | undefined;
 };
 
-const parseVersion = (text: string): Version | undefined => {
+export const parseVersion = (text: string): Version | undefined => {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(text);
   if (!match) return undefined;
   return {
@@ -157,8 +157,9 @@ export const upgrade = async (options: {
   readonly check: boolean;
   readonly env: UpgradeEnv;
   readonly print: (text: string) => Promise<void>;
+  readonly onInstalled: (version: string) => void;
 }): Promise<number> => {
-  const { current, check, env, print } = options;
+  const { current, check, env, print, onInstalled } = options;
   if (!process.versions.bun) {
     throw new UsageError('This cm runs from a checkout; update with git pull.');
   }
@@ -188,6 +189,7 @@ export const upgrade = async (options: {
     verifyAttestation(file);
     const code = await runInstaller(file, { ...env, CM_VERSION: latest });
     if (code !== 0) throw new Error(`install.sh exited with code ${code}.`);
+    onInstalled(latest);
     return 0;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
