@@ -4,6 +4,7 @@ Personal projects that share one checkout and one Git history.
 
 | Project | What it does |
 | --- | --- |
+| [codemode](codemode/) | A CLI that lets agents call MCP servers from a short JavaScript program. |
 | [ghostty](ghostty/) | Custom shaders for the Ghostty terminal. |
 | [gt-api](gt-api/) | A local REST service that knows Graphite stacks. |
 | [panopticon](panopticon/) | A personal server for reviewing GitHub pull requests. |

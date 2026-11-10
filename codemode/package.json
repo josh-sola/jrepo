@@ -1,0 +1,37 @@
+{
+  "name": "codemode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cm": "src/cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "lint": "oxlint .",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "check:effect": "node scripts/check-effect.ts",
+    "check": "pnpm run lint && pnpm run fmt:check && pnpm run typecheck && pnpm run test && pnpm run check:effect"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-beta.101",
+    "@opencode-ai/codemode": "1.18.4",
+    "effect": "4.0.0-beta.101",
+    "mcporter": "0.17.0",
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-everything": "^2.2.1",
+    "@modelcontextprotocol/server-filesystem": "^2.2.0",
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "typescript": "^7.0.2",
+    "vitest": "^3.2.4"
+  }
+}
