@@ -1,8 +1,14 @@
 import { Tool, toolError } from '@opencode/codemode';
 import { Effect } from 'effect';
 import type { Runtime } from 'mcporter';
+import { bumpConnection, withConnection } from './connection.ts';
 import { isRecord } from './env.ts';
-import { errorMessage, serverFailure } from './errors.ts';
+import {
+  callFailure,
+  errorMessage,
+  isHttpFailure,
+  serverFailure,
+} from './errors.ts';
 
 export type ToolTree = Record<string, Record<string, Tool.Tool>>;
 
@@ -56,14 +62,37 @@ export const projectResult = (result: unknown): Projection => {
 const jsonSchema = (schema: unknown, fallback: Tool.JsonSchema) =>
   isRecord(schema) ? (schema as Tool.JsonSchema) : fallback;
 
+const listServerTools = (runtime: Runtime, server: string) =>
+  runtime.listTools(server, { includeSchema: true, disableOAuth: true });
+
+// Listing is read-only, so it is safe to retry once on a new connection.
+const listWithReconnect = async (
+  runtime: Runtime,
+  server: string,
+  stateFile: string,
+) => {
+  try {
+    return await listServerTools(runtime, server);
+  } catch (error) {
+    const definition = runtime.getDefinition(server);
+    if (!isHttpFailure(error) || definition.command.kind !== 'http') {
+      throw error;
+    }
+    runtime.registerDefinition(
+      withConnection(definition, bumpConnection(stateFile, server)),
+      { overwrite: true },
+    );
+    return listServerTools(runtime, server);
+  }
+};
+
 const buildServerTools = async (
   runtime: Runtime,
   server: string,
+  stateFile: string,
 ): Promise<Record<string, Tool.Tool>> => {
-  const infos = await runtime.listTools(server, {
-    includeSchema: true,
-    disableOAuth: true,
-  });
+  const infos = await listWithReconnect(runtime, server, stateFile);
+  const remote = runtime.getDefinition(server).command.kind === 'http';
   const namespace: Record<string, Tool.Tool> = {};
   for (const info of infos) {
     namespace[info.name] = Tool.make({
@@ -74,10 +103,14 @@ const buildServerTools = async (
         Effect.tryPromise({
           try: async () => {
             const args = isRecord(input) ? input : {};
-            const result = await runtime.callTool(server, info.name, {
-              args,
-              disableOAuth: true,
-            });
+            const result = await runtime
+              .callTool(server, info.name, { args, disableOAuth: true })
+              .catch((error: unknown) => {
+                // The call may have run on the server, so it is never replayed.
+                if (!remote || !isHttpFailure(error)) throw error;
+                bumpConnection(stateFile, server);
+                throw new Error(callFailure(server), { cause: error });
+              });
             const projected = projectResult(result);
             if (!projected.ok) throw new Error(projected.message);
             return projected.value;
@@ -97,13 +130,17 @@ export type AvailableTools = {
 export const buildAvailableTools = async (
   runtime: Runtime,
   names: ReadonlyArray<string>,
+  stateFile: string,
 ): Promise<AvailableTools> => {
   const tree: ToolTree = {};
   const failures = new Map<string, string>();
   const built = await Promise.all(
     names.map(async (name) => {
       try {
-        return { name, tools: await buildServerTools(runtime, name) };
+        return {
+          name,
+          tools: await buildServerTools(runtime, name, stateFile),
+        };
       } catch (error) {
         failures.set(name, serverFailure(name, error));
         return undefined;

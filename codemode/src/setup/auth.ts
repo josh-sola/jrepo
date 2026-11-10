@@ -173,6 +173,7 @@ export const probeOauth = async (
     { ...server, headers: {}, oauth: false },
     env,
     process.cwd(),
+    0,
   );
   const runtime = await createDirectRuntime([definition]);
   let timer: NodeJS.Timeout | undefined;

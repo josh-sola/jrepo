@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Schema } from 'effect';
 import { parse } from 'smol-toml';
 import type { ServerDefinition } from 'mcporter';
+import { withConnection, type Connections } from './connection.ts';
 import { isRecord } from './env.ts';
 import { UsageError, errorMessage } from './errors.ts';
 
@@ -202,6 +203,7 @@ export const toDefinition = (
   server: ServerConfig,
   env: NodeJS.ProcessEnv,
   configDir: string,
+  connection: number,
 ): ServerDefinition => {
   const lifecycle = {
     mode: 'keep-alive',
@@ -229,28 +231,38 @@ export const toDefinition = (
       };
     }
     case 'http':
-      return {
-        name,
-        command: {
-          kind: 'http',
-          url: server.url,
-          headers: expandRecord(server.headers, env, `${where} header`),
+      return withConnection(
+        {
+          name,
+          command: {
+            kind: 'http',
+            url: server.url,
+            headers: expandRecord(server.headers, env, `${where} header`),
+          },
+          ...(server.oauth ? { auth: 'oauth' } : {}),
+          lifecycle,
         },
-        ...(server.oauth ? { auth: 'oauth' } : {}),
-        lifecycle,
-      };
+        connection,
+      );
   }
 };
 
 export const toDefinitions = (
   config: Config,
   env: NodeJS.ProcessEnv,
+  connections: Connections,
   names: ReadonlyArray<string> = [...config.servers.keys()],
 ): ServerDefinition[] =>
   names.map((name) => {
     const server = config.servers.get(name);
     if (server === undefined) throw new UsageError(unknownServer(config, name));
-    return toDefinition(name, server, env, path.dirname(config.path));
+    return toDefinition(
+      name,
+      server,
+      env,
+      path.dirname(config.path),
+      connections[name] ?? 0,
+    );
   });
 
 export const unknownServer = (config: Config, name: string): string =>
