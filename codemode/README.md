@@ -22,6 +22,24 @@ cm daemon status    # show whether the background daemon is running
 cm daemon stop      # stop the daemon and the servers it keeps warm
 ```
 
+## Setup
+
+Copy the MCP servers your agents already have into `cm`, and log in to the
+ones that use OAuth. Then teach each agent to use `cm`.
+
+```sh
+cm setup auth             # pick servers from Claude Code, Codex and OpenCode
+cm setup harness claude   # or codex, opencode
+```
+
+`cm setup auth` also takes `--all`, or `--only <name>` one or more times.
+Outside a terminal it needs one of them. It copies header and env values as
+they are, so `servers.toml` holds secrets and gets mode `0600`. It cannot copy
+OAuth tokens or claude.ai connectors. `cm setup harness` writes a `cm` skill
+and lets the agent run `cm` without asking. Before it changes a config file, it
+saves a copy as `<file>.cm-backup`. Running either command again changes
+nothing. Neither one edits the servers in your agents.
+
 ## Config
 
 `cm` reads `$CM_CONFIG`. Without it, `cm` reads

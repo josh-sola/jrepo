@@ -113,7 +113,10 @@ const parseEntry = (name: string, entry: unknown): ServerConfig => {
   }
 };
 
-export const parseConfig = (text: string, file: string): Config => {
+export const parseServers = (
+  text: string,
+  file: string,
+): Map<string, ServerConfig> => {
   let raw: unknown;
   try {
     raw = parse(text);
@@ -132,6 +135,11 @@ export const parseConfig = (text: string, file: string): Config => {
   for (const [name, entry] of Object.entries(top.servers ?? {})) {
     servers.set(name, parseEntry(name, entry));
   }
+  return servers;
+};
+
+export const parseConfig = (text: string, file: string): Config => {
+  const servers = parseServers(text, file);
   if (servers.size === 0) {
     throw new UsageError(
       `No servers in ${file}. Add a [servers.<name>] table. Run "cm guide" for the format.`,

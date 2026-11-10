@@ -23,6 +23,9 @@ importers:
       effect:
         specifier: 4.1.0
         version: 4.1.0
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       mcporter:
         specifier: 0.17.0
         version: 0.17.0

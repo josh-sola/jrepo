@@ -115,6 +115,10 @@ main() {
 
   link=$bin_dir/cm
   previous=
+  first_install=1
+  if [ -L "$link" ] || [ -e "$link" ]; then
+    first_install=0
+  fi
   if [ -L "$link" ]; then
     previous=$(readlink "$link")
   fi
@@ -145,6 +149,14 @@ main() {
     *":$bin_dir:"*) ;;
     *) echo "Add $bin_dir to PATH to run cm." >&2 ;;
   esac
+
+  if [ "$first_install" = 1 ]; then
+    cat <<'EOF'
+Next:
+  cm setup auth                       copy in MCP servers from your agents and log in
+  cm setup harness claude             teach Claude Code to use cm (or codex, opencode)
+EOF
+  fi
 }
 
 main "$@"

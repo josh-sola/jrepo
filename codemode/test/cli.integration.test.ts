@@ -399,3 +399,54 @@ describe('daemon', () => {
     expect(cm(['daemon', 'status']).stdout).toMatch(/Daemon pid \d+/);
   });
 });
+
+describe('setup', () => {
+  const setupHome = path.join(dir, 'setup-home');
+  const setupEnv = {
+    HOME: setupHome,
+    XDG_CONFIG_HOME: path.join(setupHome, '.config'),
+    CM_CONFIG: path.join(dir, 'setup-servers.toml'),
+  };
+
+  beforeAll(() => {
+    fs.mkdirSync(setupHome, { recursive: true });
+    fs.writeFileSync(
+      path.join(setupHome, '.claude.json'),
+      JSON.stringify({
+        mcpServers: { notes: { command: 'npx', args: ['-y', 'notes'] } },
+      }),
+    );
+  });
+
+  it('asks for --all or --only when there is no terminal', () => {
+    const result = cm(['setup', 'auth'], { env: setupEnv });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain('notes');
+    expect(fs.existsSync(setupEnv.CM_CONFIG)).toBe(false);
+  });
+
+  it('copies servers, then sets up a harness and changes nothing on a repeat', () => {
+    const auth = cm(['setup', 'auth', '--all'], { env: setupEnv });
+    expect(auth.status).toBe(0);
+    expect(fs.readFileSync(setupEnv.CM_CONFIG, 'utf8')).toContain(
+      '[servers.notes]',
+    );
+    const first = cm(['setup', 'harness', 'claude'], { env: setupEnv });
+    expect(first.status).toBe(0);
+    expect(
+      fs.readFileSync(
+        path.join(setupHome, '.claude/skills/cm/SKILL.md'),
+        'utf8',
+      ),
+    ).toContain('Available servers are notes.');
+    expect(
+      fs.readFileSync(path.join(setupHome, '.claude/settings.json'), 'utf8'),
+    ).toContain('Bash(cm *)');
+    const again = cm(['setup', 'harness', 'claude'], { env: setupEnv });
+    expect(again.stdout).toContain('No change.');
+  });
+
+  it('exits 2 for an unknown harness', () => {
+    expect(cm(['setup', 'harness', 'nope'], { env: setupEnv }).status).toBe(2);
+  });
+});
