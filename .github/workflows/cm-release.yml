@@ -30,6 +30,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.publish.outputs.publish }}
     defaults:
       run:
         working-directory: codemode
@@ -65,6 +66,18 @@ jobs:
             version="$version-pr.$PR"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Only the title counts: squash merges copy the PR description into the
+      # message body, where the marker may only be mentioned.
+      - id: publish
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          title=$(printf '%s\n' "$MESSAGE" | head -n 1)
+          case $title in
+            *'[skip release]'*) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
@@ -164,7 +177,7 @@ jobs:
     needs: [build, linux-test]
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      !contains(github.event.head_commit.message, '[skip release]')
+      needs.build.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
