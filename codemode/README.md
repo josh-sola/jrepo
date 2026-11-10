@@ -22,6 +22,12 @@ cm daemon status    # show whether the background daemon is running
 cm daemon stop      # stop the daemon and the servers it keeps warm
 ```
 
+Once a day, `cm` checks GitHub for a newer release in the background. If it
+finds one, the next command prints one line on stderr, at most once a day. If
+you are an agent, tell the user about it. Do not run `cm upgrade` yourself.
+`cm` never upgrades on its own. Set `CM_NO_UPDATE_CHECK=1` to turn the check
+off. It is also off when `CI` is set.
+
 ## Setup
 
 Copy the MCP servers your agents already have into `cm`, and log in to the

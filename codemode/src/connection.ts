@@ -6,12 +6,22 @@ import { isRecord } from './env.ts';
 
 export type Connections = Readonly<Record<string, number>>;
 
-export const connectionsFile = (env: NodeJS.ProcessEnv): string =>
+export const stateFile = (env: NodeJS.ProcessEnv, name: string): string =>
   path.join(
     env.XDG_STATE_HOME ?? path.join(os.homedir(), '.local', 'state'),
     'cm',
-    'connections.json',
+    name,
   );
+
+export const connectionsFile = (env: NodeJS.ProcessEnv): string =>
+  stateFile(env, 'connections.json');
+
+export const writeStateAtomic = (file: string, value: unknown): void => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value));
+  fs.renameSync(temp, file);
+};
 
 const isCount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -35,10 +45,7 @@ export const readConnections = (file: string): Connections => {
 export const bumpConnection = (file: string, server: string): number => {
   const connections = readConnections(file);
   const next = (connections[server] ?? 0) + 1;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ ...connections, [server]: next }));
-  fs.renameSync(temp, file);
+  writeStateAtomic(file, { ...connections, [server]: next });
   return next;
 };
 
