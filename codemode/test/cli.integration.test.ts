@@ -90,10 +90,11 @@ describe('describe', () => {
     expect(stdout).not.toContain('echo');
   });
 
-  it('prints signatures for one server', () => {
+  it('lists one server, in full or one line per tool by size', () => {
     const { status, stdout } = cm(['describe', 'everything']);
     expect(status).toBe(0);
-    expect(stdout).toContain('tools.everything.echo({');
+    expect(stdout).toMatch(/^everything: \d+ tools\./);
+    expect(stdout).toMatch(/tools\.everything\.echo\(\{|^echo +Echoes back/m);
     expect(stdout).not.toContain('tools.fs.');
   });
 

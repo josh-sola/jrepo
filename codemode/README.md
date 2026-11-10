@@ -77,13 +77,15 @@ Find out what exists before you write a program.
 
 ```sh
 cm describe                    # one line per server: its name and tool count
-cm describe fs                 # TypeScript signatures for one server
+cm describe fs                 # the tools of one server
 cm describe fs.read_text_file  # one tool, in full
 ```
 
-`cm describe` prints lines such as `fs (16 tools)`. A big server can have
-hundreds of tools, so do not list one in full. Use `search()` inside a program
-to find the tools you need. See "Writing a program".
+`cm describe` prints lines such as `fs (16 tools)`. `cm describe <server>`
+prints every signature when the list is small. For a big server it prints one
+line per tool, with its name and a short summary. Then run
+`cm describe <server>.<tool>` for each tool you plan to call. `search()`
+inside a program also finds tools. See "Writing a program".
 
 Run a program. It comes from stdin, or from a file with `--file`.
 
