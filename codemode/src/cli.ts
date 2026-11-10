@@ -12,6 +12,10 @@ import { applyEnv, restrictEnv } from './env.ts';
 import { ServerError, UsageError, errorMessage } from './errors.ts';
 import { DEFAULT_LIMITS, runProgram } from './run.ts';
 import { buildAvailableTools } from './tools.ts';
+import { chooseInteractively, probeOauth, setupAuth } from './setup/auth.ts';
+import { dirsFrom } from './setup/files.ts';
+import { setupHarness } from './setup/harness.ts';
+import { HARNESS_NAMES } from './setup/harnesses/types.ts';
 import { upgrade } from './upgrade.ts';
 
 const VERSION =
@@ -253,6 +257,68 @@ const upgradeCommand = Command.make(
     ),
 ).pipe(Command.withDescription('Update cm to the newest release.'));
 
+const setupAuthCommand = Command.make(
+  'auth',
+  {
+    all: Flag.Boolean('all').pipe(
+      Flag.withDescription('Copy every new server without asking.'),
+      Flag.withDefault(false),
+    ),
+    only: Flag.String('only').pipe(
+      Flag.withDescription('Copy this server only. Repeat it for more.'),
+      Flag.atLeast(0),
+    ),
+  },
+  ({ all, only }) =>
+    handle(() =>
+      setupAuth({
+        all,
+        only,
+        interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+        env: process.env,
+        dirs: dirsFrom(process.env),
+        print: emit,
+        deps: {
+          choose: chooseInteractively,
+          probe: (name, server) => probeOauth(name, server, process.env),
+          login: (name) => auth([name]),
+        },
+      }),
+    ),
+).pipe(
+  Command.withDescription(
+    'Copy MCP servers from Claude Code, Codex and OpenCode into cm, then log in to the ones that use OAuth.',
+  ),
+);
+
+const setupHarnessCommand = Command.make(
+  'harness',
+  {
+    name: Argument.ChoiceWithValue(
+      'harness',
+      HARNESS_NAMES.map((name) => [name, name] as const),
+    ),
+  },
+  ({ name }) =>
+    handle(() =>
+      setupHarness({
+        name,
+        env: process.env,
+        dirs: dirsFrom(process.env),
+        print: emit,
+      }),
+    ),
+).pipe(
+  Command.withDescription(
+    `Teach an agent to use cm: add a skill and let it run cm without asking. One of: ${HARNESS_NAMES.join(', ')}.`,
+  ),
+);
+
+const setupCommand = Command.make('setup').pipe(
+  Command.withDescription('Set up cm servers and agents.'),
+  Command.withSubcommands([setupAuthCommand, setupHarnessCommand]),
+);
+
 const root = Command.make('cm').pipe(
   Command.withDescription(
     [
@@ -268,6 +334,7 @@ const root = Command.make('cm').pipe(
     authCommand,
     guideCommand,
     daemonCommand,
+    setupCommand,
     upgradeCommand,
   ]),
 );

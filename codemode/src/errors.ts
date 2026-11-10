@@ -14,7 +14,7 @@ export const errorMessage = (error: unknown): string =>
 // The daemon relays failures as a bare code, which describeConnectionIssue ignores.
 const DAEMON_AUTH_CODE = 'CLIENT_HTTP_AUTHENTICATION';
 
-const needsLogin = (error: unknown): boolean =>
+export const needsLogin = (error: unknown): boolean =>
   (error instanceof Error &&
     'code' in error &&
     error.code === DAEMON_AUTH_CODE) ||

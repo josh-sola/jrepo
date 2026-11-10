@@ -124,6 +124,9 @@ describe('install.sh', () => {
     expect(result.stdout).toContain(`Installed cm v0.1.0 at ${link}.`);
     expect(calls()).toContain(`gh attestation verify`);
     expect(calls()).not.toContain('daemon stop');
+    expect(result.stdout).toContain('Next:');
+    expect(result.stdout).toContain('cm setup auth');
+    expect(result.stdout).toContain('cm setup harness claude');
   });
 
   it('upgrades: stops the old daemon, switches the link and keeps two', async () => {
@@ -132,7 +135,9 @@ describe('install.sh', () => {
     fs.rmSync(log, { force: true });
 
     publish('0.2.0');
-    expect((await install(home)).code).toBe(0);
+    const upgraded = await install(home);
+    expect(upgraded.code).toBe(0);
+    expect(upgraded.stdout).not.toContain('Next:');
     expect(fs.readlinkSync(link)).toBe(path.join(versions, '0.2.0', 'cm'));
     expect(calls()).toContain('0.1.0 daemon stop');
 
