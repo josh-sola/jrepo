@@ -112,9 +112,9 @@ jobs:
       - name: Format, clippy, and test
         if: matrix.run_checks
         run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
 
       - name: Build release binary
         env:
@@ -131,8 +131,46 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  web:
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: viz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the wasm target and the wasm-bindgen CLI pinned in Cargo.lock
+        run: |
+          rustup target add wasm32-unknown-unknown
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Lint the wasm crates
+        run: cargo clippy --locked -p viz-core -p viz-web --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Build and package viz-web
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          VIZ_BUILD_VERSION="$VERSION" scripts/build-web.sh web-out
+          mkdir -p release
+          tar -czf "release/viz-web-$VERSION.tar.gz" -C web-out viz-web
+          cd release && sha256sum "viz-web-$VERSION.tar.gz" > "viz-web-$VERSION.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: viz-web
+          path: viz/release/
+          if-no-files-found: error
+          retention-days: 7
+
   package:
-    needs: [meta, build]
+    needs: [meta, build, web]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -146,6 +184,11 @@ jobs:
           pattern: viz-bin-*
           path: release
           merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: viz-web
+          path: release
 
       - name: Package checksums and installer
         run: |

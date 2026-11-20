@@ -574,6 +574,23 @@ impl Node {
     }
 }
 
+/// `frames` apply in order on top of `doc`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VizShare {
+    pub v: u32,
+    pub doc: Document,
+    #[serde(default)]
+    pub frames: Vec<Frame>,
+}
+
+/// The events one `append_events` call wrote, with its unix-ms timestamp when
+/// the writer recorded one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub ts: Option<u64>,
+    pub events: Vec<Event>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Event {

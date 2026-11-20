@@ -8,10 +8,14 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::kdl_codec::{format_event_kdl, parse_events};
-use crate::model::{Document, Event};
+use crate::model::{Document, Event, Frame};
 use crate::store::Store;
 
 pub const FRAME_DELIMITER: &str = "\n// ---viz-frame---\n";
+
+/// Starts the first chunk of each `append_events` call, so readers can group a
+/// call's events into one timestamped frame. KDL parsers skip it as a comment.
+const TIMESTAMP_PREFIX: &str = "// viz-ts=";
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brisk", "calm", "cobalt", "crisp", "dusk", "ember", "fern", "flint", "frost",
@@ -133,7 +137,11 @@ pub fn append_events(base_dir: &Path, id: &str, events: &[Event]) -> miette::Res
     if events.is_empty() {
         return Ok(());
     }
-    let mut payload = String::new();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut payload = format!("{TIMESTAMP_PREFIX}{now_ms}\n");
     for ev in events {
         payload.push_str(&format_event_kdl(ev));
         payload.push_str(FRAME_DELIMITER);
@@ -185,6 +193,38 @@ pub fn read_frames_from(path: &Path, byte_offset: &mut u64) -> miette::Result<Ve
 
     *byte_offset += consumed_len as u64;
     Ok(events)
+}
+
+/// Reads every complete frame in the file, one per `append_events` call.
+/// Chunks written before timestamps existed each become their own frame with
+/// `ts: None`.
+pub fn read_timed_frames(path: &Path) -> miette::Result<Vec<Frame>> {
+    let raw = fs::read(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read {}", path.display()))?;
+    let delim = FRAME_DELIMITER.as_bytes();
+    let Some(last_pos) = find_last_subslice(&raw, delim) else {
+        return Ok(Vec::new());
+    };
+    let complete = std::str::from_utf8(&raw[..last_pos + delim.len()]).into_diagnostic()?;
+
+    let source_name = path.display().to_string();
+    let mut frames: Vec<Frame> = Vec::new();
+    for chunk in complete.split(FRAME_DELIMITER) {
+        if chunk.trim().is_empty() {
+            continue;
+        }
+        let events = parse_events(chunk, &source_name)?;
+        let ts = chunk
+            .strip_prefix(TIMESTAMP_PREFIX)
+            .and_then(|rest| rest.lines().next())
+            .and_then(|ms| ms.trim().parse::<u64>().ok());
+        match frames.last_mut() {
+            Some(open) if ts.is_none() && open.ts.is_some() => open.events.extend(events),
+            _ => frames.push(Frame { ts, events }),
+        }
+    }
+    Ok(frames)
 }
 
 fn find_last_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -294,6 +334,17 @@ mod tests {
     }
 
     #[test]
+    fn frames_without_timestamps_stand_alone() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("events.kdl");
+        let old = format!("close{FRAME_DELIMITER}close{FRAME_DELIMITER}");
+        fs::write(&path, old).unwrap();
+        let frames = read_timed_frames(&path).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|f| f.ts.is_none() && f.events.len() == 1));
+    }
+
+    #[test]
     fn create_append_read_frames_and_list_sessions() {
         let tmp = TempDir::new().unwrap();
         let meta = create_session(
@@ -352,6 +403,15 @@ mod tests {
 
         let next = read_frames_from(&path, &mut offset).unwrap();
         assert_eq!(next.len(), 2);
+
+        let frames = read_timed_frames(&path).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(frames[0].events[..], [Event::Init(_)]));
+        assert!(matches!(
+            frames[1].events[..],
+            [Event::LogAppend { .. }, Event::Close]
+        ));
+        assert!(frames.iter().all(|f| f.ts.is_some()));
 
         let store = load_store(tmp.path(), &meta.id).unwrap();
         assert!(store.closed);

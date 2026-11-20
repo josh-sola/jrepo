@@ -2857,21 +2857,45 @@ dependencies = [
  "crossterm",
  "flate2",
  "image",
- "kdl 6.7.1",
  "miette 7.6.0",
  "notify",
- "petgraph",
- "plotters",
  "pulldown-cmark",
  "rand 0.9.5",
  "ratatui",
  "resvg",
- "roxmltree 0.21.2",
- "rust-sugiyama",
  "serde",
  "serde_json",
  "syntect",
  "tempfile",
+ "viz-core",
+]
+
+[[package]]
+name = "viz-core"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "kdl 6.7.1",
+ "miette 7.6.0",
+ "petgraph",
+ "plotters",
+ "roxmltree 0.21.2",
+ "rust-sugiyama",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usvg",
+]
+
+[[package]]
+name = "viz-web"
+version = "0.1.0"
+dependencies = [
+ "miette 7.6.0",
+ "serde",
+ "serde_json",
+ "viz-core",
+ "wasm-bindgen",
 ]
 
 [[package]]
