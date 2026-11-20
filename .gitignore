@@ -7,3 +7,4 @@ codemode/dist/
 panopticon/dist/
 panopticon/tools/*/node_modules/
 pubsub/target/
+viz/target/

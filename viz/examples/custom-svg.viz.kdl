@@ -1,0 +1,55 @@
+viz v=1 title="Ring Buffer Architecture" subtitle="Theme-aware custom SVG with hover & click" width=0.56 height=0.52 {
+    state selected="producer" highlight="ring"
+
+    split direction="vertical" weights="3,2" {
+        svg id="diagram" title="Lock-Free Ring" select-key="selected" highlight-key="highlight" {
+            source #"""
+            <svg xmlns="http://www.w3.org/2000/svg" width="520" height="220" viewBox="0 0 520 220">
+              <rect width="520" height="220" fill="var(--bg)"/>
+              <g id="producer">
+                <title>Producer appends frames with atomic tail store</title>
+                <rect x="28" y="74" width="120" height="72" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+                <text x="88" y="105" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="var(--fg)">Producer</text>
+                <text x="88" y="127" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--muted)">tail += 1</text>
+              </g>
+              <g id="ring">
+                <title>Fixed 4096-slot power-of-two ring buffer</title>
+                <circle cx="260" cy="110" r="72" fill="var(--surface-alt)" stroke="var(--border)" stroke-width="2"/>
+                <circle cx="260" cy="110" r="42" fill="var(--bg)" stroke="var(--ok)" stroke-width="2" stroke-dasharray="6,4"/>
+                <text x="260" y="107" text-anchor="middle" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="var(--fg)">Ring</text>
+                <text x="260" y="124" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--muted)">4096 slots</text>
+              </g>
+              <g id="consumer">
+                <title>Consumer drains batches with acquire load</title>
+                <rect x="372" y="74" width="120" height="72" rx="10" fill="var(--surface)" stroke="var(--ok)" stroke-width="2"/>
+                <text x="432" y="105" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="var(--fg)">Consumer</text>
+                <text x="432" y="127" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--muted)">head += n</text>
+              </g>
+              <line x1="148" y1="110" x2="186" y2="110" stroke="var(--accent)" stroke-width="2"/>
+              <line x1="334" y1="110" x2="372" y2="110" stroke="var(--ok)" stroke-width="2"/>
+            </svg>
+            """#
+            tooltip "producer" "Single-writer producer (Release ordering)"
+        }
+
+        markdown id="detail" title="Inspector" {
+            content """
+            Hover over **Producer**, **Ring**, or **Consumer** to see tooltips, or click an element to inspect it.
+            """
+            by-selected {
+                case "producer" """
+                ### Producer
+                Writes payload bytes into `slots[tail & mask]`, then publishes `tail + 1` with `Ordering::Release`.
+                """
+                case "ring" """
+                ### Ring Storage
+                Contiguous 64-byte cache-line padded array sized to a power of two so modulo compiles to a single bitmask.
+                """
+                case "consumer" """
+                ### Consumer
+                Loads `tail` with `Ordering::Acquire`, drains all ready entries in one batch, then advances `head`.
+                """
+            }
+        }
+    }
+}

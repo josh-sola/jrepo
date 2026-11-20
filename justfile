@@ -3,11 +3,12 @@ default:
     @just --list
 
 # Run every repository check.
-check: bash codemode gt-api panopticon pubsub
+check: bash codemode gt-api panopticon pubsub viz
 
 # Check shell-script syntax.
 bash:
     bash -n ghostty/install.sh
+    sh -n viz/install.sh
 
 # Install dependencies and run codemode's checks.
 codemode:
@@ -43,6 +44,14 @@ pubsub:
 # Install the pubsub binary with cargo.
 pubsub-install:
     cargo install --path pubsub
+
+# Run viz's format, lint, and test checks.
+viz:
+    cd viz && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+
+# Install the viz binary with cargo.
+viz-install:
+    cargo install --path viz
 
 install:
     ./ghostty/install.sh

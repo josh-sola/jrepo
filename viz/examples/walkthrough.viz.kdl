@@ -1,0 +1,121 @@
+viz v=1 title="Auth Request Walkthrough" subtitle="Edge to Postgres request lifecycle" width=0.74 height=0.78 {
+    state selected="gateway" highlight="gateway" code-focus="1..6"
+
+    steps {
+        step "1. TLS Ingress" id="s1" selected="gateway" highlight="gateway" code-focus="1..6" {
+            markdown """
+            Client traffic enters **Envoy Gateway**, which terminates TLS and assigns a trace ID before forwarding over mTLS.
+            """
+        }
+        step "2. Token Verification" id="s2" selected="auth" highlight="gateway,auth" code-focus="8..16" {
+            markdown """
+            **Auth Service** checks the JWT signature against the in-memory JWKS cache and enforces route scopes.
+            """
+        }
+        step "3. Policy & Persistence" id="s3" selected="db" highlight="auth,db" code-focus="18..25" {
+            markdown """
+            On cache miss, Auth queries **Postgres** for revocation state and writes an audit record.
+            """
+        }
+    }
+
+    split direction="vertical" weights="5,4" {
+        graph id="arch" title="Service Topology" direction="lr" highlight-key="highlight" select-key="selected" {
+            node "gateway" label="Gateway" sublabel="envoy 1.31" status="ok" group="edge" shape="rounded" tooltip="Terminates TLS 1.3 and injects x-request-id"
+            node "auth" label="Auth" sublabel="rust / tonic" status="active" group="core" shape="diamond" tooltip="Validates JWT claims and scopes"
+            node "cache" label="JWKS Cache" sublabel="redis" status="ok" group="core" shape="pill" tooltip="Sub-millisecond key lookup"
+            node "db" label="Postgres" sublabel="primary" status="warn" group="data" shape="box" tooltip="Revocation list and audit log"
+            edge "gateway" "auth" label="mTLS gRPC" style="solid" active=#true tooltip="p99 1.8ms"
+            edge "auth" "cache" label="GET jwks" style="dashed" active=#false tooltip="99.4% hit rate"
+            edge "auth" "db" label="SELECT revocations" style="solid" active=#true tooltip="p99 9.4ms"
+        }
+
+        split direction="horizontal" weights="2,3" {
+            markdown id="notes" title="Component Notes" {
+                content """
+                Select a node or press **n** / **p** to walk through the request path.
+                """
+                by-selected {
+                    case "gateway" """
+                    ### Envoy Gateway
+                    - Terminates external TLS 1.3
+                    - Rate-limits anonymous callers to `120 req/s`
+                    - Propagates `traceparent` headers downstream
+                    """
+                    case "auth" """
+                    ### Auth Service
+                    - Verifies EdDSA JWT signatures using cached JWKS
+                    - Checks tenant scopes before issuing internal claims
+                    - Fails closed on clock skew > 30s
+                    """
+                    case "db" """
+                    ### Postgres Primary
+                    - Stores revoked session IDs with partial index
+                    - Audit writes batch every 50ms
+                    """
+                }
+            }
+
+            code id="source" title="Request Handler" lang="rust" focus-key="code-focus" {
+                source #"""
+                pub async fn handle_request(req: Request) -> Result<Response> {
+                    let trace_id = req.headers().get_or_create_trace_id();
+                    let token = req.bearer_token()?;
+                    forward_to_auth(trace_id, token).await
+                }
+
+                pub async fn verify_jwt(token: &str, jwks: &JwksCache) -> Result<Claims> {
+                    let header = decode_header(token)?;
+                    let key = jwks.get(&header.kid).await?;
+                    let claims = verify_signature(token, &key)?;
+                    if claims.is_expired() {
+                        return Err(AuthError::Expired);
+                    }
+                    Ok(claims)
+                }
+
+                pub async fn check_revocation(db: &PgPool, sub: &str) -> Result<bool> {
+                    let row = sqlx::query!("SELECT 1 AS hit FROM revocations WHERE sub = $1", sub)
+                        .fetch_optional(db)
+                        .await?;
+                    Ok(row.is_some())
+                }
+                """#
+                by-selected {
+                    case "gateway" lang="rust" start-line=1 highlight-lines="1..5" {
+                        source #"""
+                        pub async fn handle_request(req: Request) -> Result<Response> {
+                            let trace_id = req.headers().get_or_create_trace_id();
+                            let token = req.bearer_token()?;
+                            forward_to_auth(trace_id, token).await
+                        }
+                        """#
+                    }
+                    case "auth" lang="rust" start-line=8 highlight-lines="8..16" {
+                        source #"""
+                        pub async fn verify_jwt(token: &str, jwks: &JwksCache) -> Result<Claims> {
+                            let header = decode_header(token)?;
+                            let key = jwks.get(&header.kid).await?;
+                            let claims = verify_signature(token, &key)?;
+                            if claims.is_expired() {
+                                return Err(AuthError::Expired);
+                            }
+                            Ok(claims)
+                        }
+                        """#
+                    }
+                    case "db" lang="rust" start-line=18 highlight-lines="18..24" {
+                        source #"""
+                        pub async fn check_revocation(db: &PgPool, sub: &str) -> Result<bool> {
+                            let row = sqlx::query!("SELECT 1 AS hit FROM revocations WHERE sub = $1", sub)
+                                .fetch_optional(db)
+                                .await?;
+                            Ok(row.is_some())
+                        }
+                        """#
+                    }
+                }
+            }
+        }
+    }
+}
