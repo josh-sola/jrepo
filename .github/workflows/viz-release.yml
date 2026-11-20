@@ -152,14 +152,18 @@ jobs:
           cp viz/install.sh release/
           cd release && sha256sum viz-*.gz install.sh > SHA256SUMS
 
-      # gh is left off PATH: these files have no attestation until publish.
+      # Build a minimal PATH without gh: on ubuntu-latest gh lives in /usr/bin,
+      # and these artifacts have no attestation until publish.
       - name: Install from a local file server
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           root=$(mktemp -d)
-          mkdir -p "$root/www/viz-v$VERSION"
+          mkdir -p "$root/www/viz-v$VERSION" "$root/bin"
           cp release/* "$root/www/viz-v$VERSION/"
+          for tool in sh uname curl grep awk sort tail mktemp rm sha256sum mkdir gunzip gzip chmod mv readlink ln basename dirname cat; do
+            ln -s "$(command -v "$tool")" "$root/bin/$tool"
+          done
           python3 -m http.server 8765 --bind 127.0.0.1 --directory "$root/www" &
           server=$!
           trap 'kill "$server"' EXIT
@@ -167,7 +171,7 @@ jobs:
             curl -fs http://127.0.0.1:8765/ >/dev/null && break
             sleep 1
           done
-          env -i PATH=/usr/bin:/bin HOME="$root/home" VIZ_VERSION="$VERSION" \
+          env -i PATH="$root/bin" HOME="$root/home" VIZ_VERSION="$VERSION" \
             VIZ_DOWNLOAD_BASE=http://127.0.0.1:8765 \
             VIZ_BIN_DIR="$root/home/bin" XDG_DATA_HOME="$root/home/data" \
             sh viz/install.sh
@@ -197,7 +201,7 @@ jobs:
           name: viz-release
           path: release
 
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f2c6e65b025ff676d7c7 # v4.2.2
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release/viz-*.gz
