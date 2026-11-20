@@ -1,0 +1,57 @@
+viz v=1 title="Build Pipeline Benchmark Report" subtitle="Cargo & TypeScript incremental builds (M3 Max, 16-core)" width=0.64 height=0.84 {
+    scroll id="report" {
+        markdown """
+        # Executive Summary
+
+        We benchmarked cold, warm-cache, and single-file incremental builds across three toolchain configurations to isolate link-time and type-check bottlenecks before rolling out the new caching layer.
+        """
+
+        markdown id="finding" title="Key Finding" tone="warn" """
+        **Cold builds are still dominated by proc-macro expansion and LTO.** Warm incremental builds dropped by **68%**, but CI runners without a shared sccache layer still pay the full 41s cold penalty.
+        """
+
+        stat id="summary" {
+            item "cold" label="Cold Build" value="41.2s" delta="-14%" status="warn" sparkline="52,49,47,44,42,41"
+            item "warm" label="Warm Cache" value="11.8s" delta="-68%" status="ok" sparkline="37,31,24,18,14,12"
+            item "incr" label="1-File Edit" value="1.9s" delta="-74%" status="active" sparkline="7.4,6.1,4.8,3.2,2.4,1.9"
+        }
+
+        markdown """
+        ## 1. End-to-End Build Latency
+
+        Grouped horizontal bars compare `baseline` (current CI), `sccache` (remote compilation cache), and `sccache+lld` (cache plus parallel linker).
+        """
+
+        chart id="e2e-build" title="End-to-End Build Time by Scenario" type="hbar" x-labels="Cold CI,Warm Local,Single-File Edit,Test Binary" x-unit="seconds" value-labels=#true scale="build-sec" caption="Lower is better · median of 5 runs on macOS arm64" height=15 {
+            series "baseline" data="48.1,36.8,7.4,19.2"
+            series "sccache" data="43.5,14.2,2.6,9.8"
+            series "sccache+lld" data="41.2,11.8,1.9,6.4"
+        }
+
+        markdown """
+        ## 2. Phase Breakdown (Warm Cache)
+
+        Breaking down the warm-cache path highlights where remaining seconds go once crate artifacts are reused.
+        """
+
+        chart id="phase-breakdown" title="Warm Build Time by Compiler Phase" type="hbar" x-labels="Dep Graph,Proc Macros,Codegen,Linking" x-unit="seconds" value-labels=#true scale="build-sec" caption="Measured via cargo build --timings across workspace crates" height=14 {
+            series "baseline" data="3.2,8.4,16.1,9.1"
+            series "sccache+lld" data="2.9,3.1,4.2,1.6"
+        }
+
+        markdown """
+        ## 3. Frontend Type-Check & Bundle
+
+        TypeScript project references paired with incremental `.tsbuildinfo` artifacts eliminate redundant declaration emits.
+        """
+
+        chart id="ts-bench" title="TypeScript Workspace Timing" type="hbar" x-labels="Full Typecheck,Incremental Check,Prod Bundle" x-unit="seconds" value-labels=#true caption="pnpm workspace with 14 internal packages · median of 5 runs" height=13 {
+            series "tsc (clean)" data="22.4,9.8,15.6"
+            series "tsgo + refs" data="4.6,1.2,5.3"
+        }
+
+        markdown id="next-steps" title="Recommendation" tone="ok" """
+        Enable `sccache+lld` on all PR check runners and persist `.tsbuildinfo` in the build cache. Expected median PR feedback time drops from **48s to 12s**.
+        """
+    }
+}

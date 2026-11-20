@@ -1,0 +1,214 @@
+name: viz release
+
+on:
+  pull_request:
+    paths:
+      - viz/**
+      - .github/workflows/viz-release.yml
+  push:
+    branches: [main]
+    paths:
+      - viz/**
+      - .github/workflows/viz-release.yml
+
+# One run per ref at a time, so two merges cannot claim the same version.
+concurrency:
+  group: viz-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.publish.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: semver
+        uses: PaulHatch/semantic-version@5ae1354e589c5a67345fb2c6e65b025ff676d7c7 # v6.0.7
+        with:
+          tag_prefix: viz-v
+          change_path: viz .github/workflows/viz-release.yml
+          major_pattern: (MAJOR)
+          minor_pattern: (MINOR)
+          search_commit_body: true
+
+      # The action counts up from 0.0.0 when no viz-v tag exists, which would
+      # make the first release 0.0.1.
+      - id: version
+        env:
+          NEXT: ${{ steps.semver.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$(git tag --list 'viz-v*')" ]; then
+            version=0.1.0
+          else
+            version=$NEXT
+          fi
+          if [ "$EVENT" = pull_request ]; then
+            version="$version-pr.$PR"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Only the title counts: squash merges copy the PR description into the
+      # message body, where the marker may only be mentioned.
+      - id: publish
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          title=$(printf '%s\n' "$MESSAGE" | head -n 1)
+          case $title in
+            *'[skip release]'*) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - run: shellcheck viz/install.sh
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: viz-darwin-arm64
+            run_checks: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: viz-darwin-x64
+            run_checks: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: viz-linux-x64
+            run_checks: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: viz-linux-arm64
+            run_checks: false
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: viz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ensure Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Format, clippy, and test
+        if: matrix.run_checks
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Build release binary
+        env:
+          VIZ_BUILD_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p release
+          gzip -9 -c "target/${{ matrix.target }}/release/viz" > "release/${{ matrix.asset }}.gz"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: viz-bin-${{ matrix.asset }}
+          path: viz/release/${{ matrix.asset }}.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: viz-bin-*
+          path: release
+          merge-multiple: true
+
+      - name: Package checksums and installer
+        run: |
+          cp viz/install.sh release/
+          cd release && sha256sum viz-*.gz install.sh > SHA256SUMS
+
+      # gh is left off PATH: these files have no attestation until publish.
+      - name: Install from a local file server
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          root=$(mktemp -d)
+          mkdir -p "$root/www/viz-v$VERSION"
+          cp release/* "$root/www/viz-v$VERSION/"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$root/www" &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fs http://127.0.0.1:8765/ >/dev/null && break
+            sleep 1
+          done
+          env -i PATH=/usr/bin:/bin HOME="$root/home" VIZ_VERSION="$VERSION" \
+            VIZ_DOWNLOAD_BASE=http://127.0.0.1:8765 \
+            VIZ_BIN_DIR="$root/home/bin" XDG_DATA_HOME="$root/home/data" \
+            sh viz/install.sh
+          "$root/home/bin/viz" --version | grep -F "$VERSION"
+          "$root/home/bin/viz" check viz/examples/walkthrough.viz.kdl
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: viz-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [meta, package]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: viz-release
+          path: release
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f2c6e65b025ff676d7c7 # v4.2.2
+        with:
+          subject-path: |
+            release/viz-*.gz
+            release/install.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          gh release create "viz-v$VERSION" release/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "viz $VERSION" \
+            --notes "Install or upgrade with the curl command in viz/README.md, or run viz upgrade."

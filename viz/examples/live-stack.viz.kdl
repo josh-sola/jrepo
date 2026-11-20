@@ -1,0 +1,63 @@
+viz v=1 title="Live Rollout Monitor" subtitle="Cluster us-east-1 canary" width=0.76 height=0.80 {
+    state selected="api" highlight="api"
+
+    split direction="vertical" weights="1,3,2" {
+        stat id="kpis" title="Canary KPIs" {
+            item "rps" label="Throughput" value="4.8k/s" delta="+6.2%" status="ok" sparkline="38,41,44,46,48,47,49"
+            item "p99" label="P99 Latency" value="28.4ms" delta="-3.1ms" status="active" sparkline="36,34,32,31,30,29,28"
+            item "err" label="Error Rate" value="0.04%" delta="+0.01%" status="warn" sparkline="2,2,3,4,3,4,4"
+        }
+
+        split direction="horizontal" weights="3,2" {
+            tabs id="visuals" {
+                tab "Latency" {
+                    chart id="latency" title="Request Latency" type="line" x-labels="12:00,12:01,12:02,12:03,12:04" y-unit="ms" {
+                        series "p99" {
+                            point 34.0
+                            point 31.5
+                            point 29.8
+                            point 28.9
+                            point 28.4
+                        }
+                        series "p50" {
+                            point 9.2
+                            point 8.8
+                            point 8.5
+                            point 8.4
+                            point 8.1
+                        }
+                    }
+                }
+                tab "Throughput" {
+                    chart id="throughput" title="Requests by Pool" type="bar" x-labels="12:00,12:01,12:02,12:03,12:04" y-unit="k/s" {
+                        series "baseline" data="4.1,4.2,4.3,4.2,4.4"
+                        series "canary" data="0.4,0.5,0.5,0.6,0.6"
+                    }
+                }
+                tab "Topology" {
+                    graph id="mesh" title="Canary Mesh" direction="lr" {
+                        node "lb" label="Load Balancer" status="ok" group="edge"
+                        node "api" label="API Canary" sublabel="v2.14.0" status="active" group="compute" tooltip="Receiving 15% traffic"
+                        node "stable" label="API Stable" sublabel="v2.13.4" status="ok" group="compute"
+                        edge "lb" "api" label="15%" active=#true
+                        edge "lb" "stable" label="85%" active=#false
+                    }
+                }
+            }
+
+            table id="pods" title="Replica Health" {
+                columns "Pod" "Version" "State" "CPU"
+                row id="api" status="active" "api-canary-7c9d" "v2.14.0" "healthy" "42%"
+                row id="stable-1" status="ok" "api-stable-4a1f" "v2.13.4" "healthy" "38%"
+                row id="stable-2" status="warn" "api-stable-9b2e" "v2.13.4" "restarting" "81%"
+            }
+        }
+
+        log id="events" title="Rollout Stream" {
+            entry ts="12:00:04" level="info" source="controller" "Canary traffic shifted to 15%"
+            entry ts="12:01:19" level="debug" source="probe" "Readiness probe passed on api-canary-7c9d"
+            entry ts="12:02:45" level="warn" source="autoscaler" "api-stable-9b2e CPU crossed 80% threshold"
+            entry ts="12:04:01" level="info" source="metrics" "P99 latency steady at 28.4ms"
+        }
+    }
+}
