@@ -2,15 +2,20 @@ pub mod chart;
 pub mod graph;
 pub mod hit_test;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-use resvg::usvg::{Options, fontdb};
+use serde::Serialize;
+use usvg::{Options, fontdb};
 
-pub const INTER_TTF: &[u8] = include_bytes!("../../assets/fonts/Inter.ttf");
+use crate::model::{Node, StateMap};
+use crate::theme::Theme;
+
+pub const INTER_TTF: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
 pub const JETBRAINS_MONO_REGULAR_TTF: &[u8] =
-    include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+    include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 pub const JETBRAINS_MONO_BOLD_TTF: &[u8] =
-    include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
+    include_bytes!("../../../assets/fonts/JetBrainsMono-Bold.ttf");
 
 static FONTDB: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
 
@@ -146,19 +151,7 @@ impl HitMap {
                 && py >= target.y
                 && py <= target.y + target.h
             {
-                let mut parts = target.tooltip.lines();
-                let title = parts
-                    .next()
-                    .map(ToString::to_string)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| target.id.clone());
-                let lines = parts.map(ToString::to_string).collect();
-                return Some(HoverHit {
-                    id: Some(target.id.clone()),
-                    title,
-                    lines,
-                    anchor_px: (target.x + target.w * 0.5, target.y),
-                });
+                return Some(target_hover(target));
             }
         }
 
@@ -181,21 +174,13 @@ impl HitMap {
                             .iter()
                             .min_by(|a, b| (a.x_px - px).abs().total_cmp(&(b.x_px - px).abs()))
                     })?;
-                let suffix = y_unit
-                    .as_deref()
-                    .map(|u| format!(" {u}"))
-                    .unwrap_or_default();
-                let lines = bucket
-                    .values
-                    .iter()
-                    .map(|(name, v)| format!("{name}: {}{suffix}", fmt_metric(*v)))
-                    .collect();
-                Some(HoverHit {
-                    id: Some(bucket.id.clone()),
-                    title: bucket.x_label.clone(),
-                    lines,
-                    anchor_px: (bucket.x_px, py.clamp(plot_y.0, plot_y.1)),
-                })
+                Some(bucket_hover(
+                    &bucket.id,
+                    &bucket.x_label,
+                    &bucket.values,
+                    y_unit.as_deref(),
+                    (bucket.x_px, py.clamp(plot_y.0, plot_y.1)),
+                ))
             }
             ChartHoverIndex::HorizontalBuckets {
                 plot_x,
@@ -214,18 +199,13 @@ impl HitMap {
                             .iter()
                             .min_by(|a, b| (a.y_px - py).abs().total_cmp(&(b.y_px - py).abs()))
                     })?;
-                let suffix = unit.as_deref().map(|u| format!(" {u}")).unwrap_or_default();
-                let lines = bucket
-                    .values
-                    .iter()
-                    .map(|(name, v)| format!("{name}: {}{suffix}", fmt_metric(*v)))
-                    .collect();
-                Some(HoverHit {
-                    id: Some(bucket.id.clone()),
-                    title: bucket.y_label.clone(),
-                    lines,
-                    anchor_px: (px.clamp(plot_x.0, plot_x.1), bucket.y_px),
-                })
+                Some(bucket_hover(
+                    &bucket.id,
+                    &bucket.y_label,
+                    &bucket.values,
+                    unit.as_deref(),
+                    (px.clamp(plot_x.0, plot_x.1), bucket.y_px),
+                ))
             }
             ChartHoverIndex::Scatter {
                 plot_x,
@@ -247,21 +227,77 @@ impl HitMap {
                     .filter(|(_, d2)| *d2 <= MAX_DIST_SQ)
                     .min_by(|a, b| a.1.total_cmp(&b.1))?
                     .0;
-                let suffix = y_unit
-                    .as_deref()
-                    .map(|u| format!(" {u}"))
-                    .unwrap_or_default();
-                Some(HoverHit {
-                    id: Some(nearest.id.clone()),
-                    title: nearest.series.clone(),
-                    lines: vec![
-                        format!("x: {}", fmt_metric(nearest.x)),
-                        format!("y: {}{suffix}", fmt_metric(nearest.y)),
-                    ],
-                    anchor_px: (nearest.px, nearest.py),
-                })
+                Some(scatter_hover(nearest, y_unit.as_deref()))
             }
         }
+    }
+
+    /// Later entries are drawn on top. Tooltips carry the TUI hover card text.
+    pub fn hits(&self, target_kind: HitKind) -> Vec<Hit> {
+        let mut hits: Vec<Hit> = self
+            .targets
+            .iter()
+            .map(|t| Hit {
+                id: t.id.clone(),
+                kind: target_kind,
+                x: t.x,
+                y: t.y,
+                w: t.w,
+                h: t.h,
+                tooltip: Some(target_hover(t).card_text()),
+                selectable: true,
+            })
+            .collect();
+
+        let bucket = |id: &str, (x, y, w, h): (f32, f32, f32, f32), hover: HoverHit| Hit {
+            id: id.to_string(),
+            kind: HitKind::Bucket,
+            x,
+            y,
+            w,
+            h,
+            tooltip: Some(hover.card_text()),
+            selectable: false,
+        };
+        match &self.chart_hover {
+            None => {}
+            Some(ChartHoverIndex::Buckets {
+                plot_y,
+                buckets,
+                y_unit,
+                ..
+            }) => {
+                let (top, bottom) = (plot_y.0.min(plot_y.1), plot_y.0.max(plot_y.1));
+                for b in buckets {
+                    let hover =
+                        bucket_hover(&b.id, &b.x_label, &b.values, y_unit.as_deref(), (0.0, 0.0));
+                    let rect = (b.x_min, top, b.x_max - b.x_min, bottom - top);
+                    hits.push(bucket(&b.id, rect, hover));
+                }
+            }
+            Some(ChartHoverIndex::HorizontalBuckets {
+                plot_x,
+                buckets,
+                unit,
+                ..
+            }) => {
+                let (left, right) = (plot_x.0.min(plot_x.1), plot_x.0.max(plot_x.1));
+                for b in buckets {
+                    let hover =
+                        bucket_hover(&b.id, &b.y_label, &b.values, unit.as_deref(), (0.0, 0.0));
+                    let rect = (left, b.y_min, right - left, b.y_max - b.y_min);
+                    hits.push(bucket(&b.id, rect, hover));
+                }
+            }
+            Some(ChartHoverIndex::Scatter { points, y_unit, .. }) => {
+                const R: f32 = 8.0;
+                for pt in points {
+                    let rect = (pt.px - R, pt.py - R, R * 2.0, R * 2.0);
+                    hits.push(bucket(&pt.id, rect, scatter_hover(pt, y_unit.as_deref())));
+                }
+            }
+        }
+        hits
     }
 
     pub fn transformed(&self, t: FitTransform) -> Self {
@@ -375,6 +411,188 @@ pub struct SvgBundle {
     pub width: u32,
     pub height: u32,
     pub hit_map: HitMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HitKind {
+    Node,
+    Group,
+    Edge,
+    Element,
+    Bucket,
+}
+
+/// One hoverable rectangle, in the same pixel space as the SVG it came with.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Hit {
+    pub id: String,
+    pub kind: HitKind,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub tooltip: Option<String>,
+    pub selectable: bool,
+}
+
+impl HoverHit {
+    pub fn card_text(&self) -> String {
+        let mut text = self.title.clone();
+        for line in &self.lines {
+            text.push('\n');
+            text.push_str(line);
+        }
+        text
+    }
+}
+
+fn target_hover(target: &HitTarget) -> HoverHit {
+    let mut parts = target.tooltip.lines();
+    let title = parts
+        .next()
+        .map(ToString::to_string)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| target.id.clone());
+    let lines = parts.map(ToString::to_string).collect();
+    HoverHit {
+        id: Some(target.id.clone()),
+        title,
+        lines,
+        anchor_px: (target.x + target.w * 0.5, target.y),
+    }
+}
+
+fn bucket_hover(
+    id: &str,
+    label: &str,
+    values: &[(String, f64)],
+    unit: Option<&str>,
+    anchor_px: (f32, f32),
+) -> HoverHit {
+    let suffix = unit.map(|u| format!(" {u}")).unwrap_or_default();
+    let lines = values
+        .iter()
+        .map(|(name, v)| format!("{name}: {}{suffix}", fmt_metric(*v)))
+        .collect();
+    HoverHit {
+        id: Some(id.to_string()),
+        title: label.to_string(),
+        lines,
+        anchor_px,
+    }
+}
+
+fn scatter_hover(point: &ScatterPoint, y_unit: Option<&str>) -> HoverHit {
+    let suffix = y_unit.map(|u| format!(" {u}")).unwrap_or_default();
+    HoverHit {
+        id: Some(point.id.clone()),
+        title: point.series.clone(),
+        lines: vec![
+            format!("x: {}", fmt_metric(point.x)),
+            format!("y: {}{suffix}", fmt_metric(point.y)),
+        ],
+        anchor_px: (point.px, point.py),
+    }
+}
+
+/// The pane's selected id and highlighted tokens.
+pub fn selection<'a>(
+    state: &'a StateMap,
+    select_key: Option<&str>,
+    highlight_key: Option<&str>,
+) -> (Option<&'a str>, Vec<String>) {
+    let selected = state
+        .get(select_key.unwrap_or("selected"))
+        .and_then(|v| v.as_str());
+    let highlighted = state
+        .get(highlight_key.unwrap_or("highlight"))
+        .map(|v| v.as_list())
+        .unwrap_or_default();
+    (selected, highlighted)
+}
+
+/// Returns `None` unless `node` is a graph, chart, or svg. Charts get no title;
+/// the pane header shows it.
+pub fn render_node(
+    node: &Node,
+    state: &StateMap,
+    scales: &BTreeMap<String, f64>,
+    theme: &Theme,
+    width: u32,
+    height: u32,
+) -> Option<Result<SvgBundle, String>> {
+    match node {
+        Node::Graph {
+            direction,
+            nodes,
+            edges,
+            highlight_key,
+            select_key,
+            ..
+        } => {
+            let (selected, highlighted) =
+                selection(state, select_key.as_deref(), highlight_key.as_deref());
+            Some(Ok(graph::render_graph_svg(
+                &graph::GraphRenderInput {
+                    nodes,
+                    edges,
+                    direction: *direction,
+                    selected,
+                    highlighted: &highlighted,
+                },
+                theme,
+                width,
+                height,
+            )))
+        }
+        Node::Chart {
+            id,
+            chart_type,
+            x_labels,
+            x_unit,
+            y_unit,
+            value_labels,
+            scale,
+            series,
+            ..
+        } => Some(chart::render_chart_svg(
+            &chart::ChartRenderInput {
+                id,
+                title: None,
+                chart_type: *chart_type,
+                x_labels,
+                x_unit: x_unit.as_deref(),
+                y_unit: y_unit.as_deref(),
+                value_labels: *value_labels,
+                max_override: scale.as_deref().and_then(|s| scales.get(s).copied()),
+                series,
+            },
+            theme,
+            width,
+            height,
+        )),
+        Node::Svg {
+            source,
+            tooltips,
+            select_key,
+            highlight_key,
+            ..
+        } => {
+            let (selected, highlighted) =
+                selection(state, select_key.as_deref(), highlight_key.as_deref());
+            Some(hit_test::prepare_custom_svg(
+                source,
+                tooltips,
+                selected,
+                &highlighted,
+                theme,
+                width,
+                height,
+            ))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn escape_xml(input: &str) -> String {

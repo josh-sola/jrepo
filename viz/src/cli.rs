@@ -16,17 +16,22 @@ use crate::model::{
 use crate::render::raster::rasterize_svg;
 use crate::render::{FollowTarget, run_tui};
 use crate::rex::{
-    FloatingLayerRequest, SplitDir, SplitRequest, SystemCommandRunner, close_layer,
+    CommandRunner, FloatingLayerRequest, SplitDir, SplitRequest, SystemCommandRunner, close_layer,
     open_floating_layer, open_split,
 };
 use crate::session::{
     RexMeta, append_events, create_session, default_base_dir, events_path, list_sessions,
     load_meta, load_store, load_store_with_offset, update_meta,
 };
+use crate::share::{
+    DEFAULT_PLANHUB_URL, ShareRequest, post_share, request_body, share_from_file,
+    share_from_session,
+};
 use crate::store::{Store, compute_chart_scales, resolve_code_file};
 use crate::svg::chart::{ChartRenderInput, render_chart_svg};
 use crate::svg::graph::{GraphRenderInput, render_graph_svg};
 use crate::svg::hit_test::prepare_custom_svg;
+use crate::svg::selection;
 use crate::theme::{Theme, ThemeMode};
 use crate::upgrade::{VERSION, run_upgrade};
 
@@ -253,6 +258,23 @@ enum Command {
         #[arg(long)]
         step: Option<usize>,
     },
+    /// Upload a document or session (with its history) to planhub and print the link
+    Share {
+        /// A .viz.kdl or .json file, or a session ID
+        target: String,
+        /// Override the plan title (defaults to the document title)
+        #[arg(long)]
+        title: Option<String>,
+        /// Hide the plan from planhub's public list
+        #[arg(long)]
+        private: bool,
+        /// Share a session's current state without its event history
+        #[arg(long)]
+        no_history: bool,
+        /// Print planhub's full JSON response instead of the URL
+        #[arg(long)]
+        json: bool,
+    },
     /// Upgrade viz to the latest published GitHub release
     Upgrade {
         /// Only report the installed and latest versions
@@ -380,6 +402,13 @@ pub fn run() -> miette::Result<()> {
             pane,
             step,
         }),
+        Command::Share {
+            target,
+            title,
+            private,
+            no_history,
+            json,
+        } => cmd_share(&target, title.as_deref(), private, no_history, json),
         Command::Upgrade { check } => {
             let env: HashMap<String, String> = std::env::vars().collect();
             let runner = SystemCommandRunner;
@@ -631,6 +660,47 @@ fn cmd_export(id: &str, out: Option<PathBuf>, json: bool) -> miette::Result<()> 
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to write {}", path.display()))?,
         None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+fn cmd_share(
+    target: &str,
+    title: Option<&str>,
+    private: bool,
+    no_history: bool,
+    json: bool,
+) -> miette::Result<()> {
+    let path = Path::new(target);
+    let share = if path.is_file() {
+        share_from_file(path)?
+    } else {
+        share_from_session(&default_base_dir()?, target, no_history)?
+    };
+
+    let runner = SystemCommandRunner;
+    let host = runner
+        .run("hostname", &["-s"])
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    let body = request_body(
+        &share,
+        &ShareRequest {
+            title,
+            private,
+            host: host.as_deref(),
+        },
+    )?;
+    let planhub = std::env::var("VIZ_PLANHUB_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PLANHUB_URL.to_string());
+    let resp = post_share(&runner, &planhub, &body).map_err(|e| miette!("{e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).into_diagnostic()?);
+    } else {
+        println!("{}", resp["url"].as_str().unwrap_or_default());
     }
     Ok(())
 }
@@ -1086,10 +1156,8 @@ fn cmd_render(args: RenderArgs) -> miette::Result<()> {
             select_key,
             ..
         } => {
-            let sel_key = select_key.as_deref().unwrap_or("selected");
-            let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-            let selected = state.get(sel_key).and_then(|v| v.as_str());
-            let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+            let (selected, highlighted) =
+                selection(&state, select_key.as_deref(), highlight_key.as_deref());
             (
                 id.as_str(),
                 render_graph_svg(
@@ -1146,10 +1214,8 @@ fn cmd_render(args: RenderArgs) -> miette::Result<()> {
             highlight_key,
             ..
         } => {
-            let sel_key = select_key.as_deref().unwrap_or("selected");
-            let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-            let selected = state.get(sel_key).and_then(|v| v.as_str());
-            let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+            let (selected, highlighted) =
+                selection(&state, select_key.as_deref(), highlight_key.as_deref());
             let bundle = prepare_custom_svg(
                 source,
                 tooltips,

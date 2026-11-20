@@ -47,7 +47,7 @@ pubsub-install:
 
 # Run viz's format, lint, and test checks.
 viz:
-    cd viz && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+    cd viz && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 
 # Install the viz binary with cargo.
 viz-install:

@@ -286,6 +286,20 @@ pub fn inline_external_code(doc: &mut Document, base_dir: Option<&Path>) {
     inline_external_code_node(&mut doc.root, base_dir);
 }
 
+pub fn inline_event_code(event: &mut Event, base_dir: Option<&Path>) {
+    match event {
+        Event::Init(doc) => inline_external_code(doc, base_dir),
+        Event::Replace { node, .. } => inline_external_code_node(node, base_dir),
+        Event::SetState(_)
+        | Event::SetNode { .. }
+        | Event::SetEdge { .. }
+        | Event::SetStat { .. }
+        | Event::LogAppend { .. }
+        | Event::ChartAppend { .. }
+        | Event::Close => {}
+    }
+}
+
 fn inline_external_code_node(node: &mut Node, base_dir: Option<&Path>) {
     match node {
         Node::Split { children, .. } | Node::Scroll { children, .. } => {

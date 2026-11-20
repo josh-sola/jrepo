@@ -45,7 +45,7 @@ use crate::store::{Store, compute_chart_scales, resolve_code_file};
 use crate::svg::chart::{ChartRenderInput, render_chart_svg};
 use crate::svg::graph::{GraphRenderInput, render_graph_svg};
 use crate::svg::hit_test::prepare_custom_svg;
-use crate::svg::{HitMap, HoverHit, SvgBundle};
+use crate::svg::{HitMap, HoverHit, SvgBundle, selection};
 use crate::theme::{Theme, ThemeMode, resolve_theme_mode};
 
 struct GraphicPaneMeta<'a> {
@@ -711,10 +711,8 @@ impl App {
                 ..
             } => {
                 let focused = self.register_focus(id, area, PaneKind::Graphic);
-                let sel_key = select_key.as_deref().unwrap_or("selected");
-                let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-                let selected = state.get(sel_key).and_then(|v| v.as_str());
-                let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+                let (selected, highlighted) =
+                    selection(state, select_key.as_deref(), highlight_key.as_deref());
 
                 let content_hash = hash_render_key(&(
                     "graph",
@@ -831,10 +829,8 @@ impl App {
                 ..
             } => {
                 let focused = self.register_focus(id, area, PaneKind::Graphic);
-                let sel_key = select_key.as_deref().unwrap_or("selected");
-                let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-                let selected = state.get(sel_key).and_then(|v| v.as_str());
-                let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+                let (selected, highlighted) =
+                    selection(state, select_key.as_deref(), highlight_key.as_deref());
 
                 let content_hash =
                     hash_render_key(&("svg", id, source, tooltips, selected, &highlighted));
@@ -953,10 +949,8 @@ impl App {
                 select_key,
                 ..
             } => {
-                let sel_key = select_key.as_deref().unwrap_or("selected");
-                let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-                let selected = state.get(sel_key).and_then(|v| v.as_str());
-                let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+                let (selected, highlighted) =
+                    selection(state, select_key.as_deref(), highlight_key.as_deref());
                 let content_hash = hash_render_key(&(
                     "graph",
                     id,
@@ -1062,10 +1056,8 @@ impl App {
                 highlight_key,
                 ..
             } => {
-                let sel_key = select_key.as_deref().unwrap_or("selected");
-                let hl_key = highlight_key.as_deref().unwrap_or("highlight");
-                let selected = state.get(sel_key).and_then(|v| v.as_str());
-                let highlighted = state.get(hl_key).map(|v| v.as_list()).unwrap_or_default();
+                let (selected, highlighted) =
+                    selection(state, select_key.as_deref(), highlight_key.as_deref());
                 let content_hash =
                     hash_render_key(&("svg", id, source, tooltips, selected, &highlighted));
                 let theme = self.theme;

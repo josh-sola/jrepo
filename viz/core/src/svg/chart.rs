@@ -1,24 +1,133 @@
 use std::sync::OnceLock;
 
+use ab_glyph::{Font, FontRef, ScaleFont};
+use plotters::coord::Shift;
 use plotters::prelude::*;
-use plotters::style::register_font;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 use crate::model::{ChartSeries, ChartType};
 use crate::svg::{
-    ChartBucket, ChartHoverIndex, HitMap, HorizontalChartBucket, INTER_TTF,
-    JETBRAINS_MONO_BOLD_TTF, ScatterPoint, SvgBundle,
+    ChartBucket, ChartHoverIndex, HitMap, HorizontalChartBucket, INTER_TTF, ScatterPoint, SvgBundle,
 };
 use crate::theme::{Theme, ThemeColor, parse_hex_rgb};
+
+/// Font family written into chart SVGs; browsers and resvg both resolve it to
+/// the bundled Inter.
+const SANS: &str = "Inter, sans-serif";
+
+/// Plotters measures text through the DOM on wasm32, so the legend is laid out
+/// here with the same arithmetic as its ab_glyph backend, on every target.
+const LEGEND_FONT_PX: f64 = 11.0;
 
 static PLOTTERS_FONTS: OnceLock<()> = OnceLock::new();
 
 fn ensure_plotters_fonts() {
     PLOTTERS_FONTS.get_or_init(|| {
-        let _ = register_font("sans-serif", FontStyle::Normal, INTER_TTF);
-        let _ = register_font("sans-serif", FontStyle::Bold, JETBRAINS_MONO_BOLD_TTF);
-        let _ = register_font("Inter", FontStyle::Normal, INTER_TTF);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::svg::JETBRAINS_MONO_BOLD_TTF;
+            use plotters::style::register_font;
+            let _ = register_font(SANS, FontStyle::Normal, INTER_TTF);
+            let _ = register_font(SANS, FontStyle::Bold, JETBRAINS_MONO_BOLD_TTF);
+        }
     });
+}
+
+fn inter() -> &'static FontRef<'static> {
+    static INTER: OnceLock<FontRef<'static>> = OnceLock::new();
+    INTER.get_or_init(|| FontRef::try_from_slice(INTER_TTF).expect("bundled Inter.ttf parses"))
+}
+
+fn text_width(text: &str, size: f64) -> i32 {
+    let font = inter().as_scaled(size as f32);
+    let mut width = 0f32;
+    let mut prev = None;
+    for c in text.chars() {
+        let glyph = font.glyph_id(c);
+        width += font.h_advance(glyph);
+        if let Some(p) = prev {
+            width += font.kern(p, glyph);
+        }
+        prev = Some(glyph);
+    }
+    width as i32
+}
+
+#[derive(Clone, Copy)]
+enum LegendMark {
+    Line,
+    Swatch,
+    Dot,
+}
+
+struct LegendStyle {
+    lower: bool,
+    background: ShapeStyle,
+    border: ShapeStyle,
+    color: RGBColor,
+}
+
+/// Copies the layout of plotters' `configure_series_labels`.
+fn draw_legend<DB: DrawingBackend>(
+    area: &DrawingArea<DB, Shift>,
+    entries: &[(String, RGBColor, LegendMark)],
+    style: &LegendStyle,
+) -> Result<(), String> {
+    const MARGIN: i32 = 10;
+    const MARK_W: i32 = 30;
+    let line_h = (LEGEND_FONT_PX / 1.24) as i32;
+    let line_y = |i: usize| (i as f64 * LEGEND_FONT_PX * 1.25).round() as i32;
+
+    let text_w = entries
+        .iter()
+        .map(|(label, _, _)| text_width(label, LEGEND_FONT_PX))
+        .max()
+        .unwrap_or(0);
+    let text_h = entries
+        .len()
+        .checked_sub(1)
+        .map_or(0, |last| line_y(last) + line_h);
+    let w = text_w.max(0) + MARK_W + MARGIN * 2;
+    let h = text_h + MARGIN * 2;
+
+    let (area_w, area_h) = area.dim_in_pixel();
+    let x = area_w as i32 - w - 5;
+    let y = if style.lower {
+        area_h as i32 - h - 5
+    } else {
+        5
+    };
+
+    let err = |e: DrawingAreaErrorKind<DB::ErrorType>| format!("plotters legend draw failed: {e}");
+    area.draw(&Rectangle::new(
+        [(x, y), (x + w, y + h)],
+        style.background.filled(),
+    ))
+    .map_err(err)?;
+    area.draw(&Rectangle::new([(x, y), (x + w, y + h)], style.border))
+        .map_err(err)?;
+    let font = (SANS, LEGEND_FONT_PX).into_font().color(&style.color);
+    for (i, (label, _, _)) in entries.iter().enumerate() {
+        let pos = (x + MARK_W + MARGIN, y + MARGIN + line_y(i));
+        area.draw(&Text::new(label.as_str(), pos, font.clone()))
+            .map_err(err)?;
+    }
+    for (i, (_, color, mark)) in entries.iter().enumerate() {
+        let (mx, my) = (x + MARGIN, y + MARGIN + line_y(i) + line_h / 2);
+        match mark {
+            LegendMark::Line => area.draw(&PathElement::new(
+                vec![(mx, my), (mx + 14, my)],
+                color.stroke_width(2),
+            )),
+            LegendMark::Swatch => area.draw(&Rectangle::new(
+                [(mx, my - 5), (mx + 14, my + 5)],
+                color.filled(),
+            )),
+            LegendMark::Dot => area.draw(&Circle::new((mx + 7, my), 4, color.filled())),
+        }
+        .map_err(err)?;
+    }
+    Ok(())
 }
 
 fn to_rgb(color: ThemeColor) -> RGBColor {
@@ -100,7 +209,7 @@ pub fn render_chart_svg(
             .x_label_area_size(34)
             .y_label_area_size(52);
         if let Some(t) = title {
-            builder.caption(t, ("sans-serif", 16).into_font().color(&to_rgb(theme.fg)));
+            builder.caption(t, (SANS, 16).into_font().color(&to_rgb(theme.fg)));
         }
 
         let mut chart = builder
@@ -113,7 +222,7 @@ pub fn render_chart_svg(
             .axis_style(to_rgb(theme.border))
             .bold_line_style(to_rgb(theme.border).mix(0.45))
             .light_line_style(to_rgb(theme.border).mix(0.18))
-            .label_style(("sans-serif", 11).into_font().color(&to_rgb(theme.muted)))
+            .label_style((SANS, 11).into_font().color(&to_rgb(theme.muted)))
             .x_label_formatter(&|x| {
                 if chart_type == ChartType::Scatter {
                     format!("{x:.1}")
@@ -139,6 +248,7 @@ pub fn render_chart_svg(
             .draw()
             .map_err(|e| format!("plotters mesh draw failed: {e}"))?;
 
+        let mut legend = Vec::with_capacity(series.len());
         match chart_type {
             ChartType::Line => {
                 for (s_idx, s) in series.iter().enumerate() {
@@ -151,11 +261,8 @@ pub fn render_chart_svg(
                         .collect();
                     chart
                         .draw_series(LineSeries::new(pts.iter().copied(), color.stroke_width(2)))
-                        .map_err(|e| format!("plotters line draw failed: {e}"))?
-                        .label(s.name.clone())
-                        .legend(move |(x, y)| {
-                            PathElement::new(vec![(x, y), (x + 14, y)], color.stroke_width(2))
-                        });
+                        .map_err(|e| format!("plotters line draw failed: {e}"))?;
+                    legend.push((s.name.clone(), color, LegendMark::Line));
                     chart
                         .draw_series(
                             pts.iter()
@@ -179,11 +286,8 @@ pub fn render_chart_svg(
                             AreaSeries::new(pts.iter().copied(), baseline, color.mix(0.24))
                                 .border_style(color.stroke_width(2)),
                         )
-                        .map_err(|e| format!("plotters area draw failed: {e}"))?
-                        .label(s.name.clone())
-                        .legend(move |(x, y)| {
-                            Rectangle::new([(x, y - 5), (x + 14, y + 5)], color.filled())
-                        });
+                        .map_err(|e| format!("plotters area draw failed: {e}"))?;
+                    legend.push((s.name.clone(), color, LegendMark::Swatch));
                 }
             }
             ChartType::Bar => {
@@ -206,11 +310,8 @@ pub fn render_chart_svg(
                             };
                             Rectangle::new([(x0, hi), (x1, lo)], color.filled())
                         }))
-                        .map_err(|e| format!("plotters bar draw failed: {e}"))?
-                        .label(s.name.clone())
-                        .legend(move |(x, y)| {
-                            Rectangle::new([(x, y - 5), (x + 14, y + 5)], color.filled())
-                        });
+                        .map_err(|e| format!("plotters bar draw failed: {e}"))?;
+                    legend.push((s.name.clone(), color, LegendMark::Swatch));
                 }
             }
             ChartType::Scatter => {
@@ -221,23 +322,24 @@ pub fn render_chart_svg(
                             let x = p.x.unwrap_or(i as f64);
                             Circle::new((x, p.y), 4, color.filled())
                         }))
-                        .map_err(|e| format!("plotters scatter draw failed: {e}"))?
-                        .label(s.name.clone())
-                        .legend(move |(x, y)| Circle::new((x + 7, y), 4, color.filled()));
+                        .map_err(|e| format!("plotters scatter draw failed: {e}"))?;
+                    legend.push((s.name.clone(), color, LegendMark::Dot));
                 }
             }
             ChartType::HBar => unreachable!("handled above"),
         }
 
         if series.len() > 1 || series.first().is_some_and(|s| !s.name.is_empty()) {
-            chart
-                .configure_series_labels()
-                .position(SeriesLabelPosition::UpperRight)
-                .background_style(to_rgb(theme.surface).mix(0.9))
-                .border_style(to_rgb(theme.border))
-                .label_font(("sans-serif", 11).into_font().color(&to_rgb(theme.fg)))
-                .draw()
-                .map_err(|e| format!("plotters legend draw failed: {e}"))?;
+            draw_legend(
+                &chart.plotting_area().strip_coord_spec(),
+                &legend,
+                &LegendStyle {
+                    lower: false,
+                    background: to_rgb(theme.surface).mix(0.9).into(),
+                    border: to_rgb(theme.border).into(),
+                    color: to_rgb(theme.fg),
+                },
+            )?;
         }
 
         let (x_px_range, y_px_range) = chart.plotting_area().get_pixel_range();
@@ -395,7 +497,7 @@ fn render_hbar_svg(
             .x_label_area_size(x_label_h)
             .y_label_area_size(y_label_w);
         if let Some(t) = input.title {
-            builder.caption(t, ("sans-serif", 16).into_font().color(&to_rgb(theme.fg)));
+            builder.caption(t, (SANS, 16).into_font().color(&to_rgb(theme.fg)));
         }
 
         let mut chart = builder
@@ -425,8 +527,8 @@ fn render_hbar_svg(
             .light_line_style(to_rgb(theme.border).mix(0.18))
             .disable_y_mesh()
             .y_labels(max_len * 2 + 1)
-            .label_style(("sans-serif", 11).into_font().color(&to_rgb(theme.muted)))
-            .axis_desc_style(("sans-serif", 11).into_font().color(&to_rgb(theme.muted)))
+            .label_style((SANS, 11).into_font().color(&to_rgb(theme.muted)))
+            .axis_desc_style((SANS, 11).into_font().color(&to_rgb(theme.muted)))
             .y_label_formatter(&y_fmt)
             .x_label_formatter(&x_fmt);
         if let Some(u) = unit {
@@ -439,6 +541,7 @@ fn render_hbar_svg(
         let group_h = 0.72f64;
         let bar_h = group_h / n_series;
         let label_offset = (x_max - x_min) * 0.015;
+        let mut legend = Vec::with_capacity(series.len());
 
         for (s_idx, s) in series.iter().enumerate() {
             let color = series_color(s, s_idx, theme);
@@ -455,14 +558,11 @@ fn render_hbar_svg(
                     };
                     Rectangle::new([(lo, y1), (hi, y0)], color.filled())
                 }))
-                .map_err(|e| format!("plotters hbar draw failed: {e}"))?
-                .label(s.name.clone())
-                .legend(move |(x, y)| {
-                    Rectangle::new([(x, y - 5), (x + 14, y + 5)], color.filled())
-                });
+                .map_err(|e| format!("plotters hbar draw failed: {e}"))?;
+            legend.push((s.name.clone(), color, LegendMark::Swatch));
 
             if input.value_labels {
-                let label_style = ("sans-serif", 11)
+                let label_style = (SANS, 11)
                     .into_font()
                     .color(&to_rgb(theme.fg))
                     .pos(Pos::new(HPos::Left, VPos::Center));
@@ -479,14 +579,16 @@ fn render_hbar_svg(
         }
 
         if series.len() > 1 || series.first().is_some_and(|s| !s.name.is_empty()) {
-            chart
-                .configure_series_labels()
-                .position(SeriesLabelPosition::LowerRight)
-                .background_style(to_rgb(theme.surface).mix(0.92))
-                .border_style(to_rgb(theme.border))
-                .label_font(("sans-serif", 11).into_font().color(&to_rgb(theme.fg)))
-                .draw()
-                .map_err(|e| format!("plotters hbar legend failed: {e}"))?;
+            draw_legend(
+                &chart.plotting_area().strip_coord_spec(),
+                &legend,
+                &LegendStyle {
+                    lower: true,
+                    background: to_rgb(theme.surface).mix(0.92).into(),
+                    border: to_rgb(theme.border).into(),
+                    color: to_rgb(theme.fg),
+                },
+            )?;
         }
 
         let (x_px_range, y_px_range) = chart.plotting_area().get_pixel_range();

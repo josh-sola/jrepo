@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use resvg::usvg;
-
 use crate::svg::{FitTransform, HitMap, HitTarget, SvgBundle, compute_fit_transform, usvg_options};
 use crate::theme::Theme;
 
@@ -108,6 +106,24 @@ pub fn custom_svg_fit_transform(
         size.height(),
         target_w,
         target_h,
+    ))
+}
+
+/// Wraps a custom SVG in a `target_w`x`target_h` root that scales it the way
+/// `compute_fit_transform` does (centered, aspect kept), so the hit map from
+/// `prepare_custom_svg` lines up with the SVG as a browser draws it.
+pub fn fit_custom_svg(svg: &str, target_w: u32, target_h: u32) -> Result<String, String> {
+    let tree = usvg::Tree::from_str(svg, &usvg_options())
+        .map_err(|e| format!("failed to parse SVG with usvg: {e}"))?;
+    let size = tree.size();
+    let doc = roxmltree::Document::parse(svg).map_err(|e| format!("invalid SVG XML: {e}"))?;
+    let inner = &svg[doc.root_element().range()];
+    Ok(format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{tw}" height="{th}" viewBox="0 0 {sw} {sh}">{inner}</svg>"#,
+        tw = target_w.max(1),
+        th = target_h.max(1),
+        sw = size.width(),
+        sh = size.height(),
     ))
 }
 

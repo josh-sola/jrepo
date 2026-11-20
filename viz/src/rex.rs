@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -6,6 +7,12 @@ use crate::theme::ThemeMode;
 
 pub trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String>;
+
+    /// Defaults to an error, so runners that never pipe stdin need not implement it.
+    fn run_with_stdin(&self, program: &str, args: &[&str], stdin: &str) -> Result<String, String> {
+        let _ = (args, stdin);
+        Err(format!("this runner cannot pipe stdin to `{program}`"))
+    }
 }
 
 pub struct SystemCommandRunner;
@@ -16,6 +23,32 @@ impl CommandRunner for SystemCommandRunner {
             .args(args)
             .output()
             .map_err(|e| format!("failed to run `{program}`: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "`{program}` exited with {}: {}",
+                output.status,
+                stderr.trim()
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|e| format!("`{program}` produced non-UTF-8 output: {e}"))
+    }
+
+    fn run_with_stdin(&self, program: &str, args: &[&str], stdin: &str) -> Result<String, String> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to run `{program}`: {e}"))?;
+        let mut pipe = child.stdin.take().expect("stdin is piped");
+        let output = std::thread::scope(|scope| {
+            scope.spawn(move || pipe.write_all(stdin.as_bytes()));
+            child.wait_with_output()
+        })
+        .map_err(|e| format!("failed to run `{program}`: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(

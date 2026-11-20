@@ -77,6 +77,21 @@ viz check examples/walkthrough.viz.kdl
 viz close "$ID"
 ```
 
+Share a document or session on planhub as a web page (prints the URL on stdout):
+
+```sh
+viz share examples/walkthrough.viz.kdl
+viz share "$ID"
+viz share "$ID" --no-history --title "Deploy, final state" --private
+viz share "$ID" --json               # print planhub's full response
+```
+
+A session share carries its event history, and the page gets a timeline to
+scrub through it. Shares over 5 MB are refused before upload; `--no-history`
+sends only the current state. Links open for anyone on the Sola tailnet;
+`--private` hides the plan from planhub's public list. `VIZ_PLANHUB_URL`
+overrides the server (default `https://planhub-sola-internal-toy.tail67f40b.ts.net`).
+
 ## Where data lives
 
 `$VIZ_DIR` overrides the session directory. Without it, `viz` stores sessions in
