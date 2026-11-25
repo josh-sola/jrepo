@@ -8,6 +8,7 @@ import pkg from '../package.json' with { type: 'json' };
 import { loadConfig, toDefinitions, type Config } from './config.ts';
 import { createDaemonRuntime, createDirectRuntime } from './connect.ts';
 import { connectionsFile, readConnections } from './connection.ts';
+import { clearDaemonFromBeforeBoot } from './daemon-recovery.ts';
 import { describeServer, describeServers, describeTool } from './describe.ts';
 import { applyEnv, restrictEnv } from './env.ts';
 import { ServerError, UsageError, errorMessage } from './errors.ts';
@@ -64,6 +65,7 @@ const withRuntime = async (
     readConnections(stateFile),
     selected,
   );
+  if (daemon) clearDaemonFromBeforeBoot(process.env);
   applyEnv(restrictEnv(process.env));
   // mcporter can print server logs to stdout, which would corrupt the result.
   const restoreStdout = process.stdout.write;
@@ -175,6 +177,7 @@ const guide = async (): Promise<number> => {
 };
 
 const daemon = async (subcommand: 'stop' | 'status'): Promise<number> => {
+  clearDaemonFromBeforeBoot(process.env);
   await handleDaemonCli([subcommand], { configPath: '', configExplicit: true });
   return 0;
 };

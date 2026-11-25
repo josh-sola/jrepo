@@ -74,7 +74,8 @@ headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
 - A leading `~` in `args` and `cwd` means your home directory.
 - `cwd` defaults to the folder that holds the config file.
 - Servers start on first use and stay warm for 10 minutes after the last call.
-  `cm` starts a small background process to hold them.
+  `cm` starts a small background process to hold them. After a reboot, `cm`
+  deletes the old process's files and starts a new one.
 - A server sees only `PATH`, `HOME`, `XDG_*` and what `env` sets.
 
 ## Commands
