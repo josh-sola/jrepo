@@ -444,6 +444,17 @@ describe('daemon', () => {
     expect(run('return 2').json).toEqual({ ok: true, value: 2 });
     expect(cm(['daemon', 'status']).stdout).toMatch(/Daemon pid \d+/);
   });
+
+  it('starts a new daemon after a reboot left the old one behind', () => {
+    expect(cm(['daemon', 'stop']).status).toBe(0);
+    const daemonDir = path.join(dir, 'd', 'daemon');
+    fs.writeFileSync(
+      path.join(daemonDir, 'user.json'),
+      JSON.stringify({ pid: 999_999, protocolVersion: 3, startedAt: 1 }),
+    );
+    fs.writeFileSync(path.join(daemonDir, 'user.sock'), '');
+    expect(run('return 3').json).toEqual({ ok: true, value: 3 });
+  });
 });
 
 describe('setup', () => {
